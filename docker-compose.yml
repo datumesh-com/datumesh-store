@@ -1,0 +1,21 @@
+# Local development database: `docker compose up -d`, then
+#   export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+#   cargo run -p datumesh-store-cli -- migrate
+#   cargo test --workspace
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pgdata:

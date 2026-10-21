@@ -1,0 +1,86 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_call: # release.yml runs this workflow before publishing
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.97", "1.99"] # MSRV and stable
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal && rustup default ${{ matrix.toolchain }}
+      - run: cargo test --workspace --locked
+      - name: migrate from empty, re-run, check
+        run: |
+          cargo run -q -p datumesh-store-cli --locked -- migrate
+          cargo run -q -p datumesh-store-cli --locked -- migrate
+          cargo run -q -p datumesh-store-cli --locked -- migrate --check
+      - name: import the spec vectors, export
+        run: |
+          cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
+          cargo run -q -p datumesh-store-cli --locked -- export > export.jsonl
+          wc -l export.jsonl
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - run: rustup toolchain install 1.99 --profile minimal --component clippy,rustfmt && rustup default 1.99
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  package:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+      # Package both crates, build a new project on the packaged library and run the README
+      # example; build the packaged command and run migrate --check.
+      - run: tools/package_test.sh --native

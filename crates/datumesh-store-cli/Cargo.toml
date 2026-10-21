@@ -15,6 +15,8 @@ include = ["src/**/*.rs", "Cargo.toml", "LICENSE"]
 [[bin]]
 name = "datumesh-store"
 path = "src/main.rs"
+# Same name as the library's docs; the command documents itself (--help).
+doc = false
 
 [dependencies]
 datumesh-store = { path = "../datumesh-store", version = "0.1.0" }
