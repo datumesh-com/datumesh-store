@@ -9,7 +9,8 @@ First release, for `datumesh-core` 0.3.1 (specification `spec-0.2.1`).
 - `Store` trait (a `datumesh_core::Resolver` that can be written to) and `PgStore` on
   PostgreSQL 16: descriptors checked by the core and stored canonical; receipts verified
   (SPEC 10.1 steps 1-6) against the key document stored for their signer host and stored
-  canonical, so nothing unverified enters the store; blobs;
+  canonical, so nothing unverified enters the store (putting a stored receipt again is
+  idempotent and not re-checked, even after its key is revoked); blobs;
   append-only versions over transaction time and name bindings, enforced by triggers and
   serialised per cell / per name; lineage edges; namespaces' key documents. Passes the
   core's resolver test kit as a time-aware resolver.

@@ -24,7 +24,8 @@
 //! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not.
 //! * Namespaces: a host's key document (checked as SPEC 9.2 requires), with when it was
 //!   validated. Store it before the host's receipts. Replacing it later (a key revoked or
-//!   dropped) does not touch receipts already stored: they verified when they were stored.
+//!   dropped) does not touch receipts already stored: they verified when they were stored,
+//!   and putting one of them again is still idempotent.
 //! * Names: which function hash a fully qualified function name meant from a transaction
 //!   time on. Append-only, like versions.
 //!
@@ -102,7 +103,10 @@ pub trait Store: Resolver {
     /// for its signer host with [`put_namespace`](Store::put_namespace), in canonical form,
     /// with an edge to each of its inputs; returns its hash. A receipt that does not verify
     /// is refused with `verify`'s code (no key document for the host: `E_KEY_UNAVAILABLE`).
-    /// Idempotent; the same hash with other bytes is [`Error::Conflict`].
+    /// Idempotent: bytes whose canonical form is the stored copy return its hash without
+    /// checking the signature again (it verified when stored), even if the key has since
+    /// been revoked. Other bytes with a stored hash are verified first, then refused as
+    /// [`Error::Conflict`].
     fn put_receipt(&self, bytes: &[u8]) -> Result<String>;
     /// Stores blob content; returns its SHA-256 (lowercase hex). Idempotent.
     fn put_blob(&self, bytes: &[u8]) -> Result<String>;
@@ -125,7 +129,8 @@ pub trait Store: Resolver {
     /// Records a host's key document, checked as a 200 response for that host would be
     /// (SPEC 9.2, 9.3), validated at `validated_at`. Re-validation replaces the document; a
     /// `validated_at` earlier than the recorded one is [`Error::NotLater`]. Receipts already
-    /// stored are not re-checked: they verified when they were stored.
+    /// stored are not re-checked: they verified when they were stored (and putting one again
+    /// stays idempotent).
     fn put_namespace(&self, host: &str, keydoc_bytes: &[u8], validated_at: &str) -> Result<()>;
     /// A host's recorded key document.
     fn namespace(&self, host: &str) -> Result<Option<Namespace>>;

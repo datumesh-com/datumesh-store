@@ -180,6 +180,15 @@ impl Store for PgStore {
             let get = c.stmt(Q::ReceiptGet)?;
             let edges = c.stmt(Q::EdgesPut)?;
             let mut t = c.client.transaction()?;
+            // Idempotent: the very receipt already stored verified when it was stored, and
+            // the stored copy is unchanged, so it is not checked again (even if its key has
+            // since been revoked).
+            if let Some(row) = t.query_opt(&get, &[&hash])? {
+                let stored: Vec<u8> = row.try_get(0)?;
+                if stored == canonical {
+                    return Ok(());
+                }
+            }
             // Steps 5-6 against the stored key document of the signer host; none stored is
             // a host without keys (E_KEY_UNAVAILABLE).
             let mut keys = Keys::new();
