@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/datumesh-store", "crates/datumesh-store-cli"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/datumesh-com/datumesh-store"
+homepage = "https://datumesh.com"
+
+[workspace.dependencies]
+datumesh-core = "0.3.1"
+postgres = "0.19.14"
+tracing = "0.1.44"
+
+# curve25519 and sha2 are optimised even in test builds: the tests and the benchmark
+# generator sign many receipts.
+[profile.dev.package."*"]
+opt-level = 3

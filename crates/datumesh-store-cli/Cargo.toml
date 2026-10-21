@@ -1,0 +1,24 @@
+[package]
+name = "datumesh-store-cli"
+version = "0.1.0"
+description = "Command-line tool for datumesh-store: migrate, import, export, bench."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["datumesh", "postgres", "cli"]
+categories = ["command-line-utilities", "database"]
+include = ["src/**/*.rs", "Cargo.toml", "LICENSE"]
+
+[[bin]]
+name = "datumesh-store"
+path = "src/main.rs"
+
+[dependencies]
+datumesh-store = { path = "../datumesh-store", version = "0.1.0" }
+datumesh-core = { workspace = true, features = ["sign"] }
+postgres.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "ansi"] }
