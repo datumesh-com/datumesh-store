@@ -136,5 +136,7 @@ fn read_errors_are_none_and_logged_not_panics() {
     assert_eq!(s.receipt(&h), None);
     let e = s.put_descriptor(&fx_rate_descriptor()).unwrap_err();
     assert!(matches!(e, Error::Database(_)), "{e:?}");
+    // The server's message is in the error's text, not just "db error".
+    assert!(e.to_string().contains("descriptors"), "{e}");
     assert_eq!(e.code(), None);
 }

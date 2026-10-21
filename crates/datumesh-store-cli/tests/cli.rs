@@ -174,6 +174,10 @@ fn bench_runs_small() {
     assert!(out.contains("p50") && out.contains("p99"), "{out}");
     let n: i64 = db.client().query_one("SELECT count(*) FROM versions", &[]).unwrap().get(0);
     assert_eq!(n, 200 + 50);
+
+    // A second run on the loaded database, without loading.
+    let out = ok(&db.run(&["bench", "--skip-load", "--samples", "10", "--blob-max", "0"]));
+    assert!(out.contains("version_asof") && out.contains("dependents"), "{out}");
     // The probe used for cold-restart timing answers.
     let out = ok(&db.run(&["bench", "--wait"]));
     assert!(out.contains("answered"), "{out}");
