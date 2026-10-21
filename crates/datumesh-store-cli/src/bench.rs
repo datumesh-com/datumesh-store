@@ -1,8 +1,10 @@
 //! `bench`: load signed receipts and versions, then time the store's operations.
 //!
-//! Load: `--versions` versions spread evenly over `--cells` stored `fx_rate` cells (each
-//! version a receipt signed, with feature `sign`, by the specification vectors' test key of
-//! rates.example.org), stored through `put_receipt` and `put_version` from `--threads`
+//! Load: the key documents of rates.example.org and calc.example.net (those of the
+//! specification vectors) as namespaces; then `--versions` versions spread evenly over
+//! `--cells` stored `fx_rate` cells (each version a receipt signed, with feature `sign`, by
+//! the vectors' test key of rates.example.org, and verified by `put_receipt` against the
+//! stored key document), stored through `put_receipt` and `put_version` from `--threads`
 //! threads, then `--dependents` computed `convert` receipts that all list the first version's
 //! receipt as their input. The loading connections use `synchronous_commit = off` (to load
 //! faster; durability of a benchmark load does not matter); the timed operations use the
@@ -29,6 +31,11 @@ use crate::{connect, Fail};
 const FX_RATE: &str = r#"{"code":{"body":"","lang":"stored"},"inputs":[],"signature":{"args":{"base":{"type":"string","valid":false},"date":{"type":"date","valid":true},"quote":{"type":"string","valid":false}},"returns":{"type":"number","unit":{"of":{"arg":"quote"},"per":{"arg":"base"}}}}}"#;
 /// `function/computed-convert` (convert, expr), canonical.
 const CONVERT: &str = r#"{"code":{"body":"amount * rates.example.org/fx_rate(base: base, date: date, quote: quote)\n","lang":"expr"},"inputs":["rates.example.org/fx_rate"],"signature":{"args":{"amount":{"type":"number","unit":{"arg":"base"},"valid":false},"base":{"type":"string","valid":false},"date":{"type":"date","valid":true},"quote":{"type":"string","valid":false}},"returns":{"type":"number","unit":{"arg":"quote"}}}}"#;
+/// The vectors' key documents for those seeds, canonical: receipts are verified against them.
+const RATES_KEYS: &str = r#"{"host":"rates.example.org","keys":[{"alg":"ed25519","id":"d712b32a2cc5cb7c","public":"843baeb22bfd0364fb1b7262b367fb3202e7886c69a070fecf8e343fedb1eabf","valid_from":"2020-01-01T00:00:00.000000Z","valid_to":"2024-06-01T00:00:00.000000Z"},{"alg":"ed25519","id":"d9a2df65559c4444","public":"3ecf7b3ff834cb6782f5405dfcb213b5e78c0f30188068c25568adc25a739b52","valid_from":"2024-06-01T00:00:00.000000Z"}],"proto":"datumesh/1"}"#;
+const CALC_KEYS: &str = r#"{"host":"calc.example.net","keys":[{"alg":"ed25519","id":"f7ec60a92abf4774","public":"ccd4faa3a0b8338bc796d3bfc30bda2f6e87d336a576b70dc9d47cbfe0e8830f","valid_from":"2020-01-01T00:00:00.000000Z"}],"proto":"datumesh/1"}"#;
+/// When the benchmark's key documents count as validated.
+const VALIDATED_AT: &str = "2021-01-01T00:00:00.000000Z";
 /// The vectors' test seeds (public test keys, valid from 2020-01-01; rates' until 2024-06-01).
 const RATES_SEED: &str = "d939265c141c467e77fb079486a3bb8b932c1d471c8c25e5a2eed06c42db8ad0";
 const CALC_SEED: &str = "81589e69e00a82e983f0274d169ffa6c2ea7bc26833833826e57ce690125d5b5";
@@ -92,6 +99,8 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     let calc = key(CALC_SEED);
     let per_cell = o.versions / o.cells;
     let measure = PgStore::connect(url).map_err(|e| Fail(2, format!("cannot connect: {e}")))?;
+    measure.put_namespace("rates.example.org", RATES_KEYS.as_bytes(), VALIDATED_AT)?;
+    measure.put_namespace("calc.example.net", CALC_KEYS.as_bytes(), VALIDATED_AT)?;
     let fx_rate = measure.put_descriptor(FX_RATE.as_bytes())?;
     let convert = measure.put_descriptor(CONVERT.as_bytes())?;
 
@@ -125,6 +134,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         let s = Instant::now();
         let v = measure.version_asof(&c.id, &asof);
         t.push(s.elapsed());
+        let v = v?;
         found += usize::from(v.is_some());
     }
     row("version_asof", &mut t, &format!("{found} found"));
@@ -163,6 +173,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
             let s = Instant::now();
             let d = measure.dependents(h);
             t.push(s.elapsed());
+            let d = d?;
             if d.len() != *n {
                 return Err(Fail(1, format!("dependents: {} of {n}", d.len())));
             }
@@ -279,7 +290,7 @@ fn load(
     cells.sort_by_key(|c| c.day);
     let loaded = start.elapsed();
     println!(
-        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt + put_version, {} threads, synchronous_commit=off)",
+        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt (verifying) + put_version, {} threads, synchronous_commit=off)",
         hashes.len(),
         cells.len(),
         loaded.as_secs_f64(),
@@ -406,6 +417,7 @@ fn blobs(store: &PgStore, max: usize, rng: &mut Rng) -> Result<(), Fail> {
             let s = Instant::now();
             let back = store.blob(&h);
             get.push(s.elapsed());
+            let back = back?;
             if back.as_deref() != Some(content.as_slice()) {
                 return Err(Fail(1, format!("blob of {size} bytes did not come back")));
             }
@@ -437,7 +449,7 @@ fn wait(url: &str) -> Result<u8, Fail> {
             let row = c.query_opt("SELECT cell_id, tx FROM versions ORDER BY cell_id LIMIT 1", &[]).ok()??;
             let (cell, tx): (String, String) = (row.get(0), row.get(1));
             let store = PgStore::connect(url).ok()?;
-            store.version_asof(&cell, &tx).map(|_| ())
+            store.version_asof(&cell, &tx).ok()?.map(|_| ())
         })();
         if answered.is_some() {
             println!(
@@ -510,7 +522,7 @@ fn day_of(date: &str) -> i64 {
 }
 
 /// Microseconds since the epoch as an instant.
-fn instant(us: i64) -> String {
+pub(crate) fn instant(us: i64) -> String {
     let (days, rem) = (us.div_euclid(86_400_000_000), us.rem_euclid(86_400_000_000));
     let (y, m, d) = civil(days);
     let s = rem / 1_000_000;

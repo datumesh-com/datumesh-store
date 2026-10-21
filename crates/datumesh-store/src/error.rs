@@ -4,13 +4,13 @@ use std::fmt;
 
 use datumesh_core::ErrorCode;
 
-/// What a write (or a migration) can fail with. Reads return `Option` / `Vec` and report
-/// database errors through `tracing` instead (see the crate documentation).
+/// What a [`Store`](crate::Store) method or a migration can fail with.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
-    /// The core rejected the input: not canonical, not a receipt, not an instant, a key
-    /// document that does not satisfy SPEC 9.2, ... The core's error carries its code
+    /// The core rejected the input: not canonical, not a receipt, a receipt that does not
+    /// verify against the stored key document, not an instant or hash, a key document that
+    /// does not satisfy SPEC 9.2, ... The core's error carries its code
     /// ([`Error::code`]), JSON path and detail.
     Invalid(datumesh_core::Error),
     /// An append-only history refused a time that is not later than its latest entry:
@@ -44,8 +44,10 @@ pub enum Error {
         /// The receipt's value.
         found: String,
     },
-    /// A receipt with this hash is stored with other bytes: the same signed payload with
-    /// another signature (the receipt hash does not cover `sig`). The stored receipt is kept.
+    /// A receipt with this hash is stored with other bytes: the same payload with another
+    /// valid signature by the same key (the receipt hash does not cover `sig`; it covers
+    /// `computed_by`, so a rotated key gives another hash). Only a randomised signer makes
+    /// two valid signatures; RFC 8032 Ed25519 is deterministic. The stored receipt is kept.
     Conflict {
         /// The receipt hash.
         hash: String,
@@ -80,7 +82,7 @@ impl fmt::Display for Error {
                 write!(f, "the receipt's {what} is {found}, not {expected}")
             }
             Error::Conflict { hash } => {
-                write!(f, "receipt {hash} is stored with other bytes (another signature); kept the stored one")
+                write!(f, "receipt {hash} is stored with another valid signature; kept the stored one")
             }
             Error::Database(e) => match e.as_db_error() {
                 Some(d) => write!(f, "database: {} ({})", d.message(), d.code().code()),

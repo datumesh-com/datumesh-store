@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
-use datumesh_core::{json, keys_from_response, sha256_hex, Cell, Descriptor, Receipt, Resolver, Scalar};
+use datumesh_core::{
+    json, keys_from_response, sha256_hex, verify, Cell, Descriptor, ErrorCode, Keys, Receipt, Resolver, Scalar,
+};
 use postgres::NoTls;
 
 use crate::error::{Error, Result};
@@ -14,10 +16,10 @@ use crate::{Namespace, Store, Version};
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
 /// (behind an `Arc`); each call checks a connection out for its duration.
 ///
-/// Every `put_*` is one transaction. Reads (the `Option` / `Vec` methods and [`Resolver`])
-/// never fail loudly: a malformed argument is answered `None` / empty without a database
-/// round trip, and a database error is logged with `tracing` (target `datumesh_store`,
-/// level `error`) and answered `None` / empty.
+/// Every `put_*` is one transaction. [`Store`] methods return errors: a malformed argument
+/// is [`Error::Invalid`] (no query is made), a database failure [`Error::Database`]. The
+/// [`Resolver`] methods answer both with `None`; a database failure is logged with
+/// `tracing` (target `datumesh_store`, level `error`).
 pub struct PgStore {
     pool: Pool,
 }
@@ -67,22 +69,16 @@ impl PgStore {
         Ok(Q::ALL.len())
     }
 
-    /// Runs a read; a database error is logged and becomes `None`.
-    fn read<T>(&self, op: &'static str, f: impl FnOnce(&mut Conn) -> Result<T>) -> Option<T> {
-        let result = self.pool.get().and_then(|mut c| f(&mut c));
-        match result {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::error!(target: "datumesh_store", op, error = %e, "read failed; answering None");
-                None
-            }
-        }
+    /// A [`Resolver`] lookup: a failure (logged by `run`) becomes `None`.
+    fn resolve<T>(&self, op: &'static str, f: impl FnOnce(&mut Conn) -> Result<Option<T>>) -> Option<T> {
+        self.run(op, f).ok().flatten()
     }
 
-    fn write<T>(&self, op: &'static str, f: impl FnOnce(&mut Conn) -> Result<T>) -> Result<T> {
+    /// Runs `f` on a pooled connection; a database or pool failure is logged.
+    fn run<T>(&self, op: &'static str, f: impl FnOnce(&mut Conn) -> Result<T>) -> Result<T> {
         let result = self.pool.get().and_then(|mut c| f(&mut c));
         if let Err(e @ (Error::Database(_) | Error::PoolTimeout)) = &result {
-            tracing::error!(target: "datumesh_store", op, error = %e, "write failed");
+            tracing::error!(target: "datumesh_store", op, error = %e, "database failure");
         }
         result
     }
@@ -114,14 +110,14 @@ impl Resolver for PgStore {
         if !is_hash(fn_hash) {
             return None;
         }
-        self.read("descriptor", |c| get_bytes(c, Q::DescriptorGet, fn_hash)).flatten().map(Cow::Owned)
+        self.resolve("descriptor", |c| get_bytes(c, Q::DescriptorGet, fn_hash)).map(Cow::Owned)
     }
 
     fn receipt(&self, hash: &str) -> Option<Cow<'_, [u8]>> {
         if !is_hash(hash) {
             return None;
         }
-        self.read("receipt", |c| get_bytes(c, Q::ReceiptGet, hash)).flatten().map(Cow::Owned)
+        self.resolve("receipt", |c| get_bytes(c, Q::ReceiptGet, hash)).map(Cow::Owned)
     }
 
     /// `Some` only for a `stored` function (descriptor `code.lang` is `stored`, and the store
@@ -131,7 +127,7 @@ impl Resolver for PgStore {
         if !is_instant(asof) {
             return None;
         }
-        self.read("evaluate", |c| {
+        self.resolve("evaluate", |c| {
             let Some(desc) = get_bytes(c, Q::DescriptorGet, &cell.fn_hash)? else { return Ok(None) };
             match Descriptor::from_json(&desc) {
                 Ok(d) if d.lang == "stored" => {}
@@ -152,7 +148,6 @@ impl Resolver for PgStore {
                 }
             }
         })
-        .flatten()
     }
 }
 
@@ -161,7 +156,7 @@ impl Store for PgStore {
         let d = Descriptor::from_json(bytes)?;
         let hash = d.hash();
         let canonical = d.canonical();
-        self.write("put_descriptor", |c| {
+        self.run("put_descriptor", |c| {
             let st = c.stmt(Q::DescriptorPut)?;
             c.client.execute(&st, &[&hash, &canonical])?;
             Ok(())
@@ -171,17 +166,33 @@ impl Store for PgStore {
     }
 
     fn put_receipt(&self, bytes: &[u8]) -> Result<String> {
+        // Steps 1-4 first: a receipt that is not one is refused without a query.
         let r = Receipt::from_json(bytes)?;
         // Steps 1-4 passed, so the text parses; its JCS is the canonical form.
         let canonical = json::parse(bytes)?.to_jcs();
         let hash = r.hash().to_string();
         let cell_id = r.cell().id();
+        let host = r.signer_host().to_string();
         let inputs: Vec<String> = r.inputs().to_vec();
-        self.write("put_receipt", |c| {
+        self.run("put_receipt", |c| {
+            let ns = c.stmt(Q::NamespaceGet)?;
             let put = c.stmt(Q::ReceiptPut)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let edges = c.stmt(Q::EdgesPut)?;
             let mut t = c.client.transaction()?;
+            // Steps 5-6 against the stored key document of the signer host; none stored is
+            // a host without keys (E_KEY_UNAVAILABLE).
+            let mut keys = Keys::new();
+            if let Some(row) = t.query_opt(&ns, &[&host])? {
+                let doc: Vec<u8> = row.try_get(0)?;
+                keys.insert_response(&host, 200, Some(&doc));
+            }
+            let out = verify(bytes, &keys, None, None);
+            if !out.ok {
+                return Err(Error::Invalid(out.error().unwrap_or_else(|| {
+                    datumesh_core::Error::new(ErrorCode::Signature, "$", "the receipt did not verify")
+                })));
+            }
             let n = t.execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.cell().fn_hash, &r.publisher()])?;
             if n == 0 {
                 let row = t.query_one(&get, &[&hash])?;
@@ -203,7 +214,7 @@ impl Store for PgStore {
     fn put_blob(&self, bytes: &[u8]) -> Result<String> {
         let sha = sha256_hex(bytes);
         let length = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-        self.write("put_blob", |c| {
+        self.run("put_blob", |c| {
             let st = c.stmt(Q::BlobPut)?;
             c.client.execute(&st, &[&sha, &bytes, &length])?;
             Ok(())
@@ -212,18 +223,16 @@ impl Store for PgStore {
         Ok(sha)
     }
 
-    fn blob(&self, sha256: &str) -> Option<Cow<'_, [u8]>> {
-        if !is_hash(sha256) {
-            return None;
-        }
-        self.read("blob", |c| get_bytes(c, Q::BlobGet, sha256)).flatten().map(Cow::Owned)
+    fn blob(&self, sha256: &str) -> Result<Option<Cow<'_, [u8]>>> {
+        check_hex(sha256, 64, "sha256")?;
+        Ok(self.run("blob", |c| get_bytes(c, Q::BlobGet, sha256))?.map(Cow::Owned))
     }
 
     fn put_version(&self, cell_id: &str, tx: &str, receipt_hash: &str) -> Result<()> {
         check_hex(cell_id, 64, "cell_id")?;
         check_instant(tx, "tx")?;
         check_hex(receipt_hash, 64, "receipt_hash")?;
-        self.write("put_version", |c| {
+        self.run("put_version", |c| {
             let lock = c.stmt(Q::Lock)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
             let latest = c.stmt(Q::VersionLatest)?;
@@ -259,54 +268,44 @@ impl Store for PgStore {
         Ok(())
     }
 
-    fn version_asof(&self, cell_id: &str, asof: &str) -> Option<Version> {
-        if !is_hash(cell_id) || !is_instant(asof) {
-            return None;
-        }
-        self.read("version_asof", |c| {
+    fn version_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(asof, "asof")?;
+        self.run("version_asof", |c| {
             let st = c.stmt(Q::VersionAsof)?;
             let rows = c.client.query(&st, &[&cell_id, &asof])?;
             Ok(PgStore::version_rows(&rows, cell_id)?.pop())
         })
-        .flatten()
     }
 
-    fn versions(&self, cell_id: &str, from: &str, to: &str) -> Vec<Version> {
-        if !is_hash(cell_id) || !is_instant(from) || !is_instant(to) {
-            return Vec::new();
-        }
-        self.read("versions", |c| {
+    fn versions(&self, cell_id: &str, from: &str, to: &str) -> Result<Vec<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(from, "from")?;
+        check_instant(to, "to")?;
+        self.run("versions", |c| {
             let st = c.stmt(Q::VersionRange)?;
             let rows = c.client.query(&st, &[&cell_id, &from, &to])?;
             PgStore::version_rows(&rows, cell_id)
         })
-        .unwrap_or_default()
     }
 
-    fn latest(&self, cell_id: &str) -> Option<Version> {
-        if !is_hash(cell_id) {
-            return None;
-        }
-        self.read("latest", |c| {
+    fn latest(&self, cell_id: &str) -> Result<Option<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        self.run("latest", |c| {
             let st = c.stmt(Q::VersionLatest)?;
             let rows = c.client.query(&st, &[&cell_id])?;
             Ok(PgStore::version_rows(&rows, cell_id)?.pop())
         })
-        .flatten()
     }
 
-    fn dependents(&self, receipt_hash: &str) -> Vec<String> {
-        if !is_hash(receipt_hash) {
-            return Vec::new();
-        }
-        self.read("dependents", |c| get_strings(c, Q::Dependents, receipt_hash)).unwrap_or_default()
+    fn dependents(&self, receipt_hash: &str) -> Result<Vec<String>> {
+        check_hex(receipt_hash, 64, "receipt_hash")?;
+        self.run("dependents", |c| get_strings(c, Q::Dependents, receipt_hash))
     }
 
-    fn inputs(&self, receipt_hash: &str) -> Vec<String> {
-        if !is_hash(receipt_hash) {
-            return Vec::new();
-        }
-        self.read("inputs", |c| get_strings(c, Q::Inputs, receipt_hash)).unwrap_or_default()
+    fn inputs(&self, receipt_hash: &str) -> Result<Vec<String>> {
+        check_hex(receipt_hash, 64, "receipt_hash")?;
+        self.run("inputs", |c| get_strings(c, Q::Inputs, receipt_hash))
     }
 
     fn put_namespace(&self, host: &str, keydoc_bytes: &[u8], validated_at: &str) -> Result<()> {
@@ -314,7 +313,7 @@ impl Store for PgStore {
         keys_from_response(host, 200, Some(keydoc_bytes))?;
         check_instant(validated_at, "validated_at")?;
         let canonical = json::parse(keydoc_bytes)?.to_jcs();
-        self.write("put_namespace", |c| {
+        self.run("put_namespace", |c| {
             let lock = c.stmt(Q::Lock)?;
             let get = c.stmt(Q::NamespaceGet)?;
             let put = c.stmt(Q::NamespacePut)?;
@@ -339,11 +338,9 @@ impl Store for PgStore {
         Ok(())
     }
 
-    fn namespace(&self, host: &str) -> Option<Namespace> {
-        if check_dns_name(host, "$").is_err() {
-            return None;
-        }
-        self.read("namespace", |c| {
+    fn namespace(&self, host: &str) -> Result<Option<Namespace>> {
+        check_dns_name(host, "host")?;
+        self.run("namespace", |c| {
             let st = c.stmt(Q::NamespaceGet)?;
             let Some(row) = c.client.query_opt(&st, &[&host])? else { return Ok(None) };
             Ok(Some(Namespace {
@@ -353,14 +350,13 @@ impl Store for PgStore {
                 suspended_at: row.try_get(2)?,
             }))
         })
-        .flatten()
     }
 
     fn bind_name(&self, fn_name: &str, fn_hash: &str, tx: &str) -> Result<()> {
         check_function_name(fn_name, "fn_name")?;
         check_hex(fn_hash, 64, "fn_hash")?;
         check_instant(tx, "tx")?;
-        self.write("bind_name", |c| {
+        self.run("bind_name", |c| {
             let lock = c.stmt(Q::Lock)?;
             let exists = c.stmt(Q::DescriptorExists)?;
             let latest = c.stmt(Q::NameLatest)?;
@@ -390,11 +386,10 @@ impl Store for PgStore {
         Ok(())
     }
 
-    fn resolve_name(&self, fn_name: &str, asof: &str) -> Option<String> {
-        if check_function_name(fn_name, "$").is_err() || !is_instant(asof) {
-            return None;
-        }
-        self.read("resolve_name", |c| {
+    fn resolve_name(&self, fn_name: &str, asof: &str) -> Result<Option<String>> {
+        check_function_name(fn_name, "fn_name")?;
+        check_instant(asof, "asof")?;
+        self.run("resolve_name", |c| {
             let st = c.stmt(Q::NameAsof)?;
             let row = c.client.query_opt(&st, &[&fn_name, &asof])?;
             Ok(match row {
@@ -402,6 +397,5 @@ impl Store for PgStore {
                 None => None,
             })
         })
-        .flatten()
     }
 }

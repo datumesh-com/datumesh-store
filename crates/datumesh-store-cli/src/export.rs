@@ -1,13 +1,14 @@
-//! `export`: everything as JSON lines, in an order `import` can replay: descriptors,
-//! receipts, blobs, versions (per cell in tx order), namespaces, name bindings (per name in
-//! tx order). One consistent snapshot (a read-only REPEATABLE READ transaction), streamed.
+//! `export`: everything as JSON lines, in an order `import` can replay: namespaces (the
+//! receipts are verified against them), descriptors, receipts, blobs, versions (per cell in
+//! tx order), name bindings (per name in tx order). One consistent snapshot (a read-only
+//! REPEATABLE READ transaction), streamed.
 //!
 //! ```text
+//! {"namespace":{"host":"…","keydoc":"<key document JSON text>","validated_at":"…"}}
 //! {"descriptor":"<descriptor JSON text>"}
 //! {"receipt":"<receipt JSON text>"}
 //! {"blob":"<content, lowercase hex>"}
 //! {"version":{"cell_id":"…","receipt_hash":"…","tx":"…"}}
-//! {"namespace":{"host":"…","keydoc":"<key document JSON text>","validated_at":"…"}}
 //! {"name":{"fn_hash":"…","fn_name":"…","tx":"…"}}
 //! ```
 
@@ -61,6 +62,10 @@ pub(crate) fn run(url: &str) -> Result<u8, Fail> {
         .start()?;
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
+    each(&mut t, "SELECT host, keydoc, validated_at FROM namespaces ORDER BY host", |r| {
+        let (host, doc, at): (String, Vec<u8>, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
+        line(&mut out, "namespace", obj(vec![("host", s(host)), ("keydoc", s(text(doc)?)), ("validated_at", s(at))]))
+    })?;
     each(&mut t, "SELECT bytes FROM descriptors ORDER BY fn_hash", |r| {
         line(&mut out, "descriptor", s(text(r.try_get(0)?)?))
     })?;
@@ -72,10 +77,6 @@ pub(crate) fn run(url: &str) -> Result<u8, Fail> {
     each(&mut t, "SELECT cell_id, tx, receipt_hash FROM versions ORDER BY cell_id, tx", |r| {
         let (cell, tx, h): (String, String, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
         line(&mut out, "version", obj(vec![("cell_id", s(cell)), ("tx", s(tx)), ("receipt_hash", s(h))]))
-    })?;
-    each(&mut t, "SELECT host, keydoc, validated_at FROM namespaces ORDER BY host", |r| {
-        let (host, doc, at): (String, Vec<u8>, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
-        line(&mut out, "namespace", obj(vec![("host", s(host)), ("keydoc", s(text(doc)?)), ("validated_at", s(at))]))
     })?;
     each(&mut t, "SELECT fn_name, tx, fn_hash FROM name_bindings ORDER BY fn_name, tx", |r| {
         let (name, tx, h): (String, String, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);

@@ -13,7 +13,7 @@ datumesh-store = "0.1.0"
 datumesh-core = "0.3.1"
 ```
 
-Store the receipt of `spec/vectors/receipt/stored-number.json`, its function's descriptor and the version it states, then verify the receipt through the store (it recomputes the stored value as of the receipt's `asof`):
+Store the key documents of `spec/vectors/receipt/stored-number.json`, its receipt (verified against them on the way in), its function's descriptor and the version it states, then verify the receipt through the store (it recomputes the stored value as of the receipt's `asof`):
 
 ```rust
 use datumesh_core::json::{self, Value};
@@ -32,24 +32,28 @@ fn main() {
     let text = vector.get("input").and_then(Value::as_str).unwrap().as_bytes();
     let descriptor = vector.get("recompute").and_then(|r| r.get("descriptor")).unwrap().to_jcs();
 
+    // Receipts are verified on the way in, against the key document stored for their
+    // signer host: store the host's document first. The vector carries the documents.
+    let mut keys = Keys::new();
+    for (host, env) in vector.get("keys").and_then(Value::as_object).unwrap() {
+        let body = env.get("https").and_then(|h| h.get("body")).and_then(Value::as_str).unwrap();
+        store.put_namespace(host, body.as_bytes(), "2024-03-16T09:00:00.000000Z").unwrap();
+        keys.insert_response(host, 200, Some(body.as_bytes()));
+    }
+
     let fn_hash = store.put_descriptor(&descriptor).unwrap();
     let hash = store.put_receipt(text).unwrap();
     let receipt = Receipt::from_json(text).unwrap();
     let cell_id = receipt.cell().id();
     // Versions are append-only: on a second run the version is already there.
-    if store.latest(&cell_id).is_none() {
+    if store.latest(&cell_id).unwrap().is_none() {
         store.put_version(&cell_id, receipt.tx(), &hash).unwrap();
     }
 
-    let mut keys = Keys::new();
-    for (host, env) in vector.get("keys").and_then(Value::as_object).unwrap() {
-        let body = env.get("https").and_then(|h| h.get("body")).and_then(Value::as_str);
-        keys.insert_response(host, 200, body.map(str::as_bytes));
-    }
     let result = verify(text, &keys, Some(&store as &dyn Resolver), None);
     assert_eq!(result.level, Some(Level::Recomputed), "{:?}", result.error());
     println!("verified {} receipt {}", result.level.unwrap().as_str(), hash);
-    println!("fx_rate is {fn_hash}; the cell's latest version is at {}", store.latest(&cell_id).unwrap().tx);
+    println!("fx_rate is {fn_hash}; the cell's latest version is at {}", store.latest(&cell_id).unwrap().unwrap().tx);
 }
 ```
 
@@ -62,16 +66,16 @@ The API is synchronous. From async code, call it on a blocking thread (`tokio::t
 | Method | What it does |
 |---|---|
 | `put_descriptor(bytes)` | Checks the descriptor (`Descriptor::from_json`), stores its canonical form (JCS), returns the function hash. Idempotent. |
-| `put_receipt(bytes)` | Checks the receipt (SPEC 10.1 steps 1-4, `Receipt::from_json`), stores its canonical form, records an edge to each input (held or not), returns the receipt hash. Idempotent; the same hash with another signature is `Error::Conflict`. Signatures are not verified (the store holds no keys it trusts); verify on the way out. |
+| `put_receipt(bytes)` | Verifies the receipt (SPEC 10.1 steps 1-6, `datumesh_core::verify`) against the key document stored for its signer host with `put_namespace`, so nothing unverified enters the store; refuses it with `verify`'s code otherwise (no document stored for the host: `E_KEY_UNAVAILABLE`). Stores its canonical form, records an edge to each input (held or not), returns the receipt hash. Idempotent. The same hash with other bytes is `Error::Conflict` and the stored receipt is kept: that is a second valid signature by the same key, which only a randomised signer makes. A rotated key does not cause it: the key id is in `computed_by`, which the hash covers, so a receipt signed with the new key has a new hash. |
 | `put_blob(bytes)` / `blob(sha256)` | Content by SHA-256, in the database (`bytea`). |
 | `put_version(cell_id, tx, receipt_hash)` | Appends: from `tx` on, the cell has the receipt's value. The receipt must be stored, of that cell, at that `tx`; `tx` must be later than the cell's latest version (`Error::NotLater`). |
 | `version_asof`, `versions`, `latest` | The latest version with `tx <= asof`; the versions with `from <= tx <= to` in tx order; the latest. |
 | `inputs`, `dependents` | Lineage edges, both ways. |
-| `put_namespace(host, keydoc, validated_at)` / `namespace(host)` | A host's key document, checked as a 200 response for that host (`keys_from_response`), with its validation time; re-validation only moves forward. |
+| `put_namespace(host, keydoc, validated_at)` / `namespace(host)` | A host's key document, checked as a 200 response for that host (`keys_from_response`), with its validation time; re-validation only moves forward. Store it before the host's receipts. A later document (a key revoked or dropped) does not touch receipts already stored: they verified when they were stored; it applies to every `put_receipt` from then on, including one repeating a stored receipt. |
 | `bind_name(fn_name, fn_hash, tx)` / `resolve_name(fn_name, asof)` | Which function a fully qualified name meant from `tx` on. Append-only, in tx order; the descriptor must be stored. |
 | `descriptor`, `receipt`, `evaluate` (`Resolver`) | Stored bytes (`Cow::Owned`); `evaluate` gives a value only for a `stored` function: that of `version_asof(cell, asof)`. |
 
-Write methods refuse malformed input with the core's error code (`Error::Invalid`): hashes are 64 lowercase hex digits, instants `YYYY-MM-DDTHH:MM:SS.ffffffZ`, function names fully qualified. Read methods return `Option` / `Vec`: a malformed argument is `None` / empty without a query, and **a database error is logged (`tracing`, target `datumesh_store`) and also answered `None` / empty**, so a caller cannot tell "not stored" from "the database failed" through these signatures.
+Every `Store` method returns a `Result`. Malformed input is refused with the core's error code (`Error::Invalid`), without a query: hashes and cell ids are 64 lowercase hex digits, instants `YYYY-MM-DDTHH:MM:SS.ffffffZ`, hosts DNS names, function names fully qualified. A database failure is `Error::Database` (or `Error::PoolTimeout`); reads answer `Ok(None)` / `Ok(vec![])` only when nothing is stored. The `Resolver` methods (`descriptor`, `receipt`, `evaluate`) keep the core's `Option` signatures: a malformed argument or a database failure is `None` there (a failure is logged with `tracing`, target `datumesh_store`), which `verify` reports as unavailable.
 
 `PgStore::connect(url)` connects without TLS; `PgStore::with_connector(f, PoolOptions)` takes any connection function (TLS included). The pool is the crate's own: a mutex and a condition variable, no global state, no background threads, a bounded number of connections, a checkout timeout, connections the server closed are replaced, and each statement is prepared once per connection. Every `put_*` is one transaction.
 
@@ -96,7 +100,7 @@ datumesh-store export > store.jsonl    # JSON lines: descriptors, receipts, blob
 datumesh-store bench                   # see below
 ```
 
-`export` writes one consistent snapshot in an order `import` replays; importing what is already there changes nothing.
+`export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing. Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts.
 
 ## Development
 

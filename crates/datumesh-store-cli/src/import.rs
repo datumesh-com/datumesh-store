@@ -2,10 +2,11 @@
 //! (anything else, or `-` / nothing for stdin; the format `export` writes).
 //!
 //! From a vector it takes what a store holds: a valid function vector's descriptor; a valid
-//! receipt vector's receipt, the descriptor and input receipts of its `recompute` object,
-//! its blob content, and, when the recompute descriptor is `stored`, the receipt as the
-//! cell's version at its tx. Key documents in vectors are not imported (they come with no
-//! validation time). Importing what is already there changes nothing.
+//! receipt vector's key documents (each 200 response with a body, as its host's namespace,
+//! validated at the time of the import; first, since receipts are verified against them),
+//! its receipt, the descriptor and input receipts of its `recompute` object, its blob
+//! content, and, when the recompute descriptor is `stored`, the receipt as the cell's
+//! version at its tx. Importing what is already there changes nothing.
 
 use std::io::BufRead;
 use std::path::Path;
@@ -104,6 +105,13 @@ fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
         }
         Some("receipt") => {
             let Some(text) = str_of(v, "input") else { return };
+            for (host, env) in v.get("keys").and_then(Value::as_object).unwrap_or(&[]) {
+                let https = env.get("https");
+                let status = https.and_then(|h| h.get("status")).and_then(Value::as_number_text);
+                if let (Some("200"), Some(body)) = (status, https.and_then(|h| h.get("body")).and_then(Value::as_str)) {
+                    put(namespace(store, host, body.as_bytes(), &mut n.namespaces));
+                }
+            }
             let mut stored = false;
             if let Some(rc) = v.get("recompute") {
                 if let Some(d) = rc.get("descriptor") {
@@ -137,6 +145,26 @@ fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
     }
 }
 
+/// A vector's key document as the host's namespace, validated now, unless the store already
+/// holds this very document (re-importing does not re-validate).
+fn namespace(store: &PgStore, host: &str, body: &[u8], count: &mut u64) -> Result<(), Error> {
+    let same = match (store.namespace(host), json::parse(body)) {
+        (Ok(Some(ns)), Ok(doc)) => ns.keydoc == doc.to_jcs(),
+        _ => false,
+    };
+    if !same {
+        store.put_namespace(host, body, &now())?;
+    }
+    *count += 1;
+    Ok(())
+}
+
+/// The current time as an instant.
+fn now() -> String {
+    let us = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros());
+    crate::bench::instant(i64::try_from(us).unwrap_or(i64::MAX))
+}
+
 fn descriptor(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
     store.put_descriptor(bytes)?;
     *count += 1;
@@ -153,7 +181,7 @@ fn receipt(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> 
 fn version(store: &PgStore, cell_id: &str, tx: &str, hash: &str, count: &mut u64) -> Result<(), Error> {
     match store.put_version(cell_id, tx, hash) {
         Err(Error::NotLater { .. })
-            if store.version_asof(cell_id, tx).is_some_and(|v| v.tx == tx && v.receipt_hash == hash) => {}
+            if store.version_asof(cell_id, tx)?.is_some_and(|v| v.tx == tx && v.receipt_hash == hash) => {}
         r => r?,
     }
     *count += 1;
@@ -218,7 +246,8 @@ fn one_line(store: &PgStore, l: &[u8], n: &mut Counts) -> Result<(), String> {
             let (name, h, tx) = (text("fn_name")?, text("fn_hash")?, text("tx")?);
             match store.bind_name(&name, &h, &tx) {
                 // Already bound to this hash at that time: imported before.
-                Err(Error::NotLater { .. }) if store.resolve_name(&name, &tx).as_deref() == Some(h.as_str()) => {}
+                Err(Error::NotLater { .. })
+                    if store.resolve_name(&name, &tx).map_err(e)?.as_deref() == Some(h.as_str()) => {}
                 r => r.map_err(e)?,
             }
             n.names += 1;
