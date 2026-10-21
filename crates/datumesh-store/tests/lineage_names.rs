@@ -29,22 +29,22 @@ fn inputs_and_dependents_follow_the_edges() {
     let r_in = Receipt::from_json(&input(&stored)).unwrap();
     s.put_version(&r_in.cell().id(), r_in.tx(), &h_in).unwrap();
 
-    assert_eq!(s.inputs(&h), std::slice::from_ref(&h_in));
-    assert_eq!(s.dependents(&h_in), std::slice::from_ref(&h));
-    assert!(s.inputs(&h_in).is_empty());
-    assert!(s.dependents(&h).is_empty());
+    assert_eq!(s.inputs(&h).unwrap(), std::slice::from_ref(&h_in));
+    assert_eq!(s.dependents(&h_in).unwrap(), std::slice::from_ref(&h));
+    assert!(s.inputs(&h_in).unwrap().is_empty());
+    assert!(s.dependents(&h).unwrap().is_empty());
 
     // Two inputs, one of which the store does not hold: both edges are recorded.
     let two = vector("receipt/computed-two-inputs");
     let h2 = s.put_receipt(&input(&two)).unwrap();
     let want: Vec<String> = Receipt::from_json(&input(&two)).unwrap().inputs().to_vec();
-    assert_eq!(s.inputs(&h2), want);
-    let mut deps = s.dependents(&h_in);
+    assert_eq!(s.inputs(&h2).unwrap(), want);
+    let mut deps = s.dependents(&h_in).unwrap();
     deps.sort();
     let mut expect = vec![h.clone(), h2.clone()];
     expect.sort();
     assert_eq!(deps, expect);
-    assert_eq!(s.dependents(&want[1]), std::slice::from_ref(&h2));
+    assert_eq!(s.dependents(&want[1]).unwrap(), std::slice::from_ref(&h2));
 
     // verify through the store.
     let keys = keys(&lineage);
@@ -98,15 +98,15 @@ fn names_resolve_per_time_and_both_functions_verify() {
     assert_eq!(s.put_descriptor(&b_bytes).unwrap(), b);
     assert_ne!(a, b);
 
-    assert_eq!(s.resolve_name(name, tx2), None);
+    assert_eq!(s.resolve_name(name, tx2).unwrap(), None);
     s.bind_name(name, &a, tx1).unwrap();
     s.bind_name(name, &b, tx2).unwrap();
-    assert_eq!(s.resolve_name(name, "2024-03-15T15:59:59.999999Z"), None);
-    assert_eq!(s.resolve_name(name, tx1).as_deref(), Some(a.as_str()));
-    assert_eq!(s.resolve_name(name, "2024-03-17T00:00:00.000000Z").as_deref(), Some(a.as_str()));
-    assert_eq!(s.resolve_name(name, tx2).as_deref(), Some(b.as_str()));
-    assert_eq!(s.resolve_name(name, "9999-12-31T23:59:59.999999Z").as_deref(), Some(b.as_str()));
-    assert_eq!(s.resolve_name("rates.example.org/other", tx2), None);
+    assert_eq!(s.resolve_name(name, "2024-03-15T15:59:59.999999Z").unwrap(), None);
+    assert_eq!(s.resolve_name(name, tx1).unwrap().as_deref(), Some(a.as_str()));
+    assert_eq!(s.resolve_name(name, "2024-03-17T00:00:00.000000Z").unwrap().as_deref(), Some(a.as_str()));
+    assert_eq!(s.resolve_name(name, tx2).unwrap().as_deref(), Some(b.as_str()));
+    assert_eq!(s.resolve_name(name, "9999-12-31T23:59:59.999999Z").unwrap().as_deref(), Some(b.as_str()));
+    assert_eq!(s.resolve_name("rates.example.org/other", tx2).unwrap(), None);
 
     // Receipts of both functions verify, recomputed, through the store.
     let v = vector("receipt/stored-number");
@@ -138,7 +138,7 @@ fn bind_name_validates_its_arguments() {
     let e = s.bind_name("rates.example.org/fx_rate", &a.to_uppercase(), tx).unwrap_err();
     assert_eq!(e.code(), Some(ErrorCode::CanonHex));
     assert!(matches!(s.bind_name("rates.example.org/fx_rate", &"0".repeat(64), tx), Err(Error::NotFound { .. })));
-    // Reads with malformed arguments are None, not errors.
-    assert_eq!(s.resolve_name("", tx), None);
-    assert_eq!(s.resolve_name("rates.example.org/fx_rate", "\0"), None);
+    // Reads with malformed arguments are errors too.
+    assert_eq!(s.resolve_name("", tx).unwrap_err().code(), Some(ErrorCode::CanonName));
+    assert_eq!(s.resolve_name("rates.example.org/fx_rate", "\0").unwrap_err().code(), Some(ErrorCode::CanonInstant));
 }

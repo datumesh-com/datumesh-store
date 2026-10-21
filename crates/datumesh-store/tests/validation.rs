@@ -1,12 +1,13 @@
-//! Input validation of the write methods, and reads that never fail loudly.
+//! Input validation, and failures.
 //!
 //! * `put_version` checks that the tx is an instant, that the receipt exists, and that its
 //!   cell id and tx equal the arguments.
 //! * `put_namespace` parses the key document with `keys_from_response` semantics (a 200 with
 //!   this body for this host: `E_KEY_DOC` otherwise), and checks that `validated_at` is an
 //!   instant; a namespace is re-validated only forward in time.
-//! * Every read method answers malformed or unknown arguments with `None` / empty, without
-//!   a database round trip and without panicking.
+//! * Store reads refuse malformed arguments with the core's code (no query); absent
+//!   things are `Ok(None)` / `Ok(empty)`; a database failure is `Err`. The Resolver methods
+//!   answer all three with `None`. Nothing panics.
 
 mod common;
 
@@ -43,18 +44,18 @@ fn put_version_checks_receipt_cell_and_tx() {
     assert_eq!(s.put_version(&cell, r.tx(), "abc").unwrap_err().code(), Some(ErrorCode::CanonHex));
     // The right one.
     s.put_version(&cell, r.tx(), &h).unwrap();
-    assert_eq!(s.latest(&cell).unwrap().receipt_hash, h);
+    assert_eq!(s.latest(&cell).unwrap().unwrap().receipt_hash, h);
 }
 
 #[test]
 fn put_namespace_parses_the_key_document() {
     let db = TestDb::migrated();
-    let s = db.store();
+    let s = db.bare_store();
     let v = vector("receipt/stored-number");
     let doc = key_doc(&v, "rates.example.org");
     let t1 = "2024-03-16T09:00:00.000000Z";
     s.put_namespace("rates.example.org", &doc, t1).unwrap();
-    let ns = s.namespace("rates.example.org").unwrap();
+    let ns = s.namespace("rates.example.org").unwrap().unwrap();
     assert_eq!(ns.host, "rates.example.org");
     assert_eq!(ns.keydoc, jcs(&doc));
     assert_eq!(ns.validated_at, t1);
@@ -83,13 +84,15 @@ fn put_namespace_parses_the_key_document() {
     s.put_namespace("rates.example.org", &doc, t1).unwrap();
     let t2 = "2024-03-17T09:00:00.000000Z";
     s.put_namespace("rates.example.org", &doc, t2).unwrap();
-    assert_eq!(s.namespace("rates.example.org").unwrap().validated_at, t2);
+    assert_eq!(s.namespace("rates.example.org").unwrap().unwrap().validated_at, t2);
     assert!(matches!(s.put_namespace("rates.example.org", &doc, t1), Err(Error::NotLater { .. })));
-    assert_eq!(s.namespace("calc.example.net"), None);
+    assert_eq!(s.namespace("calc.example.net").unwrap(), None);
 }
 
 #[test]
-fn reads_with_malformed_arguments_are_empty() {
+fn reads_with_malformed_arguments_are_invalid() {
+    // Store reads refuse a malformed argument with the core's code, without a query;
+    // Resolver lookups answer None.
     let db = TestDb::migrated();
     let s = db.store();
     let v = vector("receipt/stored-number");
@@ -98,45 +101,125 @@ fn reads_with_malformed_arguments_are_empty() {
     let r = Receipt::from_json(&bytes).unwrap();
     s.put_version(&r.cell().id(), r.tx(), &h).unwrap();
     let cell = r.cell().id();
+    let code = |e: Error| e.code();
+    let hex = Some(ErrorCode::CanonHex);
+    let instant = Some(ErrorCode::CanonInstant);
     let bad = ["", "\0", "abc", "' OR '1'='1", "é", &"a".repeat(100_000), &h.to_uppercase(), &format!("{h}\0")];
     for x in bad {
         assert_eq!(s.receipt(x), None);
         assert_eq!(s.descriptor(x), None);
-        assert_eq!(s.blob(x), None);
-        assert_eq!(s.latest(x), None);
-        assert_eq!(s.version_asof(x, r.tx()), None);
-        assert_eq!(s.version_asof(&cell, x), None);
-        assert!(s.versions(x, r.tx(), r.tx()).is_empty());
-        assert!(s.versions(&cell, x, r.tx()).is_empty());
-        assert!(s.versions(&cell, r.tx(), x).is_empty());
-        assert!(s.dependents(x).is_empty());
-        assert!(s.inputs(x).is_empty());
-        assert_eq!(s.namespace(x), None);
-        assert_eq!(s.resolve_name(x, r.tx()), None);
         assert_eq!(s.evaluate(r.cell(), x), None);
+        assert_eq!(code(s.blob(x).unwrap_err()), hex);
+        assert_eq!(code(s.latest(x).unwrap_err()), hex);
+        assert_eq!(code(s.version_asof(x, r.tx()).unwrap_err()), hex);
+        assert_eq!(code(s.version_asof(&cell, x).unwrap_err()), instant);
+        assert_eq!(code(s.versions(x, r.tx(), r.tx()).unwrap_err()), hex);
+        assert_eq!(code(s.versions(&cell, x, r.tx()).unwrap_err()), instant);
+        assert_eq!(code(s.versions(&cell, r.tx(), x).unwrap_err()), instant);
+        assert_eq!(code(s.dependents(x).unwrap_err()), hex);
+        assert_eq!(code(s.inputs(x).unwrap_err()), hex);
+        assert!(s.namespace(x).unwrap_err().code().is_some(), "{x:?}");
+        assert_eq!(code(s.resolve_name(x, r.tx()).unwrap_err()), Some(ErrorCode::CanonName));
+        assert_eq!(code(s.resolve_name("rates.example.org/fx_rate", x).unwrap_err()), instant);
     }
-    // And the good ones answer.
-    assert!(s.version_asof(&cell, r.tx()).is_some());
+    // Well-formed but absent: Ok(None) / Ok(empty).
+    let absent = "0".repeat(64);
+    assert_eq!(s.blob(&absent).unwrap(), None);
+    assert_eq!(s.latest(&absent).unwrap(), None);
+    assert!(s.versions(&absent, r.tx(), r.tx()).unwrap().is_empty());
+    assert!(s.dependents(&absent).unwrap().is_empty());
+    assert_eq!(s.namespace("example.org").unwrap(), None);
+    assert_eq!(s.resolve_name("example.org/f", r.tx()).unwrap(), None);
+    // And present ones answer.
+    assert!(s.version_asof(&cell, r.tx()).unwrap().is_some());
+}
+
+/// A store whose connections all fail from some point on: every Store read is an Err,
+/// every Resolver method None, nothing panics.
+#[test]
+fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let db = TestDb::migrated();
+    let down = Arc::new(AtomicBool::new(false));
+    let (config, flag) = (db.config.clone(), down.clone());
+    let s = datumesh_store::PgStore::with_connector(
+        move || {
+            if flag.load(Ordering::SeqCst) {
+                "host=127.0.0.1 port=1 user=x connect_timeout=1"
+                    .parse::<datumesh_store::postgres::Config>()
+                    .unwrap()
+                    .connect(datumesh_store::postgres::NoTls)
+            } else {
+                config.connect(datumesh_store::postgres::NoTls)
+            }
+        },
+        datumesh_store::PoolOptions::new().max_size(2),
+    )
+    .unwrap();
+    put_vector_keys(&s, &vector("receipt/stored-number"));
+    let fn_hash = s.put_descriptor(&fx_rate_descriptor()).unwrap();
+    let v = vector("receipt/stored-number");
+    let bytes = input(&v);
+    let h = s.put_receipt(&bytes).unwrap();
+    let r = Receipt::from_json(&bytes).unwrap();
+    let cell = r.cell().id();
+    s.put_version(&cell, r.tx(), &h).unwrap();
+    assert!(s.latest(&cell).unwrap().is_some());
+
+    // The outage: no new connection succeeds, and the open ones are killed.
+    down.store(true, Ordering::SeqCst);
+    db.client()
+        .execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
+            &[],
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Twice: the first use may meet a killed connection, the second a failing connector.
+    for _ in 0..2 {
+        let db_err = |e: Error| assert!(matches!(e, Error::Database(_) | Error::PoolTimeout), "{e:?}");
+        db_err(s.blob(&h).unwrap_err());
+        db_err(s.version_asof(&cell, r.tx()).unwrap_err());
+        db_err(s.versions(&cell, r.tx(), r.tx()).unwrap_err());
+        db_err(s.latest(&cell).unwrap_err());
+        db_err(s.dependents(&h).unwrap_err());
+        db_err(s.inputs(&h).unwrap_err());
+        db_err(s.namespace("rates.example.org").unwrap_err());
+        db_err(s.resolve_name("rates.example.org/fx_rate", r.tx()).unwrap_err());
+        assert_eq!(s.descriptor(&fn_hash), None);
+        assert_eq!(s.receipt(&h), None);
+        assert_eq!(s.evaluate(r.cell(), r.asof()), None);
+        db_err(s.put_receipt(&bytes).unwrap_err());
+    }
+    // verify through the store: the descriptor is unavailable.
+    let out = datumesh_core::verify(&bytes, &keys(&v), Some(&s as &dyn Resolver), None);
+    assert_eq!(out.code, Some(ErrorCode::FnUnavailable));
+    // Back up: answers again.
+    down.store(false, Ordering::SeqCst);
+    assert!(s.latest(&cell).unwrap().is_some());
 }
 
 #[test]
-fn read_errors_are_none_and_logged_not_panics() {
-    // A store whose database lost its tables: reads are None / empty, writes are typed
-    // database errors.
+fn a_renamed_table_is_a_database_error_with_the_servers_message() {
     let db = TestDb::migrated();
     let s = db.store();
     let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
     db.client()
         .batch_execute(
-            "ALTER TABLE receipts RENAME TO receipts_gone; ALTER TABLE descriptors RENAME TO descriptors_gone",
+            "ALTER TABLE receipts RENAME TO receipts_gone; ALTER TABLE descriptors RENAME TO descriptors_gone; \
+             ALTER TABLE edges RENAME TO edges_gone",
         )
         .unwrap();
     // Fresh connections, so no statement prepared against the old tables is reused.
-    let s = db.store();
+    let s = db.bare_store();
     assert_eq!(s.receipt(&h), None);
     let e = s.put_descriptor(&fx_rate_descriptor()).unwrap_err();
     assert!(matches!(e, Error::Database(_)), "{e:?}");
     // The server's message is in the error's text, not just "db error".
     assert!(e.to_string().contains("descriptors"), "{e}");
     assert_eq!(e.code(), None);
+    let e = s.dependents(&h).unwrap_err();
+    assert!(matches!(e, Error::Database(_)), "{e:?}");
 }

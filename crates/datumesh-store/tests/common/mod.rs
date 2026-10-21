@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use datumesh_core::json::{self, Value};
 use datumesh_core::{Keys, Receipt, ReceiptBuilder, Scalar, SigningKey, Type};
 use datumesh_store::postgres::{Client, Config, NoTls};
-use datumesh_store::{migrate, PgStore, PoolOptions};
+use datumesh_store::{migrate, PgStore, PoolOptions, Store};
 
 pub fn admin_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL names a PostgreSQL 16 database (see README)")
@@ -49,11 +49,24 @@ impl TestDb {
         self.config.connect(NoTls).unwrap()
     }
 
+    /// A store holding the key documents of rates.example.org and calc.example.net (those
+    /// of the vectors), so that their receipts can be stored.
     pub fn store(&self) -> PgStore {
         self.store_with(PoolOptions::new())
     }
 
     pub fn store_with(&self, options: PoolOptions) -> PgStore {
+        let s = self.bare_store_with(options);
+        put_vector_keys(&s, &vector("receipt/stored-number"));
+        s
+    }
+
+    /// A store without key documents.
+    pub fn bare_store(&self) -> PgStore {
+        self.bare_store_with(PoolOptions::new())
+    }
+
+    pub fn bare_store_with(&self, options: PoolOptions) -> PgStore {
         let config = self.config.clone();
         PgStore::with_connector(move || config.connect(NoTls), options).unwrap()
     }
@@ -170,4 +183,21 @@ pub fn stored_number_at(value: &str, tx: &str) -> Vec<u8> {
 /// The descriptor of the stored-number vector (fx_rate, stored), canonical.
 pub fn fx_rate_descriptor() -> Vec<u8> {
     vector("receipt/stored-number").get("recompute").and_then(|r| r.get("descriptor")).unwrap().to_jcs()
+}
+
+/// When the key documents used by the tests were validated.
+pub const VALIDATED_AT: &str = "2024-01-01T00:00:00.000000Z";
+
+/// Stores every key document a vector offers (a 200 response with a body) as its host's
+/// namespace.
+pub fn put_vector_keys(s: &PgStore, v: &Value) {
+    for (host, env) in v.get("keys").and_then(Value::as_object).unwrap_or(&[]) {
+        let https = env.get("https").unwrap();
+        if https.get("status").and_then(Value::as_number_text) != Some("200") {
+            continue;
+        }
+        if let Some(body) = https.get("body").and_then(Value::as_str) {
+            s.put_namespace(host, body.as_bytes(), VALIDATED_AT).unwrap();
+        }
+    }
 }

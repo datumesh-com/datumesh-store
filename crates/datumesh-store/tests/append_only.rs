@@ -103,7 +103,7 @@ fn put_version_not_later_is_a_typed_error() {
     let r3 = stored_number_at("1.0894", "2024-03-19T10:00:00.000000Z");
     let h3 = s.put_receipt(&r3).unwrap();
     s.put_version(&cell, "2024-03-19T10:00:00.000000Z", &h3).unwrap();
-    assert_eq!(s.latest(&cell).unwrap().tx, "2024-03-19T10:00:00.000000Z");
+    assert_eq!(s.latest(&cell).unwrap().unwrap().tx, "2024-03-19T10:00:00.000000Z");
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn concurrent_raw_inserts_are_serialised_per_cell() {
         ta.commit().unwrap();
         let (ok, err) = b.join().unwrap();
         assert_eq!(ok, second_ok, "{first} then {second}: {err:?}");
-        let n = s.versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").len();
+        let n = s.versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap().len();
         assert_eq!(n, if second_ok { 2 } else { 1 });
     }
 }
@@ -226,6 +226,7 @@ fn concurrent_put_version_keeps_tx_order() {
     successes.sort();
     let history: Vec<String> = s
         .versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z")
+        .unwrap()
         .into_iter()
         .map(|v| v.tx)
         .collect();

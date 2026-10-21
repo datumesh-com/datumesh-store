@@ -42,9 +42,9 @@ fn same_descriptor_receipt_blob_twice_is_stored_once() {
     assert_eq!(b1, sha256_hex(&content));
     assert_eq!(b1, b2);
     assert_eq!(count(&db, "blobs"), 1);
-    assert_eq!(s.blob(&b1).as_deref(), Some(content.as_slice()));
+    assert_eq!(s.blob(&b1).unwrap().as_deref(), Some(content.as_slice()));
     let empty = s.put_blob(b"").unwrap();
-    assert_eq!(s.blob(&empty).as_deref(), Some(&b""[..]));
+    assert_eq!(s.blob(&empty).unwrap().as_deref(), Some(&b""[..]));
     let len: i64 = db.client().query_one("SELECT length FROM blobs WHERE sha256 = $1", &[&b1]).unwrap().get(0);
     assert_eq!(len, content.len() as i64);
 }
@@ -90,28 +90,28 @@ fn descriptors_the_core_rejects_are_refused_with_its_code() {
 }
 
 #[test]
-fn same_hash_with_another_signature_is_a_conflict() {
-    // The receipt hash does not cover sig: a receipt with the same payload and another
-    // signature has the same hash. The store keeps what it has and reports the conflict
-    // instead of replacing a receipt it cannot judge (it does not verify signatures).
+fn same_hash_with_other_bytes_is_a_conflict() {
+    // After verification, a second receipt with a stored hash but other bytes can only be
+    // another valid signature by the same key (the hash covers computed_by, so a rotated key
+    // gives another hash; Ed25519 as RFC 8032 signs deterministically, so this needs a
+    // randomised signer). Such bytes are planted here with SQL; the store keeps them and
+    // reports the conflict.
     let db = TestDb::migrated();
     let s = db.store();
     let v = vector("receipt/stored-number");
     let good = input(&v);
-    let h = s.put_receipt(&good).unwrap();
-    let mut other = jcs(&good);
-    let sig = str_of(&json_of(&good), "sig").to_string();
-    let flipped = format!("{}{}", if sig.starts_with('0') { "1" } else { "0" }, &sig[1..]);
-    let text = String::from_utf8(other.clone()).unwrap().replace(&sig, &flipped);
-    other = text.into_bytes();
-    assert_eq!(Receipt::from_json(&other).unwrap().hash(), h);
-    match s.put_receipt(&other) {
-        Err(Error::Conflict { hash }) => assert_eq!(hash, h),
+    let r = Receipt::from_json(&good).unwrap();
+    let planted = b"planted".to_vec();
+    db.client()
+        .execute(
+            "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, fn_hash, publisher)
+             VALUES ($1, $2, $3, $4, $4::text::timestamptz, $5, $6)",
+            &[&r.hash(), &planted, &r.cell().id(), &r.tx(), &r.cell().fn_hash, &r.publisher()],
+        )
+        .unwrap();
+    match s.put_receipt(&good) {
+        Err(Error::Conflict { hash }) => assert_eq!(hash, r.hash()),
         x => panic!("{x:?}"),
     }
-    assert_eq!(&*s.receipt(&h).unwrap(), jcs(&good).as_slice());
-}
-
-fn json_of(b: &[u8]) -> datumesh_core::json::Value {
-    datumesh_core::json::parse(b).unwrap()
+    assert_eq!(&*s.receipt(r.hash()).unwrap(), planted.as_slice());
 }

@@ -19,7 +19,7 @@ fn every_statement_prepares_against_the_migrated_schema() {
 #[test]
 fn statements_do_not_prepare_without_the_schema() {
     let db = TestDb::empty();
-    let s = db.store();
+    let s = db.bare_store();
     assert!(s.check_statements().is_err());
 }
 

@@ -119,6 +119,11 @@ fn import_vectors_export_and_round_trip() {
     assert!(lines.iter().filter(|l| l.starts_with(r#"{"receipt":"#)).count() >= 12);
     assert!(lines.iter().any(|l| l.starts_with(r#"{"blob":"#)));
     assert!(lines.iter().any(|l| l.starts_with(r#"{"version":"#)));
+    // The vectors' key documents are imported as namespaces, and exported before the
+    // receipts they verify.
+    let first_ns = lines.iter().position(|l| l.starts_with(r#"{"namespace":"#)).expect("namespaces exported");
+    let first_receipt = lines.iter().position(|l| l.starts_with(r#"{"receipt":"#)).unwrap();
+    assert!(first_ns < first_receipt);
     // Every line is JSON.
     for l in &lines {
         datumesh_core::json::parse(l.as_bytes()).unwrap();
@@ -193,4 +198,17 @@ fn usage_errors_exit_2() {
     let o = run(&["migrate"], None, None);
     assert_eq!(o.status.code(), Some(2));
     assert!(text(&o.stderr).contains("DATABASE_URL"));
+}
+
+#[test]
+fn import_refuses_receipts_without_their_namespace() {
+    let db = Db::new();
+    ok(&db.run(&["migrate"]));
+    let v =
+        datumesh_core::json::parse(&std::fs::read(spec_vectors().join("receipt/stored-number.json")).unwrap()).unwrap();
+    let receipt = v.get("input").unwrap().clone();
+    let line = datumesh_core::json::Value::Object(vec![("receipt".into(), receipt)]).to_jcs();
+    let o = db.run_stdin(&["import", "-"], Some(&line));
+    assert_eq!(o.status.code(), Some(1));
+    assert!(text(&o.stderr).contains("E_KEY_UNAVAILABLE"), "{}", text(&o.stderr));
 }
