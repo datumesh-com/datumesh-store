@@ -204,7 +204,7 @@ impl State {
         let mut c = connect(url)?;
         let mut cells = Vec::new();
         for r in c.query(
-            "SELECT v.cell_id, min(v.tx), max(v.tx), min(r.bytes) FROM versions v JOIN receipts r ON r.hash = v.receipt_hash GROUP BY v.cell_id",
+            "SELECT v.cell_id, v.first, v.last, r.bytes FROM (SELECT cell_id, min(tx) AS first, max(tx) AS last, min(receipt_hash) AS h FROM versions GROUP BY cell_id) v JOIN receipts r ON r.hash = v.h",
             &[],
         )? {
             let (id, first, last, bytes): (String, String, String, Vec<u8>) = (r.get(0), r.get(1), r.get(2), r.get(3));

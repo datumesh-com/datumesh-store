@@ -82,7 +82,10 @@ impl fmt::Display for Error {
             Error::Conflict { hash } => {
                 write!(f, "receipt {hash} is stored with other bytes (another signature); kept the stored one")
             }
-            Error::Database(e) => write!(f, "database: {e}"),
+            Error::Database(e) => match e.as_db_error() {
+                Some(d) => write!(f, "database: {} ({})", d.message(), d.code().code()),
+                None => write!(f, "database: {e}"),
+            },
             Error::PoolTimeout => f.write_str("no database connection became free in time"),
             Error::Migration(m) => write!(f, "migration: {m}"),
         }

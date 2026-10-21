@@ -33,9 +33,17 @@ environment: DATABASE_URL (postgres://user:password@host:port/database)";
 /// A failure and the exit status it gives.
 pub(crate) struct Fail(pub u8, pub String);
 
-impl<E: std::fmt::Display> From<E> for Fail {
+impl<E: std::error::Error> From<E> for Fail {
+    /// The error and its sources (a `postgres::Error` shows only "db error" by itself).
     fn from(e: E) -> Fail {
-        Fail(1, e.to_string())
+        let mut msg = e.to_string();
+        let mut source = e.source();
+        while let Some(s) = source {
+            msg.push_str(": ");
+            msg.push_str(&s.to_string());
+            source = s.source();
+        }
+        Fail(1, msg)
     }
 }
 
