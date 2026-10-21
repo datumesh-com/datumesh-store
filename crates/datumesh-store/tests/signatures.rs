@@ -108,8 +108,8 @@ fn unknown_key_ids_and_keys_outside_their_window_are_refused() {
 
 #[test]
 fn a_later_key_document_does_not_touch_stored_receipts() {
-    // Revoking (dropping) a key afterwards: what was stored stays and stays readable; new
-    // receipts by that key are refused.
+    // Revoking (dropping) a key afterwards: what was stored stays and stays readable, and
+    // putting it again is idempotent; new receipts by that key are refused.
     let db = TestDb::migrated();
     let s = db.store();
     let v = vector("receipt/stored-number");
@@ -128,9 +128,17 @@ fn a_later_key_document_does_not_touch_stored_receipts() {
     .to_jcs();
     s.put_namespace("rates.example.org", &revoked, "2024-06-02T00:00:00.000000Z").unwrap();
     assert!(s.receipt(&h).is_some());
-    // put_receipt always verifies against the current document: putting the stored receipt
-    // again is now refused, and the stored copy stays.
-    refused(s.put_receipt(&input(&v)), ErrorCode::KeyUnknown);
-    assert!(s.receipt(&h).is_some());
+    // Putting the stored receipt again is idempotent: its canonical form is the stored copy,
+    // which verified when stored, so it is not re-checked (as given and canonical).
+    assert_eq!(s.put_receipt(&input(&v)).unwrap(), h);
+    assert_eq!(s.put_receipt(&jcs(&input(&v))).unwrap(), h);
+    // Other bytes for that hash are verified first: a forged signature is refused with
+    // verify's code, not reported as a conflict.
+    let good = jcs(&input(&v));
+    let sig = Receipt::from_json(&good).unwrap().sig().to_string();
+    let forged_sig = format!("{}{}", if sig.starts_with('0') { "1" } else { "0" }, &sig[1..]);
+    let forged = String::from_utf8(good.clone()).unwrap().replace(&sig, &forged_sig).into_bytes();
+    refused(s.put_receipt(&forged), ErrorCode::KeyUnknown);
+    assert_eq!(&*s.receipt(&h).unwrap(), good.as_slice());
     refused(s.put_receipt(&stored_number_at("1.09", "2024-03-20T00:00:00.000000Z")), ErrorCode::KeyUnknown);
 }
