@@ -108,19 +108,19 @@ datumesh-store bench                   # see below
 
 ## Benchmark
 
-`tools/bench.sh` runs `datumesh-store bench` (release build) against a dedicated `postgres:16` container whose data directory is a host volume, then times a cold restart. Results on the development host (6 vCPU, 15 GB RAM, virtual disk; 2026-10-21), 1,000,000 versions over 10,000 cells (100 each), every version a receipt signed with feature `sign` and stored through `put_receipt` + `put_version` from 6 threads (546.9 s, 1,829 versions/s; loading sessions with `synchronous_commit = off`), plus 1,000 receipts depending on one input. Timings are one call at a time through `PgStore`, `synchronous_commit = on`, 10,000 samples:
+`tools/bench.sh` runs `datumesh-store bench` (release build) against a dedicated `postgres:16` container whose data directory is a host volume, then times a cold restart. Results on the development host (6 vCPU, 15 GB RAM, virtual disk; 2026-10-21), 1,000,000 versions over 10,000 cells (100 each), every version a receipt signed with feature `sign`, verified by `put_receipt` against the stored key document and stored with `put_version`, from 6 threads: 660.2 s, 1,515 versions/s (loading sessions with `synchronous_commit = off`; before `put_receipt` verified signatures the same load took 546.9 s, 1,829 versions/s). Plus 1,000 receipts depending on one input. Timings are one call at a time through `PgStore`, `synchronous_commit = on`, 10,000 samples:
 
 | Operation | p50 | p99 | mean |
 |---|---:|---:|---:|
-| `version_asof` (random cell, random time) | 215 µs | 394 µs | 227 µs |
-| `receipt` (random of the 1,000,000 version receipts) | 214 µs | 417 µs | 227 µs |
-| `put_version` (new latest version; one transaction, fsync) | 2.06 ms | 3.43 ms | 2.12 ms |
-| `dependents` (1,000 dependents) | 1.38 ms | 2.59 ms | 1.50 ms |
-| after a restart with the page cache dropped (2,000 samples): `version_asof` / `receipt` | 605 / 900 µs | 1.21 / 1.50 ms | |
+| `version_asof` (random cell, random time) | 212 µs | 420 µs | 230 µs |
+| `receipt` (random of the 1,000,000 version receipts) | 193 µs | 393 µs | 205 µs |
+| `put_version` (new latest version; one transaction, fsync) | 1.90 ms | 3.88 ms | 2.04 ms |
+| `dependents` (1,000 dependents) | 1.38 ms | 2.45 ms | 1.47 ms |
+| after a restart with the page cache dropped (2,000 samples): `version_asof` / `receipt` | 536 / 915 µs | 1.23 / 1.60 ms | |
 
-Disk: `receipts` 1,129 MB + 324 MB indexes, `versions` 197 MB + 314 MB indexes; 1,965 MB for all tables (about 2.0 KB per version, of which the canonical receipt is about 1.1 KB). Cold restart: `docker stop` 0.4 s (4.6 s right after the load, a shutdown checkpoint); after dropping the page cache, `docker start` to the first answered `version_asof` 1.2-1.4 s, of which about 0.5 s is starting the tool's own container; the probe itself answered 112-168 ms after it started.
+Disk: `receipts` 1,129 MB + 324 MB indexes, `versions` 197 MB + 314 MB indexes; 1,965 MB for all tables (about 2.0 KB per version, of which the canonical receipt is about 1.1 KB). Cold restart: `docker stop` 0.4 s (about 4 s right after the load, a shutdown checkpoint); after dropping the page cache, `docker start` to the first answered `version_asof` 1.2-1.6 s, of which about 0.5 s is starting the tool's own container; the probe itself answered 112-168 ms after it started.
 
-Blobs (`put_blob` / `blob`, median): 1 MiB 33.8 / 4.9 ms, 4 MiB 127 / 19.6 ms, 16 MiB 330 / 63 ms, 64 MiB 1,683 / 298 ms; writes level off near 30-50 MB/s from 1 MiB on and every value is read and written whole, in memory on both sides. Keep blobs up to 1 MiB in the table; above that, object storage (content-addressed by the same SHA-256) is the better home.
+Blobs (`put_blob` / `blob`, median, two runs): 1 MiB 34 / 5-6 ms, 4 MiB 127-135 / 19 ms, 16 MiB 330-473 / 63-82 ms, 64 MiB 1,683-1,875 / 298-310 ms; writes level off near 30-50 MB/s from 1 MiB on and every value is read and written whole, in memory on both sides. Keep blobs up to 1 MiB in the table; above that, object storage (content-addressed by the same SHA-256) is the better home.
 
 Server settings (`tools/bench.sh`): `shared_buffers=4GB`, `effective_cache_size=11GB`, `work_mem=32MB`, `maintenance_work_mem=1GB`, `wal_buffers=16MB`, `max_wal_size=8GB`, `min_wal_size=1GB`, `checkpoint_completion_target=0.9`, `wal_compression=lz4`, `random_page_cost=1.1`, `effective_io_concurrency=200`, `max_worker_processes=6`, `max_parallel_workers=6`, `max_parallel_workers_per_gather=3`, `max_parallel_maintenance_workers=3`, `max_connections=50`, `jit=off`, `--shm-size=1g`; `fsync` and `synchronous_commit` on.
 
