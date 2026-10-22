@@ -37,12 +37,27 @@ jobs:
         with:
           submodules: true
       - run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+      # A version already on crates.io (0.1.0 was first published with a token, before
+      # Trusted Publishing could be configured) is skipped rather than failing the run.
+      - name: versions already published
+        id: published
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for c in datumesh-store datumesh-store-cli; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -A 'datumesh-store release (github.com/datumesh-com/datumesh-store)' "https://crates.io/api/v1/crates/$c/$v")"
+            if [ "$code" = 200 ]; then out=true; else out=false; fi
+            echo "$c $v published: $out"
+            echo "${c//-/_}=$out" >> "$GITHUB_OUTPUT"
+          done
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
+        if: steps.published.outputs.datumesh_store != 'true' || steps.published.outputs.datumesh_store_cli != 'true'
       # The library first: the command depends on it.
       - run: cargo publish -p datumesh-store --locked
+        if: steps.published.outputs.datumesh_store != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
       - run: cargo publish -p datumesh-store-cli --locked
+        if: steps.published.outputs.datumesh_store_cli != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
