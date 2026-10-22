@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 
 use datumesh_core::json::{self, Value};
 use datumesh_core::{Cell, Receipt, ReceiptBuilder, Scalar, SigningKey, Type};
-use datumesh_store::postgres::{Config, NoTls};
-use datumesh_store::{PgStore, PoolOptions, Resolver, Store};
+use datumesh_store::{pg_unstable, PgStore, Resolver, Store};
 
 use crate::{connect, Fail};
 
@@ -98,7 +97,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     let rates = key(RATES_SEED);
     let calc = key(CALC_SEED);
     let per_cell = o.versions / o.cells;
-    let measure = PgStore::connect(url).map_err(|e| Fail(2, format!("cannot connect: {e}")))?;
+    let measure = crate::store(url)?;
     measure.put_namespace("rates.example.org", RATES_KEYS.as_bytes(), VALIDATED_AT)?;
     measure.put_namespace("calc.example.net", CALC_KEYS.as_bytes(), VALIDATED_AT)?;
     let fx_rate = measure.put_descriptor(FX_RATE.as_bytes())?;
@@ -107,14 +106,14 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     let state = if o.skip_load {
         State::read(url)?
     } else {
-        let config: Config = url.parse().map_err(|e| Fail(2, format!("DATABASE_URL: {e}")))?;
-        let loader = PgStore::with_connector(
+        let connector = crate::connector(crate::config(url)?)?;
+        let loader = pg_unstable::with_connector(
             move || {
-                let mut c = config.connect(NoTls)?;
+                let mut c = connector.connect()?;
                 c.batch_execute("SET synchronous_commit = off")?;
                 Ok(c)
             },
-            PoolOptions::new().max_size(o.threads),
+            crate::options()?.max_size(o.threads),
         )?;
         load(&loader, o, per_cell, &fx_rate, &convert, &rates, &calc)?
     };
@@ -445,10 +444,10 @@ fn wait(url: &str) -> Result<u8, Fail> {
     loop {
         attempts += 1;
         let answered = (|| -> Option<()> {
-            let mut c = url.parse::<Config>().ok()?.connect(NoTls).ok()?;
+            let mut c = connect(url).ok()?;
             let row = c.query_opt("SELECT cell_id, tx FROM versions ORDER BY cell_id LIMIT 1", &[]).ok()??;
             let (cell, tx): (String, String) = (row.get(0), row.get(1));
-            let store = PgStore::connect(url).ok()?;
+            let store = crate::store(url).ok()?;
             store.version_asof(&cell, &tx).ok()?.map(|_| ())
         })();
         if answered.is_some() {

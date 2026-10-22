@@ -1,7 +1,9 @@
 //! `datumesh-store`: migrate, import, export and benchmark a datumesh-store database.
 //!
-//! The database is named by `DATABASE_URL` (a `postgres://` URL, no TLS). Exit status: 0
-//! success, 1 failure (or drift found by `migrate --check`), 2 usage or connection error.
+//! The database is named by `DATABASE_URL` (a `postgres://` URL; TLS as its `sslmode` says,
+//! verified against the Mozilla roots plus the PEM bundle in `DATABASE_CA_FILE`, if set).
+//! Exit status: 0 success, 1 failure (or drift found by `migrate --check`), 2 usage or
+//! connection error.
 
 #![forbid(unsafe_code)]
 
@@ -11,8 +13,9 @@ mod import;
 
 use std::process::ExitCode;
 
-use datumesh_store::migrate;
-use datumesh_store::postgres::{Client, Config, NoTls};
+use datumesh_store::pg_unstable::{self, Connector};
+use datumesh_store::{migrate, PgStore, PoolOptions};
+use postgres::{Client, Config};
 
 const USAGE: &str = "usage: datumesh-store [-v] <command>
 
@@ -28,7 +31,12 @@ commands:
                      load and time the store (see README)
   bench --wait       wait until the database answers a version_asof; print the time
 
-environment: DATABASE_URL (postgres://user:password@host:port/database)";
+environment:
+  DATABASE_URL       postgres://user:password@host:port/database[?sslmode=disable|prefer|require]
+                     (TLS when the server offers it, by default; the server's certificate
+                     and host name are always verified)
+  DATABASE_CA_FILE   PEM file of root certificates to trust besides the Mozilla roots
+                     (a private CA, a self-signed server)";
 
 /// A failure and the exit status it gives.
 pub(crate) struct Fail(pub u8, pub String);
@@ -36,15 +44,24 @@ pub(crate) struct Fail(pub u8, pub String);
 impl<E: std::error::Error> From<E> for Fail {
     /// The error and its sources (a `postgres::Error` shows only "db error" by itself).
     fn from(e: E) -> Fail {
-        let mut msg = e.to_string();
-        let mut source = e.source();
-        while let Some(s) = source {
-            msg.push_str(": ");
-            msg.push_str(&s.to_string());
-            source = s.source();
-        }
-        Fail(1, msg)
+        Fail(1, chain(&e))
     }
+}
+
+/// An error's text followed by those of its sources, each once.
+pub(crate) fn chain(e: &dyn std::error::Error) -> String {
+    let mut msg = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        // A store error's text may already hold its causes.
+        let text = s.to_string();
+        if !msg.contains(&text) {
+            msg.push_str(": ");
+            msg.push_str(&text);
+        }
+        source = s.source();
+    }
+    msg
 }
 
 fn usage(msg: &str) -> Fail {
@@ -114,14 +131,40 @@ fn database_url() -> Result<String, Fail> {
     std::env::var("DATABASE_URL").map_err(|_| Fail(2, "DATABASE_URL is not set".into()))
 }
 
+/// The pool options: the defaults, plus the roots of `DATABASE_CA_FILE`.
+pub(crate) fn options() -> Result<PoolOptions, Fail> {
+    let options = PoolOptions::new();
+    let Some(path) = std::env::var_os("DATABASE_CA_FILE") else { return Ok(options) };
+    let shown = path.to_string_lossy().into_owned();
+    let pem = std::fs::read(&path).map_err(|e| Fail(2, format!("DATABASE_CA_FILE {shown}: {e}")))?;
+    options.tls_root_certificates_pem(&pem).map_err(|e| Fail(2, format!("DATABASE_CA_FILE {shown}: {e}")))
+}
+
+pub(crate) fn config(url: &str) -> Result<Config, Fail> {
+    url.parse().map_err(|e: postgres::Error| Fail(2, format!("DATABASE_URL: {}", chain(&e))))
+}
+
+/// Opens clients of `config` as the store connects (TLS, `DATABASE_CA_FILE`).
+pub(crate) fn connector(config: Config) -> Result<Connector, Fail> {
+    Connector::new(config, &options()?).map_err(|e| Fail(2, e.to_string()))
+}
+
+/// A plain client, connected as the store connects.
 pub(crate) fn connect(url: &str) -> Result<Client, Fail> {
-    let config: Config = url.parse().map_err(|e| Fail(2, format!("DATABASE_URL: {e}")))?;
-    config.connect(NoTls).map_err(|e| Fail(2, format!("cannot connect: {e}")))
+    connector(config(url)?)?.connect().map_err(|e| Fail(2, format!("cannot connect: {}", chain(&e))))
+}
+
+/// A store (`PgStore::connect_with`, with `DATABASE_CA_FILE`).
+pub(crate) fn store(url: &str) -> Result<PgStore, Fail> {
+    PgStore::connect_with(url, options()?).map_err(|e| match e {
+        datumesh_store::Error::Config(_) => Fail(2, e.to_string()),
+        e => Fail(2, format!("cannot connect: {e}")),
+    })
 }
 
 fn migrate_apply(url: &str) -> Result<u8, Fail> {
-    let mut c = connect(url)?;
-    let applied = migrate::apply(&mut c)?;
+    let store = store(url)?;
+    let applied = migrate::apply(&store)?;
     if applied.is_empty() {
         println!("schema up to date ({} migrations)", migrate::MIGRATIONS.len());
     }
@@ -133,19 +176,22 @@ fn migrate_apply(url: &str) -> Result<u8, Fail> {
 }
 
 fn migrate_check(url: &str) -> Result<u8, Fail> {
-    let config: Config = url.parse().map_err(|e| Fail(2, format!("DATABASE_URL: {e}")))?;
-    let mut live = connect(url)?;
+    let config = config(url)?;
+    let live = store(url)?;
+    let mut admin = connect(url)?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     let scratch = format!("datumesh_check_{}_{nanos}", std::process::id());
-    live.batch_execute(&format!("CREATE DATABASE {scratch}"))
-        .map_err(|e| Fail(1, format!("cannot create the scratch database (CREATEDB needed): {e}")))?;
+    admin
+        .batch_execute(&format!("CREATE DATABASE {scratch}"))
+        .map_err(|e| Fail(1, format!("cannot create the scratch database (CREATEDB needed): {}", chain(&e))))?;
     let result = (|| -> Result<Vec<String>, Fail> {
         let mut sc = config.clone();
         sc.dbname(&scratch);
-        let mut scratch_client = sc.connect(NoTls)?;
-        Ok(migrate::check(&mut live, &mut scratch_client)?)
+        let connector = connector(sc)?;
+        let scratch_store = pg_unstable::with_connector(move || connector.connect(), PoolOptions::new().max_size(1))?;
+        Ok(migrate::check(&live, &scratch_store)?)
     })();
-    let dropped = live.batch_execute(&format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE)"));
+    let dropped = admin.batch_execute(&format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE)"));
     let diff = result?;
     dropped?;
     if !diff.is_empty() {
@@ -155,8 +201,7 @@ fn migrate_check(url: &str) -> Result<u8, Fail> {
         }
         return Ok(1);
     }
-    let store = datumesh_store::PgStore::connect(url)?;
-    let n = store.check_statements()?;
+    let n = live.check_statements()?;
     println!("no drift: the schema is what the migrations produce; {n} statements prepare");
     Ok(0)
 }

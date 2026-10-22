@@ -1,6 +1,6 @@
 [package]
 name = "datumesh-store-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "Command-line tool for datumesh-store: migrate, import, export, bench."
 edition.workspace = true
 rust-version.workspace = true
@@ -19,7 +19,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-datumesh-store = { path = "../datumesh-store", version = "0.1.0" }
+# Exactly this version: the command uses `datumesh_store::pg_unstable`, which is outside
+# semver (any release may change it); both crates are released together.
+datumesh-store = { path = "../datumesh-store", version = "=0.1.1" }
 datumesh-core = { workspace = true, features = ["sign"] }
 postgres.workspace = true
 tracing.workspace = true

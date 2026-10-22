@@ -2,16 +2,15 @@
 
 use std::borrow::Cow;
 
+use crate::error::{Db, Error, Result};
+use crate::pg_unstable::Connector;
+use crate::pool::{Conn, Pool, PoolOptions, Pooled};
+use crate::sql::Q;
+use crate::{Namespace, Store, Version};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, Descriptor, ErrorCode, Keys, Receipt, Resolver, Scalar,
 };
-use postgres::NoTls;
-
-use crate::error::{Error, Result};
-use crate::pool::{Conn, Pool, PoolOptions};
-use crate::sql::Q;
-use crate::{Namespace, Store, Version};
 
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
 /// (behind an `Arc`); each call checks a connection out for its duration.
@@ -39,23 +38,41 @@ fn is_instant(s: &str) -> bool {
 }
 
 impl PgStore {
-    /// Connects to a `postgres://` URL or `key=value` connection string, without TLS, with
-    /// the default [`PoolOptions`]. One connection is opened at once, so a wrong URL fails
-    /// here. For TLS, use [`with_connector`](Self::with_connector).
+    /// Connects to a `postgres://` URL or `key=value` connection string with the default
+    /// [`PoolOptions`]: [`connect_with(url, PoolOptions::new())`](Self::connect_with).
     pub fn connect(url: &str) -> Result<PgStore> {
-        let config: postgres::Config = url.parse()?;
-        PgStore::with_connector(move || config.connect(NoTls), PoolOptions::new())
+        PgStore::connect_with(url, PoolOptions::new())
     }
 
-    /// A store whose pool opens connections with `connect` (any TLS setup, any
-    /// configuration). One connection is opened at once, so a failing connector fails here.
-    pub fn with_connector<F>(connect: F, options: PoolOptions) -> Result<PgStore>
-    where
-        F: Fn() -> core::result::Result<postgres::Client, postgres::Error> + Send + Sync + 'static,
-    {
-        let store = PgStore { pool: Pool::new(Box::new(connect), options) };
+    /// Connects to a `postgres://` URL or `key=value` connection string, with a pool and TLS
+    /// roots as `options` say. One connection is opened at once, so a wrong URL, an
+    /// unreachable server or a refused certificate fails here; nothing else is done on it
+    /// (no statement is prepared, the schema is not looked at), so an empty database is fine
+    /// (create the schema with [`migrate::apply`](crate::migrate::apply)).
+    ///
+    /// TLS (rustls) is used as the URL's `sslmode` says: `disable` never, `prefer` (the
+    /// default) when the server offers it, `require` always. Whenever it is used, the
+    /// server's certificate and host name are verified, against the Mozilla roots plus the
+    /// roots added with [`PoolOptions::tls_root_certificates_pem`]; there is no way to
+    /// accept any certificate. So a server with `ssl=on` and a self-signed certificate (or
+    /// one from a private CA) fails even under the default `prefer`: add its CA, or connect
+    /// with `sslmode=disable`.
+    pub fn connect_with(url: &str, options: PoolOptions) -> Result<PgStore> {
+        let config: postgres::Config = url.parse().db()?;
+        let connector = Connector::new(config, &options)?;
+        PgStore::from_pool(Pool::new(Box::new(move || connector.connect()), options))
+    }
+
+    /// A store on `pool`, after opening one connection.
+    pub(crate) fn from_pool(pool: Pool) -> Result<PgStore> {
+        let store = PgStore { pool };
         drop(store.pool.get()?);
         Ok(store)
+    }
+
+    /// A pooled connection, held until dropped (migrations hold one throughout).
+    pub(crate) fn conn(&self) -> Result<Pooled<'_>> {
+        self.pool.get()
     }
 
     /// Prepares every SQL statement the store uses against the live schema, on a fresh
@@ -64,7 +81,7 @@ impl PgStore {
     pub fn check_statements(&self) -> Result<usize> {
         let mut c = self.pool.get()?;
         for q in Q::ALL {
-            c.client.prepare_typed(q.sql(), q.types())?;
+            c.client.prepare_typed(q.sql(), q.types()).db()?;
         }
         Ok(Q::ALL.len())
     }
@@ -85,24 +102,26 @@ impl PgStore {
 
     fn version_rows(rows: &[postgres::Row], cell_id: &str) -> Result<Vec<Version>> {
         rows.iter()
-            .map(|r| Ok(Version { cell_id: cell_id.to_string(), tx: r.try_get(0)?, receipt_hash: r.try_get(1)? }))
+            .map(|r| {
+                Ok(Version { cell_id: cell_id.to_string(), tx: r.try_get(0).db()?, receipt_hash: r.try_get(1).db()? })
+            })
             .collect()
     }
 }
 
 fn get_bytes(c: &mut Conn, q: Q, key: &str) -> Result<Option<Vec<u8>>> {
     let st = c.stmt(q)?;
-    let row = c.client.query_opt(&st, &[&key])?;
+    let row = c.client.query_opt(&st, &[&key]).db()?;
     Ok(match row {
-        Some(r) => Some(r.try_get(0)?),
+        Some(r) => Some(r.try_get(0).db()?),
         None => None,
     })
 }
 
 fn get_strings(c: &mut Conn, q: Q, key: &str) -> Result<Vec<String>> {
     let st = c.stmt(q)?;
-    let rows = c.client.query(&st, &[&key])?;
-    rows.iter().map(|r| Ok(r.try_get(0)?)).collect()
+    let rows = c.client.query(&st, &[&key]).db()?;
+    rows.iter().map(|r| r.try_get(0).db()).collect()
 }
 
 impl Resolver for PgStore {
@@ -138,8 +157,8 @@ impl Resolver for PgStore {
                 }
             }
             let st = c.stmt(Q::ValueAsof)?;
-            let Some(row) = c.client.query_opt(&st, &[&cell.id(), &asof])? else { return Ok(None) };
-            let bytes: Vec<u8> = row.try_get(0)?;
+            let Some(row) = c.client.query_opt(&st, &[&cell.id(), &asof]).db()? else { return Ok(None) };
+            let bytes: Vec<u8> = row.try_get(0).db()?;
             match Receipt::from_json(&bytes) {
                 Ok(r) => Ok(Some(r.value().clone())),
                 Err(e) => {
@@ -158,7 +177,7 @@ impl Store for PgStore {
         let canonical = d.canonical();
         self.run("put_descriptor", |c| {
             let st = c.stmt(Q::DescriptorPut)?;
-            c.client.execute(&st, &[&hash, &canonical])?;
+            c.client.execute(&st, &[&hash, &canonical]).db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", fn_hash = %hash, "put_descriptor");
@@ -179,12 +198,12 @@ impl Store for PgStore {
             let put = c.stmt(Q::ReceiptPut)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let edges = c.stmt(Q::EdgesPut)?;
-            let mut t = c.client.transaction()?;
+            let mut t = c.client.transaction().db()?;
             // Idempotent: the very receipt already stored verified when it was stored, and
             // the stored copy is unchanged, so it is not checked again (even if its key has
             // since been revoked).
-            if let Some(row) = t.query_opt(&get, &[&hash])? {
-                let stored: Vec<u8> = row.try_get(0)?;
+            if let Some(row) = t.query_opt(&get, &[&hash]).db()? {
+                let stored: Vec<u8> = row.try_get(0).db()?;
                 if stored == canonical {
                     return Ok(());
                 }
@@ -192,8 +211,8 @@ impl Store for PgStore {
             // Steps 5-6 against the stored key document of the signer host; none stored is
             // a host without keys (E_KEY_UNAVAILABLE).
             let mut keys = Keys::new();
-            if let Some(row) = t.query_opt(&ns, &[&host])? {
-                let doc: Vec<u8> = row.try_get(0)?;
+            if let Some(row) = t.query_opt(&ns, &[&host]).db()? {
+                let doc: Vec<u8> = row.try_get(0).db()?;
                 keys.insert_response(&host, 200, Some(&doc));
             }
             let out = verify(bytes, &keys, None, None);
@@ -202,18 +221,18 @@ impl Store for PgStore {
                     datumesh_core::Error::new(ErrorCode::Signature, "$", "the receipt did not verify")
                 })));
             }
-            let n = t.execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.cell().fn_hash, &r.publisher()])?;
+            let n = t.execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.cell().fn_hash, &r.publisher()]).db()?;
             if n == 0 {
-                let row = t.query_one(&get, &[&hash])?;
-                let stored: Vec<u8> = row.try_get(0)?;
+                let row = t.query_one(&get, &[&hash]).db()?;
+                let stored: Vec<u8> = row.try_get(0).db()?;
                 if stored != canonical {
                     return Err(Error::Conflict { hash: hash.clone() });
                 }
             }
             if !inputs.is_empty() {
-                t.execute(&edges, &[&hash, &inputs])?;
+                t.execute(&edges, &[&hash, &inputs]).db()?;
             }
-            t.commit()?;
+            t.commit().db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", hash = %hash, cell_id = %cell_id, "put_receipt");
@@ -225,7 +244,7 @@ impl Store for PgStore {
         let length = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         self.run("put_blob", |c| {
             let st = c.stmt(Q::BlobPut)?;
-            c.client.execute(&st, &[&sha, &bytes, &length])?;
+            c.client.execute(&st, &[&sha, &bytes, &length]).db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", sha256 = %sha, length, "put_blob");
@@ -246,20 +265,20 @@ impl Store for PgStore {
             let meta = c.stmt(Q::ReceiptMeta)?;
             let latest = c.stmt(Q::VersionLatest)?;
             let put = c.stmt(Q::VersionPut)?;
-            let mut t = c.client.transaction()?;
-            t.execute(&lock, &[&"versions", &cell_id])?;
-            let Some(row) = t.query_opt(&meta, &[&receipt_hash])? else {
+            let mut t = c.client.transaction().db()?;
+            t.execute(&lock, &[&"versions", &cell_id]).db()?;
+            let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
-            let (r_cell, r_tx): (String, String) = (row.try_get(0)?, row.try_get(1)?);
+            let (r_cell, r_tx): (String, String) = (row.try_get(0).db()?, row.try_get(1).db()?);
             if r_cell != cell_id {
                 return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
             }
             if r_tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: r_tx });
             }
-            if let Some(row) = t.query_opt(&latest, &[&cell_id])? {
-                let l: String = row.try_get(0)?;
+            if let Some(row) = t.query_opt(&latest, &[&cell_id]).db()? {
+                let l: String = row.try_get(0).db()?;
                 if tx <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
@@ -269,8 +288,8 @@ impl Store for PgStore {
                     });
                 }
             }
-            t.execute(&put, &[&cell_id, &tx, &receipt_hash])?;
-            t.commit()?;
+            t.execute(&put, &[&cell_id, &tx, &receipt_hash]).db()?;
+            t.commit().db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", cell_id, tx, receipt_hash, "put_version");
@@ -282,7 +301,7 @@ impl Store for PgStore {
         check_instant(asof, "asof")?;
         self.run("version_asof", |c| {
             let st = c.stmt(Q::VersionAsof)?;
-            let rows = c.client.query(&st, &[&cell_id, &asof])?;
+            let rows = c.client.query(&st, &[&cell_id, &asof]).db()?;
             Ok(PgStore::version_rows(&rows, cell_id)?.pop())
         })
     }
@@ -293,7 +312,7 @@ impl Store for PgStore {
         check_instant(to, "to")?;
         self.run("versions", |c| {
             let st = c.stmt(Q::VersionRange)?;
-            let rows = c.client.query(&st, &[&cell_id, &from, &to])?;
+            let rows = c.client.query(&st, &[&cell_id, &from, &to]).db()?;
             PgStore::version_rows(&rows, cell_id)
         })
     }
@@ -302,7 +321,7 @@ impl Store for PgStore {
         check_hex(cell_id, 64, "cell_id")?;
         self.run("latest", |c| {
             let st = c.stmt(Q::VersionLatest)?;
-            let rows = c.client.query(&st, &[&cell_id])?;
+            let rows = c.client.query(&st, &[&cell_id]).db()?;
             Ok(PgStore::version_rows(&rows, cell_id)?.pop())
         })
     }
@@ -326,10 +345,10 @@ impl Store for PgStore {
             let lock = c.stmt(Q::Lock)?;
             let get = c.stmt(Q::NamespaceGet)?;
             let put = c.stmt(Q::NamespacePut)?;
-            let mut t = c.client.transaction()?;
-            t.execute(&lock, &[&"namespaces", &host])?;
-            if let Some(row) = t.query_opt(&get, &[&host])? {
-                let at: String = row.try_get(1)?;
+            let mut t = c.client.transaction().db()?;
+            t.execute(&lock, &[&"namespaces", &host]).db()?;
+            if let Some(row) = t.query_opt(&get, &[&host]).db()? {
+                let at: String = row.try_get(1).db()?;
                 if validated_at < at.as_str() {
                     return Err(Error::NotLater {
                         what: "namespace",
@@ -339,8 +358,8 @@ impl Store for PgStore {
                     });
                 }
             }
-            t.execute(&put, &[&host, &canonical, &validated_at])?;
-            t.commit()?;
+            t.execute(&put, &[&host, &canonical, &validated_at]).db()?;
+            t.commit().db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", host, validated_at, "put_namespace");
@@ -351,12 +370,12 @@ impl Store for PgStore {
         check_dns_name(host, "host")?;
         self.run("namespace", |c| {
             let st = c.stmt(Q::NamespaceGet)?;
-            let Some(row) = c.client.query_opt(&st, &[&host])? else { return Ok(None) };
+            let Some(row) = c.client.query_opt(&st, &[&host]).db()? else { return Ok(None) };
             Ok(Some(Namespace {
                 host: host.to_string(),
-                keydoc: row.try_get(0)?,
-                validated_at: row.try_get(1)?,
-                suspended_at: row.try_get(2)?,
+                keydoc: row.try_get(0).db()?,
+                validated_at: row.try_get(1).db()?,
+                suspended_at: row.try_get(2).db()?,
             }))
         })
     }
@@ -370,14 +389,14 @@ impl Store for PgStore {
             let exists = c.stmt(Q::DescriptorExists)?;
             let latest = c.stmt(Q::NameLatest)?;
             let put = c.stmt(Q::NamePut)?;
-            let mut t = c.client.transaction()?;
-            t.execute(&lock, &[&"names", &fn_name])?;
-            let found: bool = t.query_one(&exists, &[&fn_hash])?.try_get(0)?;
+            let mut t = c.client.transaction().db()?;
+            t.execute(&lock, &[&"names", &fn_name]).db()?;
+            let found: bool = t.query_one(&exists, &[&fn_hash]).db()?.try_get(0).db()?;
             if !found {
                 return Err(Error::NotFound { what: "descriptor", key: fn_hash.to_string() });
             }
-            if let Some(row) = t.query_opt(&latest, &[&fn_name])? {
-                let l: String = row.try_get(0)?;
+            if let Some(row) = t.query_opt(&latest, &[&fn_name]).db()? {
+                let l: String = row.try_get(0).db()?;
                 if tx <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "name",
@@ -387,8 +406,8 @@ impl Store for PgStore {
                     });
                 }
             }
-            t.execute(&put, &[&fn_name, &tx, &fn_hash])?;
-            t.commit()?;
+            t.execute(&put, &[&fn_name, &tx, &fn_hash]).db()?;
+            t.commit().db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", fn_name, fn_hash, tx, "bind_name");
@@ -400,9 +419,9 @@ impl Store for PgStore {
         check_instant(asof, "asof")?;
         self.run("resolve_name", |c| {
             let st = c.stmt(Q::NameAsof)?;
-            let row = c.client.query_opt(&st, &[&fn_name, &asof])?;
+            let row = c.client.query_opt(&st, &[&fn_name, &asof]).db()?;
             Ok(match row {
-                Some(r) => Some(r.try_get(0)?),
+                Some(r) => Some(r.try_get(0).db()?),
                 None => None,
             })
         })

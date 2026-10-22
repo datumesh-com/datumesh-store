@@ -1,6 +1,6 @@
 [package]
 name = "datumesh-store"
-version = "0.1.0"
+version = "0.1.1"
 description = "PostgreSQL store for Datumesh: descriptors, receipts, blobs, versions over transaction time, lineage, namespaces and names; a datumesh-core Resolver."
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +16,10 @@ include = ["src/**/*.rs", "migrations/*.sql", "Cargo.toml", "LICENSE"]
 [dependencies]
 datumesh-core.workspace = true
 postgres.workspace = true
+rustls.workspace = true
+tokio-postgres-rustls.workspace = true
 tracing.workspace = true
+webpki-roots.workspace = true
 
 [dev-dependencies]
 datumesh-core = { workspace = true, features = ["testkit", "sign"] }

@@ -6,6 +6,13 @@
 //! The API is synchronous (the `postgres` driver, a small connection pool). Async callers run
 //! it on a blocking thread, e.g. `tokio::task::spawn_blocking`.
 //!
+//! [`PgStore::connect`] / [`PgStore::connect_with`] take a URL and [`PoolOptions`]; TLS
+//! (rustls) is used as the URL's `sslmode` says and always verifies the server's
+//! certificate and host name, against the Mozilla roots plus those added with
+//! [`PoolOptions::tls_root_certificates_pem`]. No type of the driver or of a TLS crate is
+//! part of the API, except in [`pg_unstable`] (any connection function, the driver
+//! itself), which is outside semver until 1.0.
+//!
 //! What is stored, and how:
 //!
 //! * Descriptors are checked by the core (`Descriptor::from_json`) and stored in canonical
@@ -37,7 +44,8 @@
 //! core's `Option` signatures; there a failure is logged with `tracing` (target
 //! `datumesh_store`) and answered `None`, which `verify` reports as unavailable.
 //!
-//! The schema comes from [`migrate::apply`] (the `datumesh-store migrate` command).
+//! The schema comes from [`migrate::apply`] (the `datumesh-store migrate` command), through
+//! a store on the (possibly empty) database.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -45,15 +53,16 @@
 use std::borrow::Cow;
 
 pub use datumesh_core::Resolver;
-pub use postgres;
 
 mod error;
 pub mod migrate;
 mod pg;
+pub mod pg_unstable;
 mod pool;
 mod sql;
+mod tls;
 
-pub use error::{Error, Result};
+pub use error::{DatabaseError, Error, Result};
 pub use pg::PgStore;
 pub use pool::PoolOptions;
 

@@ -261,6 +261,12 @@ fn every_command_works_over_tls_with_the_ca() {
     ok(&tls(&["import", vectors.to_str().unwrap()]));
     let export = ok(&tls(&["export"]));
     assert!(export.lines().any(|l| l.starts_with("{\"receipt\"")), "{export}");
+    // bench in a database of its own (its key documents are validated earlier than the
+    // imported ones).
+    let bench_db = Db::new_on(&admin);
+    let bench_url = format!("{}?sslmode=require", bench_db.url);
+    let tls = |args: &[&str]| run_env(args, Some(&bench_url), None, &with_ca);
+    ok(&tls(&["migrate"]));
     let out = ok(&tls(&[
         "bench",
         "--cells",

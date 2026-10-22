@@ -1,10 +1,14 @@
 //! Schema migrations: plain SQL files (`migrations/*.sql`, embedded), applied in order with
 //! a tracking table, and a schema check that compares the live database's catalog with the
 //! catalog the migrations produce in a scratch database.
+//!
+//! Each function works through a [`PgStore`], which connects to an empty database without
+//! touching it: `migrate::apply(&PgStore::connect(url)?)` creates the schema.
 
 use postgres::Client;
 
-use crate::error::{Error, Result};
+use crate::error::{Db, Error, Result};
+use crate::PgStore;
 
 /// One migration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,12 +45,19 @@ const LOCK: &str = "SELECT pg_advisory_lock(hashtextextended('datumesh-store:mig
 const UNLOCK: &str = "SELECT pg_advisory_unlock(hashtextextended('datumesh-store:migrate', 0))";
 
 /// Applies the migrations not yet applied, each in its own transaction, and returns their
-/// versions (empty when the schema is current). Concurrent callers are serialised; a
-/// migration whose recorded checksum differs from its SQL is an error.
-pub fn apply(client: &mut Client) -> Result<Vec<u32>> {
-    client.batch_execute(LOCK)?;
+/// versions (empty when the schema is current). Concurrent callers are serialised (a
+/// session-level advisory lock); a migration whose recorded checksum differs from its SQL is
+/// an error. Holds one of the store's pooled connections throughout, so the lock and the
+/// tracking table's transactions are on one session.
+pub fn apply(store: &PgStore) -> Result<Vec<u32>> {
+    let mut conn = store.conn()?;
+    apply_client(&mut conn.client)
+}
+
+fn apply_client(client: &mut Client) -> Result<Vec<u32>> {
+    client.batch_execute(LOCK).db()?;
     let result = apply_locked(client);
-    let unlocked = client.batch_execute(UNLOCK);
+    let unlocked = client.batch_execute(UNLOCK).db();
     let applied = result?;
     unlocked?;
     for v in &applied {
@@ -56,12 +67,12 @@ pub fn apply(client: &mut Client) -> Result<Vec<u32>> {
 }
 
 fn apply_locked(client: &mut Client) -> Result<Vec<u32>> {
-    client.batch_execute(TRACKING)?;
-    let rows = client.query("SELECT version, checksum FROM datumesh_schema_migrations", &[])?;
+    client.batch_execute(TRACKING).db()?;
+    let rows = client.query("SELECT version, checksum FROM datumesh_schema_migrations", &[]).db()?;
     let mut done = Vec::new();
     for r in &rows {
-        let v: i32 = r.try_get(0)?;
-        let c: String = r.try_get(1)?;
+        let v: i32 = r.try_get(0).db()?;
+        let c: String = r.try_get(1).db()?;
         done.push((v, c));
     }
     let mut applied = Vec::new();
@@ -78,13 +89,14 @@ fn apply_locked(client: &mut Client) -> Result<Vec<u32>> {
             }
             None => {}
         }
-        let mut t = client.transaction()?;
-        t.batch_execute(m.sql)?;
+        let mut t = client.transaction().db()?;
+        t.batch_execute(m.sql).db()?;
         t.execute(
             "INSERT INTO datumesh_schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
             &[&version, &m.name, &m.checksum()],
-        )?;
-        t.commit()?;
+        )
+        .db()?;
+        t.commit().db()?;
         applied.push(m.version);
     }
     if let Some((v, _)) = done.iter().find(|(v, _)| !MIGRATIONS.iter().any(|m| i64::from(m.version) == i64::from(*v))) {
@@ -96,7 +108,11 @@ fn apply_locked(client: &mut Client) -> Result<Vec<u32>> {
 /// The catalog of the current schema as sorted lines: relations, columns (position, type,
 /// nullability, default, collation, generation), constraints, indexes, triggers (with their
 /// enabled state), functions (a hash of their definition), and the recorded migrations.
-pub fn catalog(client: &mut Client) -> Result<Vec<String>> {
+pub fn catalog(store: &PgStore) -> Result<Vec<String>> {
+    catalog_client(&mut store.conn()?.client)
+}
+
+fn catalog_client(client: &mut Client) -> Result<Vec<String>> {
     let q = r#"
 WITH ns AS (SELECT oid FROM pg_namespace WHERE nspname = current_schema())
 SELECT 'relation ' || c.relkind::text || ' ' || c.relname
@@ -132,14 +148,14 @@ SELECT 'function ' || p.oid::regprocedure::text || ' ' || md5(pg_get_functiondef
   FROM pg_proc p WHERE p.pronamespace = (SELECT oid FROM ns) AND p.prokind IN ('f', 'p')
 "#;
     let mut lines = Vec::new();
-    for r in client.query(q, &[])? {
-        lines.push(r.try_get::<_, String>(0)?);
+    for r in client.query(q, &[]).db()? {
+        lines.push(r.try_get::<_, String>(0).db()?);
     }
     let tracked: bool =
-        client.query_one("SELECT to_regclass('datumesh_schema_migrations') IS NOT NULL", &[])?.try_get(0)?;
+        client.query_one("SELECT to_regclass('datumesh_schema_migrations') IS NOT NULL", &[]).db()?.try_get(0).db()?;
     if tracked {
-        for r in client.query("SELECT version, name, checksum FROM datumesh_schema_migrations", &[])? {
-            let (v, n, c): (i32, String, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
+        for r in client.query("SELECT version, name, checksum FROM datumesh_schema_migrations", &[]).db()? {
+            let (v, n, c): (i32, String, String) = (r.try_get(0).db()?, r.try_get(1).db()?, r.try_get(2).db()?);
             lines.push(format!("migration {v} {n} {c}"));
         }
     }
@@ -148,21 +164,24 @@ SELECT 'function ' || p.oid::regprocedure::text || ' ' || md5(pg_get_functiondef
 }
 
 /// Compares the live database's schema with what the migrations produce: applies every
-/// migration to `scratch` (which must be an empty database the caller creates and drops),
+/// migration to `scratch` (a store on an empty database the caller creates and drops),
 /// then diffs the two catalogs. Returns the differences, `- <line>` for what the live
 /// database lacks and `+ <line>` for what it has in addition; empty when they agree.
-pub fn check(live: &mut Client, scratch: &mut Client) -> Result<Vec<String>> {
-    let objects: i64 = scratch
+pub fn check(live: &PgStore, scratch: &PgStore) -> Result<Vec<String>> {
+    let mut sc = scratch.conn()?;
+    let objects: i64 = sc
+        .client
         .query_one(
             "SELECT count(*) FROM pg_class WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())",
             &[],
-        )?
-        .try_get(0)?;
+        ).db()?
+        .try_get(0).db()?;
     if objects != 0 {
         return Err(Error::Migration("the scratch database is not empty".into()));
     }
-    apply(scratch)?;
-    let want = catalog(scratch)?;
+    apply_client(&mut sc.client)?;
+    let want = catalog_client(&mut sc.client)?;
+    drop(sc);
     let have = catalog(live)?;
     let mut diff: Vec<String> = want.iter().filter(|l| !have.contains(l)).map(|l| format!("- {l}")).collect();
     diff.extend(have.iter().filter(|l| !want.contains(l)).map(|l| format!("+ {l}")));

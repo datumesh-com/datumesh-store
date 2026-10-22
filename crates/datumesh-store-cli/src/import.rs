@@ -29,7 +29,7 @@ struct Counts {
 }
 
 pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
-    let store = PgStore::connect(url).map_err(|e| Fail(2, format!("cannot connect: {e}")))?;
+    let store = crate::store(url)?;
     let mut n = Counts::default();
     if paths.is_empty() || paths == ["-"] {
         lines(&store, "stdin", std::io::stdin().lock(), &mut n);

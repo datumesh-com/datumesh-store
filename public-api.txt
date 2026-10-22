@@ -1,6 +1,5 @@
 pub mod datumesh_store
 pub use datumesh_store::Resolver
-pub use datumesh_store::postgres
 pub mod datumesh_store::migrate
 pub struct datumesh_store::migrate::Migration
 pub datumesh_store::migrate::Migration::name: &'static str
@@ -18,13 +17,25 @@ pub fn datumesh_store::migrate::Migration::fmt(&self, &mut core::fmt::Formatter<
 impl core::marker::Copy for datumesh_store::migrate::Migration
 impl core::marker::StructuralPartialEq for datumesh_store::migrate::Migration
 pub const datumesh_store::migrate::MIGRATIONS: &[datumesh_store::migrate::Migration]
-pub fn datumesh_store::migrate::apply(&mut postgres::client::Client) -> datumesh_store::Result<alloc::vec::Vec<u32>>
-pub fn datumesh_store::migrate::catalog(&mut postgres::client::Client) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
-pub fn datumesh_store::migrate::check(&mut postgres::client::Client, &mut postgres::client::Client) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::migrate::apply(&datumesh_store::PgStore) -> datumesh_store::Result<alloc::vec::Vec<u32>>
+pub fn datumesh_store::migrate::catalog(&datumesh_store::PgStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::migrate::check(&datumesh_store::PgStore, &datumesh_store::PgStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub mod datumesh_store::pg_unstable
+pub use datumesh_store::pg_unstable::postgres
+pub struct datumesh_store::pg_unstable::Connector
+impl datumesh_store::pg_unstable::Connector
+pub fn datumesh_store::pg_unstable::Connector::connect(&self) -> core::result::Result<postgres::client::Client, tokio_postgres::error::Error>
+pub fn datumesh_store::pg_unstable::Connector::new(postgres::config::Config, &datumesh_store::PoolOptions) -> datumesh_store::Result<datumesh_store::pg_unstable::Connector>
+impl core::clone::Clone for datumesh_store::pg_unstable::Connector
+pub fn datumesh_store::pg_unstable::Connector::clone(&self) -> Self
+impl core::fmt::Debug for datumesh_store::pg_unstable::Connector
+pub fn datumesh_store::pg_unstable::Connector::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn datumesh_store::pg_unstable::with_connector<F>(F, datumesh_store::PoolOptions) -> datumesh_store::Result<datumesh_store::PgStore> where F: core::ops::function::Fn() -> core::result::Result<postgres::client::Client, tokio_postgres::error::Error> + core::marker::Send + core::marker::Sync + 'static
 #[non_exhaustive] pub enum datumesh_store::Error
+pub datumesh_store::Error::Config(alloc::string::String)
 pub datumesh_store::Error::Conflict
 pub datumesh_store::Error::Conflict::hash: alloc::string::String
-pub datumesh_store::Error::Database(tokio_postgres::error::Error)
+pub datumesh_store::Error::Database(datumesh_store::DatabaseError)
 pub datumesh_store::Error::Invalid(datumesh_core::error::Error)
 pub datumesh_store::Error::Migration(alloc::string::String)
 pub datumesh_store::Error::Mismatch
@@ -44,14 +55,22 @@ impl datumesh_store::Error
 pub fn datumesh_store::Error::code(&self) -> core::option::Option<datumesh_core::error::ErrorCode>
 impl core::convert::From<datumesh_core::error::Error> for datumesh_store::Error
 pub fn datumesh_store::Error::from(datumesh_core::error::Error) -> datumesh_store::Error
-impl core::convert::From<tokio_postgres::error::Error> for datumesh_store::Error
-pub fn datumesh_store::Error::from(tokio_postgres::error::Error) -> datumesh_store::Error
 impl core::error::Error for datumesh_store::Error
 pub fn datumesh_store::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for datumesh_store::Error
 pub fn datumesh_store::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for datumesh_store::Error
 pub fn datumesh_store::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct datumesh_store::DatabaseError
+impl datumesh_store::DatabaseError
+pub fn datumesh_store::DatabaseError::code(&self) -> core::option::Option<&str>
+pub fn datumesh_store::DatabaseError::message(&self) -> &str
+impl core::error::Error for datumesh_store::DatabaseError
+pub fn datumesh_store::DatabaseError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for datumesh_store::DatabaseError
+pub fn datumesh_store::DatabaseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for datumesh_store::DatabaseError
+pub fn datumesh_store::DatabaseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct datumesh_store::Namespace
 pub datumesh_store::Namespace::host: alloc::string::String
 pub datumesh_store::Namespace::keydoc: alloc::vec::Vec<u8>
@@ -71,7 +90,7 @@ pub struct datumesh_store::PgStore
 impl datumesh_store::PgStore
 pub fn datumesh_store::PgStore::check_statements(&self) -> datumesh_store::Result<usize>
 pub fn datumesh_store::PgStore::connect(&str) -> datumesh_store::Result<datumesh_store::PgStore>
-pub fn datumesh_store::PgStore::with_connector<F>(F, datumesh_store::PoolOptions) -> datumesh_store::Result<datumesh_store::PgStore> where F: core::ops::function::Fn() -> core::result::Result<postgres::client::Client, tokio_postgres::error::Error> + core::marker::Send + core::marker::Sync + 'static
+pub fn datumesh_store::PgStore::connect_with(&str, datumesh_store::PoolOptions) -> datumesh_store::Result<datumesh_store::PgStore>
 impl core::fmt::Debug for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl datumesh_core::verify::Resolver for datumesh_store::PgStore
@@ -98,6 +117,8 @@ impl datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::checkout_timeout(self, core::time::Duration) -> datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::max_size(self, usize) -> datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::new() -> datumesh_store::PoolOptions
+pub fn datumesh_store::PoolOptions::tls_root_certificates_pem(self, &[u8]) -> datumesh_store::Result<datumesh_store::PoolOptions>
+pub fn datumesh_store::PoolOptions::tls_webpki_roots(self, bool) -> datumesh_store::PoolOptions
 impl core::clone::Clone for datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::clone(&self) -> Self
 impl core::cmp::Eq for datumesh_store::PoolOptions

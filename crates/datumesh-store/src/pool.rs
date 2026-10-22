@@ -1,6 +1,6 @@
 //! A small connection pool: no global state, no background threads, and a per-connection
 //! cache of prepared statements (each statement is prepared once per connection, on first
-//! use).
+//! use, never when connecting).
 
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -8,18 +8,36 @@ use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use postgres::{Client, Statement};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
+use rustls::RootCertStore;
 
-use crate::error::{Error, Result};
+use crate::error::{Db, Error, Result};
 use crate::sql::Q;
 
 /// Opens a new connection.
 pub(crate) type Connector = Box<dyn Fn() -> core::result::Result<Client, postgres::Error> + Send + Sync>;
 
-/// How the pool behaves.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// How the pool behaves, and the roots TLS connections are verified against.
+///
+/// Builder style: `PoolOptions::new().max_size(4).tls_root_certificates_pem(&pem)?`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PoolOptions {
     max_size: usize,
     checkout_timeout: Duration,
+    pub(crate) webpki_roots: bool,
+    pub(crate) tls_roots: Vec<CertificateDer<'static>>,
+}
+
+impl std::fmt::Debug for PoolOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PoolOptions")
+            .field("max_size", &self.max_size)
+            .field("checkout_timeout", &self.checkout_timeout)
+            .field("webpki_roots", &self.webpki_roots)
+            .field("tls_root_certificates", &self.tls_roots.len())
+            .finish()
+    }
 }
 
 impl Default for PoolOptions {
@@ -29,9 +47,15 @@ impl Default for PoolOptions {
 }
 
 impl PoolOptions {
-    /// At most 8 connections; wait at most 30 seconds for one.
+    /// At most 8 connections; wait at most 30 seconds for one; TLS connections verified
+    /// against the Mozilla roots (`webpki-roots`).
     pub fn new() -> PoolOptions {
-        PoolOptions { max_size: 8, checkout_timeout: Duration::from_secs(30) }
+        PoolOptions {
+            max_size: 8,
+            checkout_timeout: Duration::from_secs(30),
+            webpki_roots: true,
+            tls_roots: Vec::new(),
+        }
     }
 
     /// The most connections open at once (at least 1).
@@ -46,6 +70,35 @@ impl PoolOptions {
         self.checkout_timeout = d;
         self
     }
+
+    /// Adds the certificates of a PEM bundle (one or more `CERTIFICATE` sections; other
+    /// sections are ignored) to the roots TLS connections are verified against: a private
+    /// CA, or a server's self-signed certificate. Calls append. A bundle with no
+    /// certificate, or with one that does not parse, is [`Error::Config`].
+    pub fn tls_root_certificates_pem(mut self, pem: &[u8]) -> Result<PoolOptions> {
+        let mut check = RootCertStore::empty();
+        let mut n = 0;
+        for cert in CertificateDer::pem_slice_iter(pem) {
+            n += 1;
+            let cert = cert.map_err(|e| Error::Config(format!("root certificate {n} of the PEM bundle: {e}")))?;
+            check
+                .add(cert.clone())
+                .map_err(|e| Error::Config(format!("root certificate {n} of the PEM bundle: {e}")))?;
+            self.tls_roots.push(cert);
+        }
+        if n == 0 {
+            return Err(Error::Config("the PEM bundle holds no certificate".into()));
+        }
+        Ok(self)
+    }
+
+    /// Whether the Mozilla roots (`webpki-roots`, compiled in) are trusted too: yes by
+    /// default. `false` trusts only the roots added with
+    /// [`tls_root_certificates_pem`](Self::tls_root_certificates_pem) (a private CA).
+    pub fn tls_webpki_roots(mut self, yes: bool) -> PoolOptions {
+        self.webpki_roots = yes;
+        self
+    }
 }
 
 /// A connection and the statements prepared on it.
@@ -56,11 +109,11 @@ pub(crate) struct Conn {
 
 impl Conn {
     /// The prepared statement for `q`, preparing it on first use.
-    pub(crate) fn stmt(&mut self, q: Q) -> core::result::Result<Statement, postgres::Error> {
+    pub(crate) fn stmt(&mut self, q: Q) -> Result<Statement> {
         if let Some(s) = self.statements.get(&q) {
             return Ok(s.clone());
         }
-        let s = self.client.prepare_typed(q.sql(), q.types())?;
+        let s = self.client.prepare_typed(q.sql(), q.types()).db()?;
         self.statements.insert(q, s.clone());
         Ok(s)
     }
@@ -127,8 +180,8 @@ impl Pool {
     }
 
     fn open(&self) -> Result<Conn> {
-        let mut client = (self.connect)()?;
-        client.batch_execute(SESSION)?;
+        let mut client = (self.connect)().db()?;
+        client.batch_execute(SESSION).db()?;
         Ok(Conn { client, statements: HashMap::new() })
     }
 

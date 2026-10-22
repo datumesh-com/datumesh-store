@@ -16,9 +16,9 @@ use std::io::{BufWriter, Write};
 
 use datumesh_core::json::Value;
 use datumesh_core::lexical::to_hex;
-use datumesh_store::postgres::fallible_iterator::FallibleIterator;
-use datumesh_store::postgres::types::ToSql;
-use datumesh_store::postgres::Transaction;
+use postgres::fallible_iterator::FallibleIterator;
+use postgres::types::ToSql;
+use postgres::Transaction;
 
 use crate::{connect, Fail};
 
@@ -36,11 +36,7 @@ fn line(out: &mut impl Write, kind: &str, v: Value) -> Result<(), Fail> {
     Ok(())
 }
 
-fn each(
-    t: &mut Transaction<'_>,
-    sql: &str,
-    mut f: impl FnMut(&datumesh_store::postgres::Row) -> Result<(), Fail>,
-) -> Result<(), Fail> {
+fn each(t: &mut Transaction<'_>, sql: &str, mut f: impl FnMut(&postgres::Row) -> Result<(), Fail>) -> Result<(), Fail> {
     let params: [&(dyn ToSql + Sync); 0] = [];
     let mut rows = t.query_raw(sql, params)?;
     while let Some(r) = rows.next()? {
@@ -55,11 +51,8 @@ fn text(b: Vec<u8>) -> Result<String, Fail> {
 
 pub(crate) fn run(url: &str) -> Result<u8, Fail> {
     let mut c = connect(url)?;
-    let mut t = c
-        .build_transaction()
-        .isolation_level(datumesh_store::postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
-        .start()?;
+    let mut t =
+        c.build_transaction().isolation_level(postgres::IsolationLevel::RepeatableRead).read_only(true).start()?;
     let stdout = std::io::stdout();
     let mut out = BufWriter::new(stdout.lock());
     each(&mut t, "SELECT host, keydoc, validated_at FROM namespaces ORDER BY host", |r| {
