@@ -1,0 +1,57 @@
+== settings
+checkpoint_completion_target = 0.9
+effective_cache_size = 1441792 8kB
+effective_io_concurrency = 200
+fsync = on
+jit = off
+maintenance_work_mem = 1048576 kB
+max_connections = 50
+max_parallel_workers = 6
+max_parallel_workers_per_gather = 3
+max_wal_size = 8192 MB
+max_worker_processes = 6
+min_wal_size = 1024 MB
+random_page_cost = 1.1
+server_version = 16.15 (Debian 16.15-1.pgdg13+2)
+shared_buffers = 524288 8kB
+synchronous_commit = on
+wal_buffers = 2048 8kB
+wal_compression = lz4
+work_mem = 32768 kB
+== migrate
+applied migration 1 (0001_initial.sql)
+== bench 
+load: 1000000 versions (10000 cells x 100) in 546.9 s (1829 versions/s: sign + put_receipt + put_version, 6 threads, synchronous_commit=off)
+load: 1000 dependents of e10cdad90b2ef317299a0d8f1d08ce47319a011feb8f5a243adbaedf90d0bba3 in 1.9 s
+op              samples     p50 µs     p99 µs    mean µs
+version_asof      10000        215        394        227  10000 found
+receipt           10000        214        417        227  
+put_version       10000       2061       3432       2121  one transaction each, synchronous_commit as configured
+dependents        10000       1377       2594       1500  1000 dependents each
+disk: table                          table MB   indexes MB     total MB
+disk: receipts                         1128.9        323.9       1452.8
+disk: versions                          197.4        313.7        511.1
+disk: edges                               0.2          0.5          0.7
+disk: descriptors                         0.0          0.0          0.0
+disk: datumesh_schema_migrations          0.0          0.0          0.0
+disk: name_bindings                       0.0          0.0          0.0
+disk: blobs                               0.0          0.0          0.0
+disk: namespaces                          0.0          0.0          0.0
+disk: (all tables)                     1326.5        638.2       1964.7
+disk: database 1972.4 MB
+blob                  bytes       put ms       get ms     put MB/s     get MB/s
+blob                   1024         0.74         0.24          1.3          4.1
+blob                   4096         1.10         0.31          3.6         12.7
+blob                  16384         1.49         0.37         10.5         42.1
+blob                  65536         3.58         0.66         17.4         95.2
+blob                 262144        10.89         1.63         23.0        153.2
+blob                1048576        33.75         4.92         29.6        203.4
+blob                4194304       126.78        19.63         31.6        203.8
+blob               16777216       329.76        63.34         48.5        252.6
+blob               67108864      1683.45       297.99         38.0        214.8
+== cold restart
+first version_asof answered after 168 ms (2 attempts)
+stop: 4592 ms; start -> first version_asof answered (incl. a fresh tool container): 1473 ms
+== after the restart (cold page cache), once more without loading
+datumesh-store: db error
+exit 1

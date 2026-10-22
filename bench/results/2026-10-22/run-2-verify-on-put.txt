@@ -1,0 +1,75 @@
+== settings
+checkpoint_completion_target = 0.9
+effective_cache_size = 1441792 8kB
+effective_io_concurrency = 200
+fsync = on
+jit = off
+maintenance_work_mem = 1048576 kB
+max_connections = 50
+max_parallel_workers = 6
+max_parallel_workers_per_gather = 3
+max_wal_size = 8192 MB
+max_worker_processes = 6
+min_wal_size = 1024 MB
+random_page_cost = 1.1
+server_version = 16.15 (Debian 16.15-1.pgdg13+2)
+shared_buffers = 524288 8kB
+synchronous_commit = on
+wal_buffers = 2048 8kB
+wal_compression = lz4
+work_mem = 32768 kB
+== migrate
+applied migration 1 (0001_initial.sql)
+== bench 
+load: 1000000 versions (10000 cells x 100) in 660.2 s (1515 versions/s: sign + put_receipt (verifying) + put_version, 6 threads, synchronous_commit=off)
+load: 1000 dependents of e10cdad90b2ef317299a0d8f1d08ce47319a011feb8f5a243adbaedf90d0bba3 in 2.2 s
+op              samples     p50 µs     p99 µs    mean µs
+version_asof      10000        212        420        230  10000 found
+receipt           10000        193        393        205  
+put_version       10000       1900       3882       2040  one transaction each, synchronous_commit as configured
+dependents        10000       1378       2453       1474  1000 dependents each
+disk: table                          table MB   indexes MB     total MB
+disk: receipts                         1128.9        324.0       1452.8
+disk: versions                          197.4        313.8        511.3
+disk: edges                               0.2          0.5          0.7
+disk: descriptors                         0.0          0.0          0.0
+disk: datumesh_schema_migrations          0.0          0.0          0.0
+disk: namespaces                          0.0          0.0          0.0
+disk: name_bindings                       0.0          0.0          0.0
+disk: blobs                               0.0          0.0          0.0
+disk: (all tables)                     1326.6        638.3       1964.9
+disk: database 1972.6 MB
+blob                  bytes       put ms       get ms     put MB/s     get MB/s
+blob                   1024         0.81         0.26          1.2          3.7
+blob                   4096         0.93         0.28          4.2         13.9
+blob                  16384         1.34         0.32         11.7         48.5
+blob                  65536         3.10         0.49         20.2        128.3
+blob                 262144         9.48         1.61         26.4        154.9
+blob                1048576        34.32         6.46         29.1        154.9
+blob                4194304       135.07        18.89         29.6        211.7
+blob               16777216       472.79        82.17         33.8        194.7
+blob               67108864      1874.84       310.15         34.1        206.4
+== cold restart
+first version_asof answered after 166 ms (1 attempts)
+stop: 3958 ms; start -> first version_asof answered (incl. a fresh tool container): 1562 ms
+== after the restart (cold page cache), once more without loading
+op              samples     p50 µs     p99 µs    mean µs
+version_asof       2000        536       1228        596  2000 found
+receipt            2000        915       1604        948  
+put_version        2000       2687       5289       2759  one transaction each, synchronous_commit as configured
+dependents         2000       1395       2732       1512  1000 dependents each
+disk: table                          table MB   indexes MB     total MB
+disk: receipts                         1131.1        324.2       1455.4
+disk: versions                          197.8        314.1        511.9
+disk: blobs                             289.3          0.0        289.3
+disk: edges                               0.2          0.5          0.7
+disk: namespaces                          0.0          0.0          0.0
+disk: descriptors                         0.0          0.0          0.0
+disk: datumesh_schema_migrations          0.0          0.0          0.0
+disk: name_bindings                       0.0          0.0          0.0
+disk: (all tables)                     1618.4        638.9       2257.3
+disk: database 2265.0 MB
+blob                  bytes       put ms       get ms     put MB/s     get MB/s
+== data directory
+4.4G	/root/datumesh-libs/bench-pgdata-2
+exit 0
