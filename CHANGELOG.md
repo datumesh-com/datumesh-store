@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.1.1 (unreleased)
+## 0.1.1 (2026-10-22)
 
 No type of the `postgres` driver or of a TLS crate is part of the API any more, except in
 the new module `pg_unstable`, which is outside semver until 1.0. TLS through `PoolOptions`.
