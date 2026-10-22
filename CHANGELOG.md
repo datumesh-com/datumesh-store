@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-22)
 
 First release, for `datumesh-core` 0.3.1 (specification `spec-0.2.1`).
 
