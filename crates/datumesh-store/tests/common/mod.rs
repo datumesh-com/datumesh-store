@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use datumesh_core::json::{self, Value};
 use datumesh_core::{Keys, Receipt, ReceiptBuilder, Scalar, SigningKey, Type};
-use datumesh_store::postgres::{Client, Config, NoTls};
-use datumesh_store::{migrate, PgStore, PoolOptions, Store};
+use datumesh_store::pg_unstable::postgres::{Client, Config, NoTls};
+use datumesh_store::{migrate, pg_unstable, PgStore, PoolOptions, Store};
 
 pub fn admin_url() -> String {
     std::env::var("DATABASE_URL").expect("DATABASE_URL names a PostgreSQL 16 database (see README)")
@@ -19,32 +19,60 @@ pub fn admin_url() -> String {
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// `url` with `param` (`key=value`) appended to its query.
+pub fn with_param(url: &str, param: &str) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}{param}")
+}
+
+/// The URL of database `name` on the server of `admin` (same credentials and parameters).
+pub fn db_url(admin: &str, name: &str) -> String {
+    let (path, query) = match admin.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (admin, None),
+    };
+    let (base, _) = path.rsplit_once('/').unwrap();
+    match query {
+        Some(q) => format!("{base}/{name}?{q}"),
+        None => format!("{base}/{name}"),
+    }
+}
+
 /// A database of its own, dropped when the value is dropped.
 pub struct TestDb {
     pub name: String,
+    /// The database's configuration, for plain-text clients (`NoTls`; `sslmode=prefer`
+    /// then means no TLS).
     pub config: Config,
+    admin: String,
 }
 
 impl TestDb {
     /// An empty database (no migrations applied).
     pub fn empty() -> TestDb {
-        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
-        let name = format!("dm_test_{}_{}_{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst), nanos);
-        let admin: Config = admin_url().parse().unwrap();
-        let mut c = admin.connect(NoTls).unwrap();
-        c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
-        let mut config = admin.clone();
-        config.dbname(&name);
-        TestDb { name, config }
+        TestDb::empty_on(&admin_url())
     }
 
-    /// A database with every migration applied.
+    /// An empty database on the server of `admin` (a URL whose role may create databases).
+    pub fn empty_on(admin: &str) -> TestDb {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+        let name = format!("dm_test_{}_{}_{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst), nanos);
+        let admin_config: Config = admin.parse().unwrap();
+        let mut c = admin_config.connect(NoTls).unwrap();
+        c.batch_execute(&format!("CREATE DATABASE {name}")).unwrap();
+        let mut config = admin_config.clone();
+        config.dbname(&name);
+        TestDb { name, config, admin: admin.to_string() }
+    }
+
+    /// A database with every migration applied (through a store, as `migrate::apply` takes).
     pub fn migrated() -> TestDb {
         let db = TestDb::empty();
-        migrate::apply(&mut db.client()).unwrap();
+        migrate::apply(&db.bare_store()).unwrap();
         db
     }
 
+    /// A plain-text client of this database (for checks in SQL).
     pub fn client(&self) -> Client {
         self.config.connect(NoTls).unwrap()
     }
@@ -66,22 +94,27 @@ impl TestDb {
         self.bare_store_with(PoolOptions::new())
     }
 
+    /// A store without key documents, connected with `PgStore::connect_with` (the URL).
     pub fn bare_store_with(&self, options: PoolOptions) -> PgStore {
+        PgStore::connect_with(&self.url(), options).unwrap()
+    }
+
+    /// A store without key documents whose connections come from
+    /// `pg_unstable::with_connector` (plain-text clients of this database).
+    pub fn connector_store_with(&self, options: PoolOptions) -> PgStore {
         let config = self.config.clone();
-        PgStore::with_connector(move || config.connect(NoTls), options).unwrap()
+        pg_unstable::with_connector(move || config.connect(NoTls), options).unwrap()
     }
 
     /// `postgres://…/<this database>` for `PgStore::connect`.
     pub fn url(&self) -> String {
-        let admin = admin_url();
-        let (base, _) = admin.rsplit_once('/').unwrap();
-        format!("{base}/{}", self.name)
+        db_url(&self.admin, &self.name)
     }
 }
 
 impl Drop for TestDb {
     fn drop(&mut self) {
-        let admin: Config = admin_url().parse().unwrap();
+        let admin: Config = self.admin.parse().unwrap();
         if let Ok(mut c) = admin.connect(NoTls) {
             let _ = c.batch_execute(&format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name));
         }

@@ -33,7 +33,7 @@ fn seeded(db: &TestDb) -> (datumesh_store::PgStore, String, String, String) {
 }
 
 /// The server's message of a database error.
-fn db_message(e: &datumesh_store::postgres::Error) -> String {
+fn db_message(e: &datumesh_store::pg_unstable::postgres::Error) -> String {
     e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string())
 }
 
@@ -142,7 +142,7 @@ fn concurrent_raw_inserts_are_serialised_per_cell() {
         let (cell2, h_second) = (cell.clone(), hash_of(second));
         let second_s = second.to_string();
         let b = thread::spawn(move || {
-            let mut b = config.connect(datumesh_store::postgres::NoTls).unwrap();
+            let mut b = config.connect(datumesh_store::pg_unstable::postgres::NoTls).unwrap();
             let mut tb = b.transaction().unwrap();
             let r = tb.execute(insert, &[&cell2, &second_s, &h_second]);
             let ok = r.is_ok();
@@ -173,7 +173,7 @@ fn concurrent_raw_name_bindings_are_serialised_per_name() {
     let config = db.config.clone();
     let h = fn_hash.clone();
     let b = thread::spawn(move || {
-        let mut b = config.connect(datumesh_store::postgres::NoTls).unwrap();
+        let mut b = config.connect(datumesh_store::pg_unstable::postgres::NoTls).unwrap();
         b.execute(insert, &[&"rates.example.org/fx_rate", &TX1, &h]).map_err(|e| db_message(&e))
     });
     thread::sleep(Duration::from_millis(500));

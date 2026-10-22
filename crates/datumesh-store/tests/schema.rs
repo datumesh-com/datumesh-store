@@ -1,12 +1,16 @@
 //! The schema: every SQL statement the store uses prepares against the migrated schema
-//! (there is no compile-time query checking with the sync driver); migrations apply from
-//! empty, re-run as a no-op, and `check` finds no drift on a migrated database but reports
-//! drift introduced by hand; instants round-trip through `timestamptz` exactly.
+//! (there is no compile-time query checking with the sync driver); migrations, through a
+//! `PgStore` on an empty database, apply from empty, re-run as a no-op, apply once when
+//! concurrent, and `check` finds no drift on a migrated database but reports drift
+//! introduced by hand; instants round-trip through `timestamptz` exactly.
 
 mod common;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use common::*;
-use datumesh_store::migrate;
+use datumesh_store::{migrate, PgStore, PoolOptions, Resolver, Store};
 
 #[test]
 fn every_statement_prepares_against_the_migrated_schema() {
@@ -26,32 +30,79 @@ fn statements_do_not_prepare_without_the_schema() {
 #[test]
 fn migrations_apply_from_empty_and_rerun_as_no_op() {
     let db = TestDb::empty();
-    let mut c = db.client();
-    let applied = migrate::apply(&mut c).unwrap();
+    let s = db.bare_store();
+    let applied = migrate::apply(&s).unwrap();
     let all: Vec<u32> = migrate::MIGRATIONS.iter().map(|m| m.version).collect();
     assert_eq!(applied, all);
     assert!(!all.is_empty());
-    let before = migrate::catalog(&mut c).unwrap();
-    assert!(migrate::apply(&mut c).unwrap().is_empty());
-    assert!(migrate::apply(&mut db.client()).unwrap().is_empty());
-    assert_eq!(migrate::catalog(&mut c).unwrap(), before);
+    let before = migrate::catalog(&s).unwrap();
+    assert!(migrate::apply(&s).unwrap().is_empty());
+    assert!(migrate::apply(&db.bare_store()).unwrap().is_empty());
+    assert_eq!(migrate::catalog(&s).unwrap(), before);
     // The tracking table records each migration once, with its checksum.
-    let n: i64 = c.query_one("SELECT count(*) FROM datumesh_schema_migrations", &[]).unwrap().get(0);
+    let n: i64 = db.client().query_one("SELECT count(*) FROM datumesh_schema_migrations", &[]).unwrap().get(0);
     assert_eq!(n as usize, all.len());
+}
+
+/// A store connects to an empty database without touching it (no statement is prepared,
+/// nothing created), so the schema can be made through it, and the same store then works.
+#[test]
+fn a_store_on_an_empty_database_migrates_it_and_then_works() {
+    let db = TestDb::empty();
+    let s = PgStore::connect(&db.url()).unwrap();
+    assert!(migrate::catalog(&s).unwrap().is_empty());
+    let objects: i64 = db
+        .client()
+        .query_one(
+            "SELECT count(*) FROM pg_class WHERE relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = 'public')",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(objects, 0);
+    assert!(!migrate::apply(&s).unwrap().is_empty());
+    put_vector_keys(&s, &vector("receipt/stored-number"));
+    let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
+    assert!(s.receipt(&h).is_some());
+    assert!(s.check_statements().unwrap() >= 20);
+}
+
+/// `apply` holds one pooled connection throughout (the advisory lock and the tracking
+/// table's transactions are on one session): with a pool of one connection and a short
+/// checkout timeout, a second checkout would time out. The session lock is released after.
+#[test]
+fn apply_holds_one_connection_and_releases_the_lock() {
+    let db = TestDb::empty();
+    let s = db.bare_store_with(PoolOptions::new().max_size(1).checkout_timeout(Duration::from_millis(500)));
+    assert!(!migrate::apply(&s).unwrap().is_empty());
+    assert!(migrate::apply(&s).unwrap().is_empty());
+    assert!(!migrate::catalog(&s).unwrap().is_empty());
+    let free: bool = db
+        .client()
+        .query_one("SELECT pg_try_advisory_lock(hashtextextended('datumesh-store:migrate', 0))", &[])
+        .unwrap()
+        .get(0);
+    assert!(free);
 }
 
 #[test]
 fn concurrent_migrations_apply_once() {
+    // Threads sharing one store (each apply on its own pooled connection) and threads with
+    // stores of their own.
     let db = TestDb::empty();
-    let handles: Vec<_> = (0..4)
-        .map(|_| {
-            let config = db.config.clone();
-            std::thread::spawn(move || {
-                let mut c = config.connect(datumesh_store::postgres::NoTls).unwrap();
-                migrate::apply(&mut c).unwrap()
-            })
-        })
-        .collect();
+    let shared = Arc::new(db.bare_store_with(PoolOptions::new().max_size(4)));
+    let mut handles = Vec::new();
+    for i in 0..6 {
+        let shared = shared.clone();
+        let url = db.url();
+        handles.push(std::thread::spawn(move || {
+            if i % 2 == 0 {
+                migrate::apply(&shared).unwrap()
+            } else {
+                migrate::apply(&PgStore::connect(&url).unwrap()).unwrap()
+            }
+        }));
+    }
     let applied: Vec<Vec<u32>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     assert_eq!(applied.iter().filter(|a| !a.is_empty()).count(), 1, "{applied:?}");
 }
@@ -60,7 +111,7 @@ fn concurrent_migrations_apply_once() {
 fn check_is_clean_after_migrating_and_finds_drift() {
     let live = TestDb::migrated();
     let scratch = TestDb::empty();
-    let diff = migrate::check(&mut live.client(), &mut scratch.client()).unwrap();
+    let diff = migrate::check(&live.bare_store(), &scratch.bare_store()).unwrap();
     assert!(diff.is_empty(), "{diff:#?}");
 
     // Drift: a column added, an index dropped, a trigger disabled... each is reported.
@@ -75,7 +126,7 @@ fn check_is_clean_after_migrating_and_finds_drift() {
         let live = TestDb::migrated();
         live.client().batch_execute(sql).unwrap();
         let scratch = TestDb::empty();
-        let diff = migrate::check(&mut live.client(), &mut scratch.client()).unwrap();
+        let diff = migrate::check(&live.bare_store(), &scratch.bare_store()).unwrap();
         assert!(!diff.is_empty(), "{sql}: no drift found");
         assert!(diff.iter().any(|l| l.contains(needle)), "{sql}: {diff:#?}");
     }
@@ -85,15 +136,14 @@ fn check_is_clean_after_migrating_and_finds_drift() {
 fn check_refuses_a_scratch_database_that_is_not_empty() {
     let live = TestDb::migrated();
     let scratch = TestDb::migrated();
-    assert!(migrate::check(&mut live.client(), &mut scratch.client()).is_err());
+    assert!(migrate::check(&live.bare_store(), &scratch.bare_store()).is_err());
 }
 
 #[test]
 fn an_edited_migration_is_refused() {
     let db = TestDb::migrated();
-    let mut c = db.client();
-    c.batch_execute("UPDATE datumesh_schema_migrations SET checksum = 'x' WHERE version = 1").unwrap();
-    let e = migrate::apply(&mut c).unwrap_err();
+    db.client().batch_execute("UPDATE datumesh_schema_migrations SET checksum = 'x' WHERE version = 1").unwrap();
+    let e = migrate::apply(&db.bare_store()).unwrap_err();
     assert!(e.to_string().contains("checksum"), "{e}");
 }
 

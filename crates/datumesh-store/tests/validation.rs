@@ -144,15 +144,15 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
     let db = TestDb::migrated();
     let down = Arc::new(AtomicBool::new(false));
     let (config, flag) = (db.config.clone(), down.clone());
-    let s = datumesh_store::PgStore::with_connector(
+    let s = datumesh_store::pg_unstable::with_connector(
         move || {
             if flag.load(Ordering::SeqCst) {
                 "host=127.0.0.1 port=1 user=x connect_timeout=1"
-                    .parse::<datumesh_store::postgres::Config>()
+                    .parse::<datumesh_store::pg_unstable::postgres::Config>()
                     .unwrap()
-                    .connect(datumesh_store::postgres::NoTls)
+                    .connect(datumesh_store::pg_unstable::postgres::NoTls)
             } else {
-                config.connect(datumesh_store::postgres::NoTls)
+                config.connect(datumesh_store::pg_unstable::postgres::NoTls)
             }
         },
         datumesh_store::PoolOptions::new().max_size(2),
@@ -222,4 +222,42 @@ fn a_renamed_table_is_a_database_error_with_the_servers_message() {
     assert_eq!(e.code(), None);
     let e = s.dependents(&h).unwrap_err();
     assert!(matches!(e, Error::Database(_)), "{e:?}");
+}
+
+/// `Error::Database` carries a `DatabaseError`: the SQLSTATE, the server's message, and the
+/// underlying error as its source (type erased).
+#[test]
+fn a_database_error_has_the_sqlstate_the_servers_message_and_a_source() {
+    // An empty database: the store connects (it prepares nothing up front), and the first
+    // read meets a missing table.
+    let db = TestDb::empty();
+    let s = db.bare_store();
+    let cell = "0".repeat(64);
+    let e = s.latest(&cell).unwrap_err();
+    let Error::Database(d) = &e else { panic!("{e:?}") };
+    assert_eq!(d.code(), Some("42P01"));
+    assert_eq!(d.message(), "relation \"versions\" does not exist");
+    let source = std::error::Error::source(d).expect("the driver's error");
+    assert!(!source.to_string().is_empty());
+    // Display as in 0.1.0: the server's message and the SQLSTATE.
+    assert_eq!(d.to_string(), "relation \"versions\" does not exist (42P01)");
+    assert_eq!(e.to_string(), "database: relation \"versions\" does not exist (42P01)");
+    assert!(std::error::Error::source(&e).is_some());
+    // The core's code is for Error::Invalid only.
+    assert_eq!(e.code(), None);
+
+    // Another SQLSTATE: a table without the columns the statement names is 42703.
+    db.client().batch_execute("CREATE TABLE versions (cell_id text)").unwrap();
+    let s = db.bare_store();
+    let Error::Database(d) = s.latest(&cell).unwrap_err() else { panic!() };
+    assert_eq!(d.code(), Some("42703"), "{d}");
+    assert!(d.message().contains("does not exist"), "{d}");
+
+    // A failure that is not the server's (nothing listens): no SQLSTATE, the driver's text.
+    let e = datumesh_store::PgStore::connect("postgres://x@127.0.0.1:1/x?connect_timeout=1").unwrap_err();
+    let Error::Database(d) = &e else { panic!("{e:?}") };
+    assert_eq!(d.code(), None);
+    assert!(!d.message().is_empty());
+    assert!(std::error::Error::source(d).is_some());
+    assert_eq!(e.to_string(), format!("database: {}", d.message()));
 }
