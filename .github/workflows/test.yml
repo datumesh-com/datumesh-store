@@ -32,6 +32,15 @@ jobs:
         with:
           submodules: true
       - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal && rustup default ${{ matrix.toolchain }}
+      # A second PostgreSQL 16, with ssl=on and a certificate from a CA made for this run
+      # (the service above cannot be given one): the TLS tests run against it, and must
+      # (DATUMESH_REQUIRE_TLS_TESTS makes them fail rather than skip without it).
+      - name: TLS server
+        run: |
+          tools/tls_pg.sh "$RUNNER_TEMP/tls" 5433
+          echo "DATABASE_TLS_URL=postgres://postgres:postgres@localhost:5433/postgres" >> "$GITHUB_ENV"
+          echo "DATABASE_TLS_CA_FILE=$RUNNER_TEMP/tls/ca.crt" >> "$GITHUB_ENV"
+          echo "DATUMESH_REQUIRE_TLS_TESTS=1" >> "$GITHUB_ENV"
       - run: cargo test --workspace --locked
       - name: migrate from empty, re-run, check
         run: |
@@ -43,6 +52,13 @@ jobs:
           cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
           cargo run -q -p datumesh-store-cli --locked -- export > export.jsonl
           wc -l export.jsonl
+      - name: the command over TLS (sslmode=require, the run's CA)
+        env:
+          DATABASE_URL: ${{ env.DATABASE_TLS_URL }}?sslmode=require
+        run: |
+          DATABASE_CA_FILE="$DATABASE_TLS_CA_FILE" cargo run -q -p datumesh-store-cli --locked -- migrate
+          DATABASE_CA_FILE="$DATABASE_TLS_CA_FILE" cargo run -q -p datumesh-store-cli --locked -- migrate --check
+          if cargo run -q -p datumesh-store-cli --locked -- migrate; then echo "connected without the CA" >&2; exit 1; fi
 
   lint:
     runs-on: ubuntu-latest
@@ -53,6 +69,16 @@ jobs:
       - run: rustup toolchain install 1.99 --profile minimal --component clippy,rustfmt && rustup default 1.99
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The public API names no type of the driver or of a TLS crate outside pg_unstable, and
+  # public-api.txt is current (the test public_api.rs checks the file itself).
+  public-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install nightly-2026-10-22 --profile minimal && rustup default nightly-2026-10-22
+      - run: cargo install --locked cargo-public-api@0.52.0
+      - run: tools/public_api.sh --native
 
   docs:
     runs-on: ubuntu-latest

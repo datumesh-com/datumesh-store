@@ -2,8 +2,9 @@
 # Packaging test: `cargo package --workspace`, unpack both .crate files in a fresh
 # directory, build a new project that depends on the packaged datumesh-store (and
 # datumesh-core 0.3.1 from crates.io) and run the README example against PostgreSQL 16 in a
-# database of its own; build the packaged command (with the packaged library patched in)
-# and run `migrate --check` there.
+# database of its own (an empty one: the example makes the schema through the store, and
+# names no `postgres` type); build the packaged command (with the packaged library patched
+# in) and run `migrate --check` there. The packaged library must carry no test material.
 #
 #   tools/package_test.sh [toolchain]   in containers on the `datumesh` network, against the
 #                                       datumesh-pg container (see tools/cargo.sh)
@@ -37,6 +38,14 @@ mkdir -p "$work/app/src" "$work/datumesh-store-cli-$version/.cargo"
 cp "$root/spec/vectors/receipt/stored-number.json" "$work/app/"
 # The README's first ```rust block is the example.
 awk '/^```rust$/{f=1;next} /^```$/{if(f){exit}} f' "$root/README.md" > "$work/app/src/main.rs"
+if grep -n 'postgres' "$work/app/src/main.rs"; then
+  echo "the README example names postgres" >&2
+  exit 1
+fi
+if tar tzf "$work/datumesh-store-$version.crate" | grep -E '\.(pem|crt|key)$|/tests/'; then
+  echo "test material in the packaged library" >&2
+  exit 1
+fi
 printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ndatumesh-store = { path = "../datumesh-store-%s" }\ndatumesh-core = "0.3.1"\n' "$version" > "$work/app/Cargo.toml"
 printf '[patch.crates-io]\ndatumesh-store = { path = "../datumesh-store-%s" }\n' "$version" > "$work/datumesh-store-cli-$version/.cargo/config.toml"
 

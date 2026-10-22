@@ -2,6 +2,55 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.1.1 (unreleased)
+
+No type of the `postgres` driver or of a TLS crate is part of the API any more, except in
+the new module `pg_unstable`, which is outside semver until 1.0. TLS through `PoolOptions`.
+The first release published with crates.io Trusted Publishing.
+
+### Changed (breaking for code that named `postgres` types; 0.1.0 had 16 downloads)
+
+- `pub use postgres` at the crate root: removed. The driver is re-exported as
+  `pg_unstable::postgres`, outside semver.
+- `migrate::apply(&mut postgres::Client)`, `migrate::catalog(&mut postgres::Client)`,
+  `migrate::check(&mut Client, &mut Client)`: they take the store instead,
+  `migrate::apply(&PgStore)`, `migrate::catalog(&PgStore)`,
+  `migrate::check(live: &PgStore, scratch: &PgStore)`. `apply` holds one pooled connection
+  throughout (the advisory lock and the tracking table on one session). A `PgStore` connects
+  to an empty database without touching it, so `migrate::apply(&PgStore::connect(url)?)`
+  makes the schema.
+- `Error::Database(postgres::Error)`: now `Error::Database(DatabaseError)`, an opaque struct
+  with `message()` (the server's message, or the driver's text with its causes), `code()`
+  (the SQLSTATE, e.g. `42P01`) and the driver's error as `source()` (type erased). Display
+  is as before (`database: <message> (<SQLSTATE>)`). For a failure that is not the
+  server's, the message now includes the driver's causes (`error performing TLS handshake:
+  invalid peer certificate: UnknownIssuer` rather than `error performing TLS handshake`).
+- `impl From<postgres::Error> for Error`: removed (the conversion is internal).
+- `PgStore::with_connector(f, PoolOptions)`: moved to `pg_unstable::with_connector(f,
+  PoolOptions)`, same signature, outside semver. `PgStore::connect_with` covers TLS.
+- `PgStore::connect(url)` now uses TLS when the server offers it (the default
+  `sslmode=prefer`), verifying the certificate: a server with `ssl=on` and a certificate
+  the Mozilla roots do not cover now fails to connect; add its CA, or use
+  `sslmode=disable`. In 0.1.0 it never used TLS.
+
+### Added
+
+- TLS: `PgStore::connect_with(url, PoolOptions)`; `connect` and `connect_with` use rustls
+  (`tokio-postgres-rustls` 0.14, `rustls` 0.23 with the ring provider chosen per connector,
+  no process-wide provider) as the URL's `sslmode` says (`disable`, `prefer`, `require`),
+  verifying the server's certificate and host name against the Mozilla roots
+  (`webpki-roots`) plus `PoolOptions::tls_root_certificates_pem(pem)`;
+  `PoolOptions::tls_webpki_roots(false)` trusts only the added roots. No option accepts any
+  certificate.
+- `Error::Config(String)`: a root certificate bundle with no certificate, or one that does
+  not parse.
+- `DatabaseError` (see above).
+- `pg_unstable` (outside semver until 1.0): `with_connector`, `Connector` (plain
+  `postgres` clients that connect as the store does), `pub use postgres`.
+- The command: TLS for every subcommand (`DATABASE_URL`'s `sslmode`), `DATABASE_CA_FILE`
+  for roots to trust besides the Mozilla roots; connection errors show their causes. It
+  depends on `datumesh-store = "=0.1.1"` exactly (it uses `pg_unstable`).
+
 ## 0.1.0 (2026-10-22)
 
 First release, for `datumesh-core` 0.3.1 (specification `spec-0.2.1`).

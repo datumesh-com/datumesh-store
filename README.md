@@ -9,7 +9,7 @@ A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function d
 
 ```toml
 [dependencies]
-datumesh-store = "0.1.0"
+datumesh-store = "0.1.1"
 datumesh-core = "0.3.1"
 ```
 
@@ -18,15 +18,14 @@ Store the key documents of `spec/vectors/receipt/stored-number.json`, its receip
 ```rust
 use datumesh_core::json::{self, Value};
 use datumesh_core::{verify, Keys, Level, Receipt, Resolver};
-use datumesh_store::postgres::{Config, NoTls};
 use datumesh_store::{migrate, PgStore, Store};
 
 fn main() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    // The schema; the `datumesh-store migrate` command does the same.
-    let mut client = url.parse::<Config>().unwrap().connect(NoTls).unwrap();
-    migrate::apply(&mut client).unwrap();
+    // A store connects to an empty database too; the schema comes through it (the
+    // `datumesh-store migrate` command does the same). Re-running is a no-op.
     let store = PgStore::connect(&url).unwrap();
+    migrate::apply(&store).unwrap();
 
     let vector = json::parse(&std::fs::read("stored-number.json").unwrap()).unwrap();
     let text = vector.get("input").and_then(Value::as_str).unwrap().as_bytes();
@@ -75,9 +74,27 @@ The API is synchronous. From async code, call it on a blocking thread (`tokio::t
 | `bind_name(fn_name, fn_hash, tx)` / `resolve_name(fn_name, asof)` | Which function a fully qualified name meant from `tx` on. Append-only, in tx order; the descriptor must be stored. |
 | `descriptor`, `receipt`, `evaluate` (`Resolver`) | Stored bytes (`Cow::Owned`); `evaluate` gives a value only for a `stored` function: that of `version_asof(cell, asof)`. |
 
-Every `Store` method returns a `Result`. Malformed input is refused with the core's error code (`Error::Invalid`), without a query: hashes and cell ids are 64 lowercase hex digits, instants `YYYY-MM-DDTHH:MM:SS.ffffffZ`, hosts DNS names, function names fully qualified. A database failure is `Error::Database` (or `Error::PoolTimeout`); reads answer `Ok(None)` / `Ok(vec![])` only when nothing is stored. The `Resolver` methods (`descriptor`, `receipt`, `evaluate`) keep the core's `Option` signatures: a malformed argument or a database failure is `None` there (a failure is logged with `tracing`, target `datumesh_store`), which `verify` reports as unavailable.
+Every `Store` method returns a `Result`. Malformed input is refused with the core's error code (`Error::Invalid`), without a query: hashes and cell ids are 64 lowercase hex digits, instants `YYYY-MM-DDTHH:MM:SS.ffffffZ`, hosts DNS names, function names fully qualified. A database failure is `Error::Database` (or `Error::PoolTimeout`), holding a `DatabaseError`: `message()` (the server's message, or the driver's text), `code()` (the SQLSTATE, e.g. `42P01`), and the driver's error as its `source()`; reads answer `Ok(None)` / `Ok(vec![])` only when nothing is stored. The `Resolver` methods (`descriptor`, `receipt`, `evaluate`) keep the core's `Option` signatures: a malformed argument or a database failure is `None` there (a failure is logged with `tracing`, target `datumesh_store`), which `verify` reports as unavailable.
 
-`PgStore::connect(url)` connects without TLS; `PgStore::with_connector(f, PoolOptions)` takes any connection function (TLS included). The pool is the crate's own: a mutex and a condition variable, no global state, no background threads, a bounded number of connections, a checkout timeout, connections the server closed are replaced, and each statement is prepared once per connection. Every `put_*` is one transaction.
+`PgStore::connect(url)` and `PgStore::connect_with(url, PoolOptions)` connect (TLS: see below). Connecting opens one connection and does nothing else on it (no statement is prepared, the schema is not looked at), so a store on an empty database is how the schema is made: `migrate::apply(&store)`. The pool is the crate's own: a mutex and a condition variable, no global state, no background threads, a bounded number of connections, a checkout timeout, connections the server closed are replaced, and each statement is prepared once per connection. Every `put_*` is one transaction.
+
+## TLS
+
+`connect` and `connect_with` always use a rustls connector (`tokio-postgres-rustls`, the ring provider chosen for that connector; no process-wide crypto provider is installed). Whether TLS is used is the URL's `sslmode`: `disable` never, `prefer` (the default) when the server offers it, `require` always. Whenever TLS is used, the server's certificate and host name are verified, against the Mozilla roots (`webpki-roots`, compiled in) plus any roots added through `PoolOptions`; there is no option to accept any certificate.
+
+```rust
+let pem = std::fs::read("ca.pem")?; // one or more certificates
+let options = PoolOptions::new().tls_root_certificates_pem(&pem)?; // appended to the Mozilla roots
+let store = PgStore::connect_with("postgres://app@db.internal/datumesh?sslmode=require", options)?;
+```
+
+`PoolOptions::tls_webpki_roots(false)` trusts only the added roots (a private CA). A bundle with no certificate, or one that does not parse, is `Error::Config`. A certificate that does not verify is `Error::Database` from `connect`, its message naming the reason (`invalid peer certificate: UnknownIssuer`, `certificate not valid for name ...`).
+
+So a server with `ssl=on` and a self-signed certificate (or one from a private CA) fails even under the default `sslmode=prefer`: `prefer` does not fall back to plain text when the certificate does not verify. Add its CA with `tls_root_certificates_pem`, or connect with `sslmode=disable`. Client certificates are not configurable through `PoolOptions`; use `pg_unstable::with_connector` for them.
+
+### `pg_unstable`
+
+No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.1.1"`) if you use it.
 
 ## Schema
 
@@ -87,12 +104,13 @@ Plain SQL in [`migrations/`](crates/datumesh-store/migrations) (`migrations` at 
 - Hashes, ids, names and instants are `text COLLATE "C"`: instants (fixed width) compare chronologically as text, and every as-of query compares the text. Each instant is also `timestamptz` (`*_at`), checked equal to the text; it round-trips every instant from 0001 to 9999 exactly, whatever the session's TimeZone or DateStyle (tested).
 - `versions` and `name_bindings` are append-only in the database: `BEFORE UPDATE OR DELETE` row triggers and `BEFORE TRUNCATE` statement triggers raise; a `BEFORE INSERT` trigger takes a per-cell (per-name) transaction-scoped advisory lock and refuses a `tx` not later than the latest, so concurrent writers, raw SQL included, are serialised. It requires READ COMMITTED (the store's sessions use it). A superuser can still disable triggers or edit the catalog; the triggers protect against mistakes and ordinary roles, not against the database owner.
 
-`datumesh-store migrate --check` migrates a scratch database (the role needs `CREATEDB`), compares the two catalogs (relations, columns, constraints, indexes, triggers and their enabled state, functions, recorded migrations), prints the differences and exits 1 on drift; then it prepares every statement the store uses. The sync driver has no compile-time query checking, so the test suite prepares every statement against the migrated schema.
+`datumesh-store migrate --check` migrates a scratch database (the role needs `CREATEDB`; `migrate::check(&live, &scratch)` takes a store on each), compares the two catalogs (relations, columns, constraints, indexes, triggers and their enabled state, functions, recorded migrations), prints the differences and exits 1 on drift; then it prepares every statement the store uses. The sync driver has no compile-time query checking, so the test suite prepares every statement against the migrated schema.
 
 ## The command
 
 ```sh
-export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres   # ?sslmode=require for TLS only
+export DATABASE_CA_FILE=ca.pem         # optional: roots to trust besides the Mozilla roots
 datumesh-store migrate                 # apply; re-running is a no-op
 datumesh-store migrate --check         # exit 1 on drift
 datumesh-store import spec/vectors     # vector files or directories; JSON lines; - for stdin
@@ -100,11 +118,11 @@ datumesh-store export > store.jsonl    # JSON lines: descriptors, receipts, blob
 datumesh-store bench                   # see below
 ```
 
-`export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing. Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts.
+Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmode` says, verified against the Mozilla roots plus `DATABASE_CA_FILE`). `export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing. Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts.
 
 ## Development
 
-`docker compose up -d` starts PostgreSQL 16; with `DATABASE_URL` set, `cargo test --workspace` runs everything (each test in a database of its own, so the role needs `CREATEDB`). `tools/cargo.sh <toolchain> <args>` runs cargo in a `rust:<toolchain>` container next to a `datumesh-pg` container; `tools/package_test.sh` is the packaging test; `tools/bench.sh` the benchmark. The specification (`spec/`, a submodule at `spec-0.2.1`) provides the vectors.
+`docker compose up -d` starts PostgreSQL 16; with `DATABASE_URL` set, `cargo test --workspace` runs everything (each test in a database of its own, so the role needs `CREATEDB`). `tools/cargo.sh <toolchain> <args>` runs cargo in a `rust:<toolchain>` container next to a `datumesh-pg` container; `tools/package_test.sh` is the packaging test; `tools/bench.sh` the benchmark. The TLS tests need a server with TLS: `tools/tls_pg.sh` makes a throwaway CA and server certificate (in `target-tls/`, never committed) and starts the container `datumesh-tls-pg`; then set `DATABASE_TLS_URL=postgres://postgres:postgres@datumesh-tls-pg:5432/postgres` and `DATABASE_TLS_CA_FILE=/w/target-tls/ca.crt` (without them the TLS tests are skipped; CI sets `DATUMESH_REQUIRE_TLS_TESTS`, which makes them fail instead). `tools/public_api.sh` regenerates `public-api.txt` (`cargo public-api`) and checks that no driver or TLS type appears outside `pg_unstable`. The specification (`spec/`, a submodule at `spec-0.2.1`) provides the vectors.
 
 ## Benchmark
 

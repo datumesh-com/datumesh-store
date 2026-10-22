@@ -3,6 +3,7 @@ name: release
 # Publishes datumesh-store and datumesh-store-cli to crates.io when a tag v<version> is
 # pushed: the test workflow must pass and the tag must equal both crates' version.
 # Authentication is crates.io Trusted Publishing (OIDC); no long-lived token is stored.
+# 0.1.1 is the first release published this way (0.1.0 was published with a token).
 
 on:
   push:
