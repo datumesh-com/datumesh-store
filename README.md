@@ -1,6 +1,6 @@
 # datumesh-store
 
-A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function descriptors, signed receipts, blobs, versions of cells over transaction time, lineage, namespaces' key documents and function names. `PgStore` implements the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. It passes `datumesh-core`'s resolver test kit as a time-aware resolver.
+A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function descriptors, signed receipts, blobs, versions of cells over transaction time (stored and computed), lineage, namespaces' key documents and function names. `PgStore` implements the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. It passes `datumesh-core`'s resolver test kit as a time-aware resolver.
 
 - `datumesh-store`: the library.
 - `datumesh-store-cli`: the `datumesh-store` command: `migrate [--check]`, `import`, `export`, `bench`.
@@ -9,7 +9,7 @@ A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function d
 
 ```toml
 [dependencies]
-datumesh-store = "0.1.2"
+datumesh-store = "0.2.0"
 datumesh-core = "0.3.2"
 ```
 
@@ -68,8 +68,13 @@ The API is synchronous. From async code, call it on a blocking thread (`tokio::t
 | `put_receipt(bytes)` | Verifies the receipt (SPEC 10.1 steps 1-6, `datumesh_core::verify`) against the key document stored for its signer host with `put_namespace`, so nothing unverified enters the store; refuses it with `verify`'s code otherwise (no document stored for the host: `E_KEY_UNAVAILABLE`). Stores its canonical form, records an edge to each input (held or not), returns the receipt hash. Idempotent: bytes whose canonical form is the stored copy return its hash without checking the signature again (it verified when stored), even after its key is revoked. Other bytes for a stored hash are verified first; if they verify, they are `Error::Conflict` and the stored receipt is kept: that is a second valid signature by the same key, which only a randomised signer makes. A rotated key does not cause it: the key id is in `computed_by`, which the hash covers, so a receipt signed with the new key has a new hash. |
 | `put_blob(bytes)` / `blob(sha256)` | Content by SHA-256, in the database (`bytea`). |
 | `put_version(cell_id, tx, receipt_hash)` | Appends: from `tx` on, the cell has the receipt's value. The receipt must be stored, of that cell, at that `tx`; `tx` must be later than the cell's latest version (`Error::NotLater`). |
-| `version_asof`, `versions`, `latest` | The latest version with `tx <= asof`; the versions with `from <= tx <= to` in tx order; the latest. |
+| `version_asof`, `versions`, `latest` | The latest version with `tx <= asof`; the versions with `from <= tx <= to` in tx order; the latest. A `Version` carries its receipt's `asof` too. |
+| `stored_asof(cell_id, asof)` | The stored version that answers as of A: the latest (by tx) with `tx <= A` whose receipt's `asof` is also `<= A`. A late-signed receipt (asof later than tx) answers only from its asof on; `version_asof` looks at tx only. |
+| `put_computed(cell_id, tx, receipt_hash)` | Records a computed version: derived, not a fact, so insert-only in any order (a historical backfill adds an older version after a newer one), keyed on (cell_id, tx, asof) with the receipt's asof. The receipt is checked as for `put_version`. Idempotent; another receipt at an existing key is `Error::Conflict`. |
+| `computed_asof(cell_id, asof)` | The computed version with the greatest `asof <= A` (ties: the greatest tx). |
+| `stored_asof_with_receipt`, `computed_asof_with_receipt` | The same answers with the receipt's bytes, in one query. |
 | `inputs`, `dependents` | Lineage edges, both ways. |
+| `cell_dependents(cell_id)` | The cells that read a cell: those of stored receipts listing any stored receipt of the cell among their inputs. Ascending, unique. |
 | `put_namespace(host, keydoc, validated_at)` / `namespace(host)` | A host's key document, checked as a 200 response for that host (`keys_from_response`), with its validation time; re-validation only moves forward. Store it before the host's receipts. A later document (a key revoked or dropped) does not touch receipts already stored: they verified when they were stored, and putting one again stays idempotent; it applies to every new receipt from then on. |
 | `bind_name(fn_name, fn_hash, tx)` / `resolve_name(fn_name, asof)` | Which function a fully qualified name meant from `tx` on. Append-only, in tx order; the descriptor must be stored. |
 | `descriptor`, `receipt`, `evaluate` (`Resolver`) | Stored bytes (`Cow::Owned`); `evaluate` gives a value only for a `stored` function: that of `version_asof(cell, asof)`. |
@@ -94,14 +99,16 @@ So a server with `ssl=on` and a self-signed certificate (or one from a private C
 
 ### `pg_unstable`
 
-No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.1.2"`) if you use it.
+No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.2.0"`) if you use it.
 
 ## Schema
 
 Plain SQL in [`migrations/`](crates/datumesh-store/migrations) (`migrations` at the top is a link to it), embedded in the library, applied in order with a tracking table (`datumesh_schema_migrations`, with checksums) under an advisory lock.
 
-- `descriptors(fn_hash, bytes)`, `receipts(hash, bytes, cell_id, tx, tx_at, fn_hash, publisher)`, `blobs(sha256, bytes, length, media_type)`, `versions(cell_id, tx, tx_at, receipt_hash)`, `edges(receipt_hash, input_hash, kind)` (`kind` is `receipt`; `slice` is allowed for later), `namespaces(host, keydoc, validated_at, validated_at_at, suspended_at, suspended_at_at)`, `name_bindings(fn_name, tx, tx_at, fn_hash)`.
+- `descriptors(fn_hash, bytes)`, `receipts(hash, bytes, cell_id, tx, tx_at, fn_hash, publisher, asof, asof_at)`, `blobs(sha256, bytes, length, media_type)`, `versions(cell_id, tx, tx_at, receipt_hash)`, `computed_versions(cell_id, tx, tx_at, asof, asof_at, receipt_hash)` (primary key `(cell_id, tx, asof)`), `edges(receipt_hash, input_hash, kind)` (`kind` is `receipt`; `slice` is allowed for later), `namespaces(host, keydoc, validated_at, validated_at_at, suspended_at, suspended_at_at)`, `name_bindings(fn_name, tx, tx_at, fn_hash)`.
+- `receipts.asof` (migration 2) is the receipt's own `asof`: backfilled from the stored canonical bytes when the migration runs, checked equal to them (a `CHECK`), and taken from them by a trigger when an insert does not name it (a 0.1.x writer).
 - Hashes, ids, names and instants are `text COLLATE "C"`: instants (fixed width) compare chronologically as text, and every as-of query compares the text. Each instant is also `timestamptz` (`*_at`), checked equal to the text; it round-trips every instant from 0001 to 9999 exactly, whatever the session's TimeZone or DateStyle (tested).
+- `computed_versions` is insert-only in the database (`BEFORE UPDATE OR DELETE` and `BEFORE TRUNCATE` triggers raise) but in any order: there is no tx-order rule; its primary key serialises concurrent writers of one key.
 - `versions` and `name_bindings` are append-only in the database: `BEFORE UPDATE OR DELETE` row triggers and `BEFORE TRUNCATE` statement triggers raise; a `BEFORE INSERT` trigger takes a per-cell (per-name) transaction-scoped advisory lock and refuses a `tx` not later than the latest, so concurrent writers, raw SQL included, are serialised. It requires READ COMMITTED (the store's sessions use it). A superuser can still disable triggers or edit the catalog; the triggers protect against mistakes and ordinary roles, not against the database owner.
 
 `datumesh-store migrate --check` migrates a scratch database (the role needs `CREATEDB`; `migrate::check(&live, &scratch)` takes a store on each), compares the two catalogs (relations, columns, constraints, indexes, triggers and their enabled state, functions, recorded migrations), prints the differences and exits 1 on drift; then it prepares every statement the store uses. The sync driver has no compile-time query checking, so the test suite prepares every statement against the migrated schema.
@@ -114,11 +121,11 @@ export DATABASE_CA_FILE=ca.pem         # optional: roots to trust besides the Mo
 datumesh-store migrate                 # apply; re-running is a no-op
 datumesh-store migrate --check         # exit 1 on drift
 datumesh-store import spec/vectors     # vector files or directories; JSON lines; - for stdin
-datumesh-store export > store.jsonl    # JSON lines: descriptors, receipts, blobs, versions, namespaces, names
+datumesh-store export > store.jsonl    # JSON lines: descriptors, receipts, blobs, versions, computed versions, namespaces, names
 datumesh-store bench                   # see below
 ```
 
-Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmode` says, verified against the Mozilla roots plus `DATABASE_CA_FILE`). `export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing. Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts.
+Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmode` says, verified against the Mozilla roots plus `DATABASE_CA_FILE`). `export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing; exports of 0.1.x (without computed versions) import too. Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts.
 
 ## Development
 
@@ -137,6 +144,8 @@ Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmod
 | after a restart with the page cache dropped (2,000 samples): `version_asof` / `receipt` | 536 / 915 µs | 1.23 / 1.60 ms | |
 
 Disk: `receipts` 1,129 MB + 324 MB indexes, `versions` 197 MB + 314 MB indexes; 1,965 MB for all tables (about 2.0 KB per version, of which the canonical receipt is about 1.1 KB). Cold restart: `docker stop` 0.4 s (about 4 s right after the load, a shutdown checkpoint); after dropping the page cache, `docker start` to the first answered `version_asof` 1.2-1.6 s, of which about 0.5 s is starting the tool's own container; the probe itself answered 112-168 ms after it started.
+
+Version 0.2.0's additions, at 1,000 cells × 100 versions on the development server with default settings (warm cache; `bench/results/2026-10-24`), p50 / p99: `computed_asof` 221 / 505 µs, `stored_asof` 226 / 476 µs (`version_asof` in the same run 238 / 534 µs), `computed_asof_with_receipt` 222 / 513 µs and `stored_asof_with_receipt` 219 / 516 µs (against 397 / 744 and 387 / 727 µs for the read followed by `receipt`), `put_computed` 1.72 / 2.69 ms, `cell_dependents` with 1,000 dependent cells 6.38 / 11.29 ms.
 
 Blobs (`put_blob` / `blob`, median, two runs): 1 MiB 34 / 5-6 ms, 4 MiB 127-135 / 19 ms, 16 MiB 330-473 / 63-82 ms, 64 MiB 1,683-1,875 / 298-310 ms; writes level off near 30-50 MB/s from 1 MiB on and every value is read and written whole, in memory on both sides. Keep blobs up to 1 MiB in the table; above that, object storage (content-addressed by the same SHA-256) is the better home.
 

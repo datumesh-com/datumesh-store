@@ -2,6 +2,40 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.2.0 (unreleased)
+
+Additions for the engine: computed versions, answering as of A with both times, cells that
+read a cell. No existing method, type or behaviour changes; adding methods to the `Store`
+trait is breaking for other implementors of it, hence 0.2.0 (`API-CHANGES-0.2.0.md`).
+
+### Added
+
+- `Store::put_computed(cell_id, tx, receipt_hash)`: a computed version of a cell. Computed
+  versions are derived, not facts: insert-only, added in any order (historical backfill),
+  keyed on (cell_id, tx, asof) with the receipt's asof (two computed receipts of one cell
+  may share a tx and differ in asof). Idempotent; another receipt at an existing key is
+  `Error::Conflict` (`hash`: the receipt refused); the receipt must be stored, of the cell,
+  at the tx (`NotFound`, `Mismatch`, as for `put_version`). Concurrent writers of one key:
+  one wins, the others get `Conflict`.
+- `Store::computed_asof(cell_id, asof)`: the greatest asof <= A (ties: the greatest tx).
+- `Store::stored_asof(cell_id, asof)`: the latest stored version (by tx) with tx <= A whose
+  receipt's asof is also <= A. A late-signed receipt answers from its asof on.
+  `version_asof` keeps its tx-only meaning.
+- `Store::computed_asof_with_receipt` / `stored_asof_with_receipt`: the answer and its
+  receipt's bytes; provided methods, one query in `PgStore` (about 45 % faster than two
+  calls).
+- `Store::cell_dependents(cell_id)`: the cells of the stored receipts that list any stored
+  receipt of the cell among their inputs; ascending, unique.
+- `Version::asof`: the receipt's asof, for every method returning a `Version`.
+- Migration 2 (`0002_computed_versions.sql`, additive): `receipts.asof` / `asof_at`,
+  backfilled from the stored canonical bytes, checked equal to them, and filled from them
+  when an insert does not name the column (a 0.1.x writer); the table `computed_versions`
+  (insert-only like `versions`, without the tx-order rule). Apply it with
+  `datumesh-store migrate`; `migrate --check` knows it.
+- The command: `export` writes computed versions (`{"computed":{"asof","cell_id",
+  "receipt_hash","tx"}}` lines, after the versions), `import` reads them and still reads
+  0.1.x exports; `bench` times the new reads and writes.
+
 ## 0.1.2 (2026-10-24)
 
 - Requires `datumesh-core` 0.3.2 (was 0.3.1), which implements specification `spec-0.3.0`:
