@@ -28,7 +28,15 @@
 //!   Append-only and in tx order per cell, enforced by the database (triggers) as well as by
 //!   [`Store::put_version`], which also checks that the receipt is stored and is of that
 //!   cell at that tx.
-//! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not.
+//! * Computed versions: from transaction time `tx` on, cell `cell_id` has the value a
+//!   receipt computed, as of the receipt's asof. Derived rather than facts, so they are
+//!   added in any order, keyed on (cell, tx, asof), insert-only
+//!   ([`Store::put_computed`], [`Store::computed_asof`]).
+//! * Answering as of A: a receipt answers as of A only when its `tx` and its `asof` are
+//!   both at or before A ([`Store::stored_asof`]; [`Store::version_asof`] looks at `tx`
+//!   only).
+//! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not;
+//!   [`Store::cell_dependents`] lifts it to cells.
 //! * Namespaces: a host's key document (checked as SPEC 9.2 requires), with when it was
 //!   validated. Store it before the host's receipts. Replacing it later (a key revoked or
 //!   dropped) does not touch receipts already stored: they verified when they were stored,
@@ -67,7 +75,9 @@ pub use pg::PgStore;
 pub use pool::PoolOptions;
 
 /// A version of a cell: from transaction time `tx` on, the cell's value is that of the
-/// receipt `receipt_hash`.
+/// receipt `receipt_hash`, which states it as of `asof`.
+///
+/// A stored version ([`Store::put_version`]) or a computed one ([`Store::put_computed`]).
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Version {
@@ -77,6 +87,8 @@ pub struct Version {
     pub tx: String,
     /// The receipt stating the value.
     pub receipt_hash: String,
+    /// The receipt's `asof` (an instant; never earlier than `tx`). Since 0.2.0.
+    pub asof: String,
 }
 
 /// A namespace's host and its key document.
@@ -149,4 +161,54 @@ pub trait Store: Resolver {
     fn bind_name(&self, fn_name: &str, fn_hash: &str, tx: &str) -> Result<()>;
     /// The function hash `fn_name` meant as of `asof`.
     fn resolve_name(&self, fn_name: &str, asof: &str) -> Result<Option<String>>;
+
+    /// Records that `receipt_hash` (stored, a receipt of `cell_id` at `tx`) is a computed
+    /// version of the cell. Insert-only, in any order (an older version may be added after a
+    /// newer one): `tx` need not be later than anything. The version's asof is the
+    /// receipt's. Idempotent for the same (cell_id, tx, asof, receipt_hash); another receipt
+    /// for an existing (cell_id, tx, asof) is [`Error::Conflict`] (its `hash` is the receipt
+    /// refused) and the stored one is kept. The receipt is checked as for
+    /// [`put_version`](Store::put_version): [`Error::NotFound`] when it is not stored,
+    /// [`Error::Mismatch`] when it is of another cell or at another tx. Since 0.2.0.
+    fn put_computed(&self, cell_id: &str, tx: &str, receipt_hash: &str) -> Result<()>;
+    /// The computed version that answers as of `asof`: the one with the greatest asof <=
+    /// `asof` (between equal asof, the greatest tx), or `None`. Since 0.2.0.
+    fn computed_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>>;
+    /// The stored version that answers as of `asof`: the latest version (by tx) with `tx <=
+    /// asof` whose receipt's asof is also `<= asof`, or `None`. A version whose receipt is
+    /// late-signed (asof later than tx) answers only from its asof on; until then the
+    /// version before it answers. ([`version_asof`](Store::version_asof) keeps its tx-only
+    /// meaning.) Since 0.2.0.
+    fn stored_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>>;
+    /// The cells that read `cell_id`: the cell ids of the stored receipts that list, among
+    /// their inputs, any stored receipt of `cell_id` (lineage: edges joined to receipts).
+    /// Ascending, each once. Since 0.2.0.
+    fn cell_dependents(&self, cell_id: &str) -> Result<Vec<String>>;
+
+    /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
+    /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.
+    /// The default asks for the two in turn (a receipt that cannot be read then is
+    /// [`Error::NotFound`]); [`PgStore`] answers both with one query. Since 0.2.0.
+    fn computed_asof_with_receipt(&self, cell_id: &str, asof: &str) -> Result<Option<(Version, Cow<'_, [u8]>)>> {
+        match self.computed_asof(cell_id, asof)? {
+            Some(v) => with_receipt(self, v).map(Some),
+            None => Ok(None),
+        }
+    }
+    /// [`stored_asof`](Store::stored_asof) and the bytes of the version's receipt, as
+    /// [`computed_asof_with_receipt`](Store::computed_asof_with_receipt) does. Since 0.2.0.
+    fn stored_asof_with_receipt(&self, cell_id: &str, asof: &str) -> Result<Option<(Version, Cow<'_, [u8]>)>> {
+        match self.stored_asof(cell_id, asof)? {
+            Some(v) => with_receipt(self, v).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A version and its receipt's bytes, for the default `*_with_receipt` methods.
+fn with_receipt<S: Store + ?Sized>(store: &S, v: Version) -> Result<(Version, Cow<'_, [u8]>)> {
+    match store.receipt(&v.receipt_hash) {
+        Some(bytes) => Ok((v, bytes)),
+        None => Err(Error::NotFound { what: "receipt", key: v.receipt_hash }),
+    }
 }

@@ -101,7 +101,18 @@ fn same_hash_with_other_bytes_is_a_conflict() {
     let v = vector("receipt/stored-number");
     let good = input(&v);
     let r = Receipt::from_json(&good).unwrap();
-    let planted = b"planted".to_vec();
+    // JSON with the receipt's members (its asof included: the database derives the asof
+    // column from the bytes) and another signature.
+    let mut planted_v = datumesh_core::json::parse(&good).unwrap();
+    if let datumesh_core::json::Value::Object(members) = &mut planted_v {
+        for (k, v) in members.iter_mut() {
+            if k == "sig" {
+                *v = datumesh_core::json::Value::String("planted".into());
+            }
+        }
+    }
+    let planted = planted_v.to_jcs();
+    assert_ne!(planted, jcs(&good));
     db.client()
         .execute(
             "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, fn_hash, publisher)

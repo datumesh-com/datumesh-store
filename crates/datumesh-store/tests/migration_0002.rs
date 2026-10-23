@@ -52,12 +52,12 @@ fn put_0_1_2(c: &mut Client, bytes: &[u8]) -> Receipt {
     r
 }
 
-/// Receipts whose text holds other `asof` members and look-alikes: a cell argument named
-/// `asof`, a summary quoting `"asof":"..."`, non-ASCII text and escapes.
+/// Receipts whose text holds `asof` look-alikes: a cell argument and a value and a summary
+/// quoting `"asof":"..."` (an argument may not be named `asof`), non-ASCII text and escapes.
 fn tricky_receipts() -> Vec<Vec<u8>> {
     let key = SigningKey::from_seed(&[7u8; 32]);
     let cell = Cell::from_json(
-        br#"{"args":{"asof":{"type":"instant","value":"1999-01-01T00:00:00.000000Z"},"x":{"type":"string","value":"\"asof\":\"1888-01-01T00:00:00.000000Z\""}},"fn":"f","fn_hash":"0000000000000000000000000000000000000000000000000000000000000000","ns":"example.org"}"#,
+        br#"{"args":{"t":{"type":"instant","value":"1999-01-01T00:00:00.000000Z"},"x":{"type":"string","value":"\"asof\":\"1888-01-01T00:00:00.000000Z\""}},"fn":"f","fn_hash":"0000000000000000000000000000000000000000000000000000000000000000","ns":"example.org"}"#,
     )
     .unwrap();
     let mut out = Vec::new();
@@ -73,6 +73,7 @@ fn tricky_receipts() -> Vec<Vec<u8>> {
         let r = ReceiptBuilder::new()
             .cell(cell.clone())
             .value(Scalar::from_lexical(Type::String, "\"asof\":\"2000-01-01T00:00:00.000000Z\"").unwrap())
+            .valid(cell.args.iter().filter(|(k, _)| k.as_str() == "t").map(|(k, v)| (k.clone(), v.clone())).collect())
             .asof(asof)
             .tx(tx)
             .issued(asof)
@@ -109,7 +110,7 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
     .into_iter()
     .enumerate()
     {
-        let r = put_0_1_2(&mut c, &stored_number_with(&format!("1.{i}"), tx, asof));
+        let r = put_0_1_2(&mut c, &stored_number_with(&format!("1.{}", i + 1), tx, asof));
         c.execute(VERSION_PUT_0_1_2, &[&r.cell().id(), &r.tx(), &r.hash()]).unwrap();
         all.push(r);
     }

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use datumesh_core::json::{self, Value};
 use datumesh_core::{Descriptor, Receipt};
-use datumesh_store::{Error, PgStore, Store};
+use datumesh_store::{Error, PgStore, Resolver, Store};
 
 use crate::Fail;
 
@@ -23,6 +23,7 @@ struct Counts {
     receipts: u64,
     blobs: u64,
     versions: u64,
+    computed: u64,
     namespaces: u64,
     names: u64,
     errors: u64,
@@ -43,8 +44,8 @@ pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
         }
     }
     println!(
-        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} namespaces, {} names; {} errors",
-        n.descriptors, n.receipts, n.blobs, n.versions, n.namespaces, n.names, n.errors
+        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} computed versions, {} namespaces, {} names; {} errors",
+        n.descriptors, n.receipts, n.blobs, n.versions, n.computed, n.namespaces, n.names, n.errors
     );
     Ok(if n.errors == 0 { 0 } else { 1 })
 }
@@ -236,6 +237,19 @@ fn one_line(store: &PgStore, l: &[u8], n: &mut Counts) -> Result<(), String> {
         }
         "version" => {
             version(store, &text("cell_id")?, &text("tx")?, &text("receipt_hash")?, &mut n.versions).map_err(e)
+        }
+        "computed" => {
+            let (cell_id, tx, asof, hash) = (text("cell_id")?, text("tx")?, text("asof")?, text("receipt_hash")?);
+            // The key's asof is the receipt's: a line naming another is refused.
+            if let Some(bytes) = store.receipt(&hash) {
+                let r = Receipt::from_json(&bytes).map_err(|e| format!("computed: stored receipt {hash}: {e}"))?;
+                if r.asof() != asof {
+                    return Err(format!("computed: asof {asof} is not receipt {hash}'s, {}", r.asof()));
+                }
+            }
+            store.put_computed(&cell_id, &tx, &hash).map_err(e)?;
+            n.computed += 1;
+            Ok(())
         }
         "namespace" => {
             store.put_namespace(&text("host")?, text("keydoc")?.as_bytes(), &text("validated_at")?).map_err(e)?;

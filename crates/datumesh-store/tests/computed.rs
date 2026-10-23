@@ -218,10 +218,10 @@ fn concurrent_writers_of_one_row_and_of_one_key() {
     for round in 0..5u32 {
         let tx = format!("2024-03-{:02}T12:00:00.000000Z", round + 1);
         // The same row from every thread: all succeed, one row.
-        let same = put(&s, &format!("2.{round}"), &tx, &tx);
+        let same = put(&s, &format!("2.{}", round + 1), &tx, &tx);
         // A different receipt per thread for one other key: exactly one wins.
         let tx2 = format!("2024-03-{:02}T13:00:00.000000Z", round + 1);
-        let rivals: Vec<String> = (0..N).map(|i| put(&s, &format!("3.{round}{i}"), &tx2, &tx2)).collect();
+        let rivals: Vec<String> = (0..N).map(|i| put(&s, &format!("3.{}{}", round + 1, i + 1), &tx2, &tx2)).collect();
         let barrier = Arc::new(Barrier::new(N));
         let handles: Vec<_> = (0..N)
             .map(|i| {
@@ -319,7 +319,7 @@ fn computed_asof_after_historical_backfill() {
     let db = TestDb::migrated();
     let s = db.store();
     let cell = usd_cell();
-    let new = put(&s, "1.20", &day(20), &day(20));
+    let new = put(&s, "1.2", &day(20), &day(20));
     s.put_computed(&cell, &day(20), &new).unwrap();
     assert_eq!(s.computed_asof(&cell, &day(7)).unwrap(), None);
     let old = put(&s, "1.05", &day(5), &day(5));
@@ -412,9 +412,10 @@ fn answers_with_their_receipts() {
     assert_eq!(Receipt::from_json(&bytes).unwrap().hash(), v2);
 }
 
-/// The cells reading a cell, from the vectors: computed-with-lineage reads stored-number;
-/// the spec-0.3.0 cross-rate vectors read stored-number and stored-number-second;
-/// computed-two-inputs reads stored-number and a receipt the store does not hold.
+/// The cells reading a cell, from the vectors (each vector's receipt and the input receipts
+/// of its `recompute` object): computed-with-lineage reads stored-number; the spec-0.3.0
+/// cross-rate vectors read stored-number and a EUR/GBP receipt; computed-two-inputs reads
+/// stored-number and stored-number-second.
 #[test]
 fn cell_dependents_from_the_vectors() {
     let db = TestDb::migrated();
@@ -428,17 +429,25 @@ fn cell_dependents_from_the_vectors() {
         "receipt/computed-two-inputs",
         "receipt/eval-unavailable-computed",
     ];
-    let receipts: Vec<Receipt> = ids
-        .iter()
-        .map(|id| {
-            let v = vector(id);
-            put_vector_keys(&s, &v);
-            let b = input(&v);
-            s.put_receipt(&b).unwrap();
-            Receipt::from_json(&b).unwrap()
-        })
-        .collect();
-    let cell = |i: usize| receipts[i].cell().id();
+    let mut receipts: Vec<Receipt> = Vec::new();
+    let mut put_bytes = |b: &[u8]| {
+        s.put_receipt(b).unwrap();
+        let r = Receipt::from_json(b).unwrap();
+        if !receipts.iter().any(|x| x.hash() == r.hash()) {
+            receipts.push(r.clone());
+        }
+        r
+    };
+    let mut main = Vec::new();
+    for id in ids {
+        let v = vector(id);
+        put_vector_keys(&s, &v);
+        for (_, t) in v.get("recompute").and_then(|r| r.get("inputs")).and_then(|i| i.as_object()).unwrap_or(&[]) {
+            put_bytes(t.as_str().unwrap().as_bytes());
+        }
+        main.push(put_bytes(&input(&v)));
+    }
+    let cell = |i: usize| main[i].cell().id();
     let (usd, gbp, lineage, cross, two) = (cell(0), cell(1), cell(2), cell(3), cell(5));
     assert_eq!(cell(3), cell(4), "the two cross-rate vectors are one cell");
 
@@ -461,17 +470,32 @@ fn cell_dependents_from_the_vectors() {
         assert!(got.contains(c), "{c} missing from {got:?}");
     }
     assert!(got.windows(2).all(|w| w[0] < w[1]), "ascending and unique: {got:?}");
-    assert_eq!(s.cell_dependents(&gbp).unwrap(), [cross.clone()]);
-    assert_eq!(s.cell_dependents(&gbp).unwrap(), expected(&gbp));
+    // The cross rate reads the EUR/GBP cell through the receipt its recompute object holds
+    // (not stored-number-second's own receipt, which nothing reads).
+    let got = s.cell_dependents(&gbp).unwrap();
+    assert_eq!(got, expected(&gbp));
+    assert!(got.contains(&cross), "{got:?}");
     // Computed cells nobody reads.
     for c in [&lineage, &cross, &two] {
         assert!(s.cell_dependents(c).unwrap().is_empty());
     }
-    // The input computed-two-inputs names but the store does not hold: its cell is unknown,
-    // and no cell id is the hash itself.
-    let unheld = &receipts[5].inputs()[1];
-    assert!(s.receipt(unheld).is_none());
-    assert!(s.cell_dependents(unheld).unwrap().is_empty());
+    // A cell the store has no receipt of; and a receipt hash is not a cell id.
+    assert!(s.cell_dependents(&"9".repeat(64)).unwrap().is_empty());
+    assert!(s.cell_dependents(main[0].hash()).unwrap().is_empty());
+}
+
+/// An input the store does not hold has no cell: it makes no dependent.
+#[test]
+fn cell_dependents_ignore_inputs_the_store_does_not_hold() {
+    let db = TestDb::migrated();
+    let s = db.store();
+    let two = vector("receipt/computed-two-inputs");
+    s.put_receipt(&input(&two)).unwrap();
+    let usd = usd_cell();
+    assert!(s.cell_dependents(&usd).unwrap().is_empty());
+    s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
+    let two_cell = Receipt::from_json(&input(&two)).unwrap().cell().id();
+    assert_eq!(s.cell_dependents(&usd).unwrap(), [two_cell]);
 }
 
 /// Any receipt of the cell counts, not only its stored versions or its latest one.
@@ -487,6 +511,6 @@ fn cell_dependents_through_any_receipt_of_the_cell() {
     // Two receipts of the lineage cell read the old one: one dependent cell.
     s.put_receipt(&lineage_with(&[&old], "110", &day(1), &day(1))).unwrap();
     s.put_receipt(&lineage_with(&[&old], "111", &day(4), &day(4))).unwrap();
-    assert_eq!(s.cell_dependents(&cell).unwrap(), [lineage_cell.clone()]);
+    assert_eq!(s.cell_dependents(&cell).unwrap(), std::slice::from_ref(&lineage_cell));
     assert!(s.cell_dependents(&lineage_cell).unwrap().is_empty());
 }

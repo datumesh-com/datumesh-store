@@ -5,14 +5,20 @@
 //! `--cells` stored `fx_rate` cells (each version a receipt signed, with feature `sign`, by
 //! the vectors' test key of rates.example.org, and verified by `put_receipt` against the
 //! stored key document), stored through `put_receipt` and `put_version` from `--threads`
-//! threads, then `--dependents` computed `convert` receipts that all list the first version's
-//! receipt as their input. The loading connections use `synchronous_commit = off` (to load
-//! faster; durability of a benchmark load does not matter); the timed operations use the
-//! server's setting.
+//! threads, then `--dependents` computed `convert` receipts (each of a cell of its own) that
+//! all list the first version's receipt as their input. Every version's receipt is also
+//! recorded as a computed version of its cell with `put_computed`, per cell newest first
+//! (as a historical backfill would), and so is every dependent. The loading connections use
+//! `synchronous_commit = off` (to load faster; durability of a benchmark load does not
+//! matter); the timed operations use the server's setting.
 //!
 //! Timed, one call at a time, `--samples` each: `version_asof` (random cell, random asof),
 //! `receipt` (random stored hash), `put_version` (a new latest version of a random cell; the
-//! receipt is stored beforehand, untimed), `dependents` of the receipt with the dependents.
+//! receipt is stored beforehand, untimed), `dependents` of the receipt with the dependents;
+//! `computed_asof` and `stored_asof` (random cell, random asof), each alone, followed by
+//! `receipt` of the answer, and as `*_with_receipt` (one query); `put_computed` (a receipt of
+//! a random cell at a random earlier tx, sometimes late-signed, stored beforehand, untimed);
+//! `cell_dependents` of the cell with the dependents.
 //! Then disk use per table and `put_blob` / `blob` for sizes from 1 KiB to `--blob-max`.
 //!
 //! `bench --wait` polls until a fresh connection answers a `version_asof`, for timing a
@@ -122,7 +128,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     }
 
     let mut rng = Rng(0x5eed);
-    println!("{:<14} {:>8} {:>10} {:>10} {:>10}", "op", "samples", "p50 µs", "p99 µs", "mean µs");
+    println!("{:<26} {:>8} {:>10} {:>10} {:>10}", "op", "samples", "p50 µs", "p99 µs", "mean µs");
 
     // version_asof: a random cell as of a random time within (and a little past) its history.
     let mut t = Vec::with_capacity(o.samples);
@@ -180,6 +186,63 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         row("dependents", &mut t, &format!("{n} dependents each"));
     }
 
+    // Answers as of A: a random cell as of a random time within (and a little past) its
+    // history; alone, followed by `receipt` of the answer, and in one query.
+    type Read<'a> = &'a dyn Fn(&str, &str) -> Result<bool, Fail>;
+    let then_receipt =
+        |v: Option<datumesh_store::Version>| v.is_some_and(|v| measure.receipt(&v.receipt_hash).is_some());
+    let reads: [(&str, Read<'_>); 6] = [
+        ("computed_asof", &|c, a| Ok(measure.computed_asof(c, a)?.is_some())),
+        ("computed_asof+receipt", &|c, a| Ok(then_receipt(measure.computed_asof(c, a)?))),
+        ("computed_asof_with_receipt", &|c, a| Ok(measure.computed_asof_with_receipt(c, a)?.is_some())),
+        ("stored_asof", &|c, a| Ok(measure.stored_asof(c, a)?.is_some())),
+        ("stored_asof+receipt", &|c, a| Ok(then_receipt(measure.stored_asof(c, a)?))),
+        ("stored_asof_with_receipt", &|c, a| Ok(measure.stored_asof_with_receipt(c, a)?.is_some())),
+    ];
+    for (op, read) in reads {
+        let mut t = Vec::with_capacity(o.samples);
+        let mut found = 0;
+        for _ in 0..o.samples {
+            let c = &state.cells[rng.below(state.cells.len())];
+            let asof = instant(c.first + rng.below_i64(c.last - c.first + HOUR));
+            let s = Instant::now();
+            let r = read(&c.id, &asof);
+            t.push(s.elapsed());
+            found += usize::from(r?);
+        }
+        row(op, &mut t, &format!("{found} found"));
+    }
+
+    // put_computed: a receipt of a random cell at a random earlier tx (a microsecond offset
+    // keeps every key new), as of up to two hours later, stored first.
+    let mut t = Vec::with_capacity(o.samples);
+    for j in 0..o.samples {
+        let c = &state.cells[rng.below(state.cells.len())];
+        let tx_us = c.first + rng.below_i64(c.last - c.first + 1) + 1 + j as i64;
+        let (tx, asof) = (instant(tx_us), instant(tx_us + rng.below_i64(2 * HOUR)));
+        let bytes = fx_receipt(&fx_rate, c.day, &tx, &asof, &format!("{}", 3000 + j), &rates)?;
+        let h = measure.put_receipt(&bytes)?;
+        let s = Instant::now();
+        measure.put_computed(&c.id, &tx, &h)?;
+        t.push(s.elapsed());
+    }
+    row("put_computed", &mut t, "one transaction each, any order, synchronous_commit as configured");
+
+    // cell_dependents of the cell with the most.
+    if let Some((cell, n)) = &state.most_read_cell {
+        let mut t = Vec::with_capacity(o.samples);
+        for _ in 0..o.samples {
+            let s = Instant::now();
+            let d = measure.cell_dependents(cell);
+            t.push(s.elapsed());
+            let d = d?;
+            if d.len() != *n {
+                return Err(Fail(1, format!("cell_dependents: {} of {n}", d.len())));
+            }
+        }
+        row("cell_dependents", &mut t, &format!("{n} dependent cells each"));
+    }
+
     disk(url)?;
     blobs(&measure, o.blob_max, &mut rng)?;
     Ok(0)
@@ -206,6 +269,8 @@ struct State {
     cells: Vec<CellInfo>,
     hashes: Vec<String>,
     most_depended: Option<(String, usize)>,
+    /// The cell read by the most cells, and how many.
+    most_read_cell: Option<(String, usize)>,
 }
 
 impl State {
@@ -228,7 +293,15 @@ impl State {
         let most_depended = c
             .query_opt("SELECT input_hash, count(*) FROM edges GROUP BY input_hash ORDER BY 2 DESC LIMIT 1", &[])?
             .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as usize));
-        Ok(State { cells, hashes, most_depended })
+        let most_read_cell = c
+            .query_opt(
+                "SELECT i.cell_id, count(DISTINCT d.cell_id) FROM edges e
+                   JOIN receipts i ON i.hash = e.input_hash JOIN receipts d ON d.hash = e.receipt_hash
+                  GROUP BY i.cell_id ORDER BY 2 DESC LIMIT 1",
+                &[],
+            )?
+            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as usize));
+        Ok(State { cells, hashes, most_depended, most_read_cell })
     }
 }
 
@@ -256,6 +329,7 @@ fn load(
                     while i < o.cells {
                         let day = i as i64;
                         let mut id = String::new();
+                        let mut computed = Vec::with_capacity(per_cell);
                         for k in 0..per_cell {
                             let tx = instant(T0 + k as i64 * HOUR + i as i64 * 1_000_000);
                             let bytes = fx_receipt(fx_rate, day, &tx, &tx, &format!("{}", 1000 + k), rates)?;
@@ -264,7 +338,12 @@ fn load(
                                 id = Receipt::from_json(&bytes)?.cell().id();
                             }
                             store.put_version(&id, &tx, &h)?;
+                            computed.push((tx, h.clone()));
                             hashes.push(h);
+                        }
+                        // The same receipts as computed versions, newest first.
+                        for (tx, h) in computed.iter().rev() {
+                            store.put_computed(&id, tx, h)?;
                         }
                         let first = T0 + i as i64 * 1_000_000;
                         cells.push(CellInfo { id, day, first, last: first + (per_cell as i64 - 1) * HOUR });
@@ -289,7 +368,7 @@ fn load(
     cells.sort_by_key(|c| c.day);
     let loaded = start.elapsed();
     println!(
-        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt (verifying) + put_version, {} threads, synchronous_commit=off)",
+        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt (verifying) + put_version + put_computed, {} threads, synchronous_commit=off)",
         hashes.len(),
         cells.len(),
         loaded.as_secs_f64(),
@@ -299,6 +378,7 @@ fn load(
 
     // Dependents: convert receipts whose one input is the first version of cell 0.
     let mut most_depended = None;
+    let mut most_read_cell = None;
     if o.dependents > 0 {
         let start = Instant::now();
         let c0 = &cells[0];
@@ -330,12 +410,14 @@ fn load(
                 .licence("CC-BY-4.0")
                 .summary("An amount converted at the reference rate.")
                 .sign(calc)?;
-            store.put_receipt(&receipt_json(&r))?;
+            let h = store.put_receipt(&receipt_json(&r))?;
+            store.put_computed(&r.cell().id(), r.tx(), &h)?;
         }
         println!("load: {} dependents of {} in {:.1} s", o.dependents, r0.hash(), start.elapsed().as_secs_f64());
         most_depended = Some((r0.hash().to_string(), o.dependents));
+        most_read_cell = Some((c0.id.clone(), o.dependents));
     }
-    Ok(State { cells, hashes, most_depended })
+    Ok(State { cells, hashes, most_depended, most_read_cell })
 }
 
 /// A receipt of fx_rate(EUR, USD, date) with the given value at tx, as of asof.
@@ -379,7 +461,7 @@ fn row(op: &str, t: &mut [Duration], note: &str) {
     let p50 = t.get(n * 50 / 100).copied().unwrap_or_default();
     let p99 = t.get((n * 99 / 100).min(n - 1)).copied().unwrap_or_default();
     let mean = t.iter().map(|d| us(*d)).sum::<f64>() / n as f64;
-    println!("{op:<14} {:>8} {:>10.0} {:>10.0} {:>10.0}  {note}", t.len(), us(p50), us(p99), mean);
+    println!("{op:<26} {:>8} {:>10.0} {:>10.0} {:>10.0}  {note}", t.len(), us(p50), us(p99), mean);
 }
 
 fn disk(url: &str) -> Result<(), Fail> {

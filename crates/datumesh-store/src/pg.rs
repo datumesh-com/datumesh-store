@@ -100,13 +100,48 @@ impl PgStore {
         result
     }
 
+    /// Versions from rows of (tx, receipt_hash, asof).
     fn version_rows(rows: &[postgres::Row], cell_id: &str) -> Result<Vec<Version>> {
-        rows.iter()
-            .map(|r| {
-                Ok(Version { cell_id: cell_id.to_string(), tx: r.try_get(0).db()?, receipt_hash: r.try_get(1).db()? })
-            })
-            .collect()
+        rows.iter().map(|r| version_row(r, cell_id)).collect()
     }
+
+    /// A version (and its receipt's bytes) from a query answering
+    /// (tx, receipt_hash, asof, bytes) for (cell_id, asof).
+    fn asof_with_receipt(
+        &self,
+        op: &'static str,
+        q: Q,
+        cell_id: &str,
+        asof: &str,
+    ) -> Result<Option<(Version, Vec<u8>)>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(asof, "asof")?;
+        self.run(op, |c| {
+            let st = c.stmt(q)?;
+            let Some(row) = c.client.query_opt(&st, &[&cell_id, &asof]).db()? else { return Ok(None) };
+            Ok(Some((version_row(&row, cell_id)?, row.try_get(3).db()?)))
+        })
+    }
+
+    /// A version from a query answering (tx, receipt_hash, asof) for (cell_id, asof).
+    fn asof_version(&self, op: &'static str, q: Q, cell_id: &str, asof: &str) -> Result<Option<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(asof, "asof")?;
+        self.run(op, |c| {
+            let st = c.stmt(q)?;
+            let rows = c.client.query(&st, &[&cell_id, &asof]).db()?;
+            Ok(PgStore::version_rows(&rows, cell_id)?.pop())
+        })
+    }
+}
+
+fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
+    Ok(Version {
+        cell_id: cell_id.to_string(),
+        tx: r.try_get(0).db()?,
+        receipt_hash: r.try_get(1).db()?,
+        asof: r.try_get(2).db()?,
+    })
 }
 
 fn get_bytes(c: &mut Conn, q: Q, key: &str) -> Result<Option<Vec<u8>>> {
@@ -221,7 +256,9 @@ impl Store for PgStore {
                     datumesh_core::Error::new(ErrorCode::Signature, "$", "the receipt did not verify")
                 })));
             }
-            let n = t.execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.cell().fn_hash, &r.publisher()]).db()?;
+            let n = t
+                .execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.asof(), &r.cell().fn_hash, &r.publisher()])
+                .db()?;
             if n == 0 {
                 let row = t.query_one(&get, &[&hash]).db()?;
                 let stored: Vec<u8> = row.try_get(0).db()?;
@@ -263,7 +300,7 @@ impl Store for PgStore {
         self.run("put_version", |c| {
             let lock = c.stmt(Q::Lock)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
-            let latest = c.stmt(Q::VersionLatest)?;
+            let latest = c.stmt(Q::VersionLatestTx)?;
             let put = c.stmt(Q::VersionPut)?;
             let mut t = c.client.transaction().db()?;
             t.execute(&lock, &[&"versions", &cell_id]).db()?;
@@ -297,13 +334,7 @@ impl Store for PgStore {
     }
 
     fn version_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>> {
-        check_hex(cell_id, 64, "cell_id")?;
-        check_instant(asof, "asof")?;
-        self.run("version_asof", |c| {
-            let st = c.stmt(Q::VersionAsof)?;
-            let rows = c.client.query(&st, &[&cell_id, &asof]).db()?;
-            Ok(PgStore::version_rows(&rows, cell_id)?.pop())
-        })
+        self.asof_version("version_asof", Q::VersionAsof, cell_id, asof)
     }
 
     fn versions(&self, cell_id: &str, from: &str, to: &str) -> Result<Vec<Version>> {
@@ -412,6 +443,69 @@ impl Store for PgStore {
         })?;
         tracing::debug!(target: "datumesh_store", fn_name, fn_hash, tx, "bind_name");
         Ok(())
+    }
+
+    fn put_computed(&self, cell_id: &str, tx: &str, receipt_hash: &str) -> Result<()> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(tx, "tx")?;
+        check_hex(receipt_hash, 64, "receipt_hash")?;
+        // No lock: the primary key serialises writers of one (cell_id, tx, asof). An insert
+        // that meets a concurrent one waits for it; if it committed, nothing is inserted and
+        // the row it wrote (visible to the next statement under READ COMMITTED) decides.
+        let asof = self.run("put_computed", |c| {
+            let meta = c.stmt(Q::ReceiptMeta)?;
+            let put = c.stmt(Q::ComputedPut)?;
+            let get = c.stmt(Q::ComputedGet)?;
+            let mut t = c.client.transaction().db()?;
+            let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
+                return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
+            };
+            let (r_cell, r_tx, asof): (String, String, String) =
+                (row.try_get(0).db()?, row.try_get(1).db()?, row.try_get(2).db()?);
+            if r_cell != cell_id {
+                return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
+            }
+            if r_tx != tx {
+                return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: r_tx });
+            }
+            if t.execute(&put, &[&cell_id, &tx, &asof, &receipt_hash]).db()? == 0 {
+                let stored: String = t.query_one(&get, &[&cell_id, &tx, &asof]).db()?.try_get(0).db()?;
+                if stored != receipt_hash {
+                    return Err(Error::Conflict { hash: receipt_hash.to_string() });
+                }
+            }
+            t.commit().db()?;
+            Ok(asof)
+        })?;
+        tracing::debug!(target: "datumesh_store", cell_id, tx, asof, receipt_hash, "put_computed");
+        Ok(())
+    }
+
+    fn computed_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>> {
+        self.asof_version("computed_asof", Q::ComputedAsof, cell_id, asof)
+    }
+
+    fn stored_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>> {
+        self.asof_version("stored_asof", Q::StoredAsof, cell_id, asof)
+    }
+
+    fn cell_dependents(&self, cell_id: &str) -> Result<Vec<String>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        self.run("cell_dependents", |c| get_strings(c, Q::CellDependents, cell_id))
+    }
+
+    /// One query: the version and its receipt's bytes.
+    fn computed_asof_with_receipt(&self, cell_id: &str, asof: &str) -> Result<Option<(Version, Cow<'_, [u8]>)>> {
+        Ok(self
+            .asof_with_receipt("computed_asof_with_receipt", Q::ComputedAsofReceipt, cell_id, asof)?
+            .map(|(v, b)| (v, Cow::Owned(b))))
+    }
+
+    /// One query: the version and its receipt's bytes.
+    fn stored_asof_with_receipt(&self, cell_id: &str, asof: &str) -> Result<Option<(Version, Cow<'_, [u8]>)>> {
+        Ok(self
+            .asof_with_receipt("stored_asof_with_receipt", Q::StoredAsofReceipt, cell_id, asof)?
+            .map(|(v, b)| (v, Cow::Owned(b))))
     }
 
     fn resolve_name(&self, fn_name: &str, asof: &str) -> Result<Option<String>> {

@@ -39,10 +39,11 @@ statements! {
     DescriptorExists = "SELECT EXISTS (SELECT 1 FROM descriptors WHERE fn_hash = $1)" [TEXT];
 
     ReceiptGet = "SELECT bytes FROM receipts WHERE hash = $1" [TEXT];
-    ReceiptMeta = "SELECT cell_id, tx FROM receipts WHERE hash = $1" [TEXT];
-    ReceiptPut = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, fn_hash, publisher)
-                  VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, $6) ON CONFLICT (hash) DO NOTHING"
-        [TEXT, BYTEA, TEXT, TEXT, TEXT, TEXT];
+    ReceiptMeta = "SELECT cell_id, tx, asof FROM receipts WHERE hash = $1" [TEXT];
+    ReceiptPut = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
+                  VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)
+                  ON CONFLICT (hash) DO NOTHING"
+        [TEXT, BYTEA, TEXT, TEXT, TEXT, TEXT, TEXT];
     EdgesPut = "INSERT INTO edges (receipt_hash, input_hash, kind)
                 SELECT $1, i, 'receipt' FROM unnest($2::text[]) AS i ON CONFLICT DO NOTHING"
         [TEXT, TEXT_ARRAY];
@@ -51,16 +52,54 @@ statements! {
     BlobPut = "INSERT INTO blobs (sha256, bytes, length) VALUES ($1, $2, $3) ON CONFLICT (sha256) DO NOTHING"
         [TEXT, BYTEA, INT8];
 
-    VersionLatest = "SELECT tx, receipt_hash FROM versions WHERE cell_id = $1 ORDER BY tx DESC LIMIT 1" [TEXT];
-    VersionAsof = "SELECT tx, receipt_hash FROM versions WHERE cell_id = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
+    // Versions come with their receipt's asof (Version::asof). A scalar subquery rather than
+    // a join, so that the versions table is looked at first (a missing column of it is still
+    // reported as such).
+    VersionLatestTx = "SELECT tx FROM versions WHERE cell_id = $1 ORDER BY tx DESC LIMIT 1" [TEXT];
+    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+                     FROM versions v WHERE v.cell_id = $1 ORDER BY v.tx DESC LIMIT 1"
+        [TEXT];
+    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+                   FROM versions v WHERE v.cell_id = $1 AND v.tx <= $2 ORDER BY v.tx DESC LIMIT 1"
         [TEXT, TEXT];
-    VersionRange = "SELECT tx, receipt_hash FROM versions WHERE cell_id = $1 AND tx >= $2 AND tx <= $3 ORDER BY tx"
+    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+                    FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx"
         [TEXT, TEXT, TEXT];
+    // A stored version answers as of A when its tx <= A and its receipt's asof <= A.
+    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                  WHERE v.cell_id = $1 AND v.tx <= $2 AND r.asof <= $2 ORDER BY v.tx DESC LIMIT 1"
+        [TEXT, TEXT];
+    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                         WHERE v.cell_id = $1 AND v.tx <= $2 AND r.asof <= $2 ORDER BY v.tx DESC LIMIT 1"
+        [TEXT, TEXT];
     VersionPut = "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
         [TEXT, TEXT, TEXT];
     ValueAsof = "SELECT r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                  WHERE v.cell_id = $1 AND v.tx <= $2 ORDER BY v.tx DESC LIMIT 1"
         [TEXT, TEXT];
+
+    ComputedPut = "INSERT INTO computed_versions (cell_id, tx, tx_at, asof, asof_at, receipt_hash)
+                   VALUES ($1, $2, datumesh_instant($2), $3, datumesh_instant($3), $4)
+                   ON CONFLICT (cell_id, tx, asof) DO NOTHING"
+        [TEXT, TEXT, TEXT, TEXT];
+    ComputedGet = "SELECT receipt_hash FROM computed_versions WHERE cell_id = $1 AND tx = $2 AND asof = $3"
+        [TEXT, TEXT, TEXT];
+    // The greatest asof <= A, ties the greatest tx.
+    ComputedAsof = "SELECT tx, receipt_hash, asof FROM computed_versions
+                    WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1"
+        [TEXT, TEXT];
+    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, r.bytes FROM
+                               (SELECT tx, receipt_hash, asof FROM computed_versions
+                                 WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1) c
+                           JOIN receipts r ON r.hash = c.receipt_hash"
+        [TEXT, TEXT];
+
+    // The cells of stored receipts that list any stored receipt of the cell among their inputs.
+    CellDependents = "SELECT DISTINCT d.cell_id FROM receipts i
+                      JOIN edges e ON e.input_hash = i.hash
+                      JOIN receipts d ON d.hash = e.receipt_hash
+                      WHERE i.cell_id = $1 ORDER BY d.cell_id"
+        [TEXT];
 
     Dependents = "SELECT receipt_hash FROM edges WHERE input_hash = $1 ORDER BY receipt_hash" [TEXT];
     Inputs = "SELECT input_hash FROM edges WHERE receipt_hash = $1 ORDER BY input_hash" [TEXT];

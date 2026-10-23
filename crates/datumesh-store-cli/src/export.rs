@@ -1,7 +1,8 @@
 //! `export`: everything as JSON lines, in an order `import` can replay: namespaces (the
 //! receipts are verified against them), descriptors, receipts, blobs, versions (per cell in
-//! tx order), name bindings (per name in tx order). One consistent snapshot (a read-only
-//! REPEATABLE READ transaction), streamed.
+//! tx order), computed versions (per cell, by tx and asof; since 0.2.0), name bindings (per
+//! name in tx order). One consistent snapshot (a read-only REPEATABLE READ transaction),
+//! streamed. `import` reads 0.1.x exports too (they have no computed versions).
 //!
 //! ```text
 //! {"namespace":{"host":"…","keydoc":"<key document JSON text>","validated_at":"…"}}
@@ -9,6 +10,7 @@
 //! {"receipt":"<receipt JSON text>"}
 //! {"blob":"<content, lowercase hex>"}
 //! {"version":{"cell_id":"…","receipt_hash":"…","tx":"…"}}
+//! {"computed":{"asof":"…","cell_id":"…","receipt_hash":"…","tx":"…"}}
 //! {"name":{"fn_hash":"…","fn_name":"…","tx":"…"}}
 //! ```
 
@@ -70,6 +72,15 @@ pub(crate) fn run(url: &str) -> Result<u8, Fail> {
     each(&mut t, "SELECT cell_id, tx, receipt_hash FROM versions ORDER BY cell_id, tx", |r| {
         let (cell, tx, h): (String, String, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
         line(&mut out, "version", obj(vec![("cell_id", s(cell)), ("tx", s(tx)), ("receipt_hash", s(h))]))
+    })?;
+    each(&mut t, "SELECT cell_id, tx, asof, receipt_hash FROM computed_versions ORDER BY cell_id, tx, asof", |r| {
+        let (cell, tx, asof, h): (String, String, String, String) =
+            (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?, r.try_get(3)?);
+        line(
+            &mut out,
+            "computed",
+            obj(vec![("cell_id", s(cell)), ("tx", s(tx)), ("asof", s(asof)), ("receipt_hash", s(h))]),
+        )
     })?;
     each(&mut t, "SELECT fn_name, tx, fn_hash FROM name_bindings ORDER BY fn_name, tx", |r| {
         let (name, tx, h): (String, String, String) = (r.try_get(0)?, r.try_get(1)?, r.try_get(2)?);
