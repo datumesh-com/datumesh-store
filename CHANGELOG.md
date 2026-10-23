@@ -2,11 +2,19 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.1.2 (2026-10-24)
+
+- Requires `datumesh-core` 0.3.2 (was 0.3.1), which implements specification `spec-0.3.0`:
+  an input receipt's `asof` may be at or before the receipt's, an `ok` envelope's receipt
+  `asof` at or before the requested one, and `E_EVAL_UNAVAILABLE` when a function cannot be
+  evaluated. The tests run the `spec-0.3.0` vectors. No API change.
+- The first release published with crates.io Trusted Publishing.
+
 ## 0.1.1 (2026-10-22)
 
 No type of the `postgres` driver or of a TLS crate is part of the API any more, except in
 the new module `pg_unstable`, which is outside semver until 1.0. TLS through `PoolOptions`.
-The first release published with crates.io Trusted Publishing.
+Published with an API token: Trusted Publishing was refused on the `v0.1.1` run (see 0.1.2).
 
 ### Changed (breaking for code that named `postgres` types; 0.1.0 had 16 downloads)
 

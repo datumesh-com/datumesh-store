@@ -9,8 +9,8 @@ A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function d
 
 ```toml
 [dependencies]
-datumesh-store = "0.1.1"
-datumesh-core = "0.3.1"
+datumesh-store = "0.1.2"
+datumesh-core = "0.3.2"
 ```
 
 Store the key documents of `spec/vectors/receipt/stored-number.json`, its receipt (verified against them on the way in), its function's descriptor and the version it states, then verify the receipt through the store (it recomputes the stored value as of the receipt's `asof`):
@@ -94,7 +94,7 @@ So a server with `ssl=on` and a self-signed certificate (or one from a private C
 
 ### `pg_unstable`
 
-No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.1.1"`) if you use it.
+No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.1.2"`) if you use it.
 
 ## Schema
 
