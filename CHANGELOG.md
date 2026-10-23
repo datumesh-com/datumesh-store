@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-24)
 
 Additions for the engine: computed versions, answering as of A with both times, cells that
 read a cell. No existing method, type or behaviour changes; adding methods to the `Store`
