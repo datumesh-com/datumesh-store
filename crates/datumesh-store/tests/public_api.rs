@@ -61,6 +61,29 @@ fn the_api_has_pg_unstable_and_the_replacements() {
     ] {
         assert!(has(item), "missing: {item}");
     }
+    // 0.2.0: computed versions and answering as of A, on the trait and on PgStore.
+    for owner in ["Store", "PgStore"] {
+        for item in [
+            format!("pub fn datumesh_store::{owner}::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>"),
+            format!("pub fn datumesh_store::{owner}::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>"),
+            format!("pub fn datumesh_store::{owner}::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>"),
+            format!("pub fn datumesh_store::{owner}::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>"),
+        ] {
+            assert!(has(&item), "missing: {item}");
+        }
+        for prefix in
+            ["computed_asof_with_receipt(&self, &str, &str) -> ", "stored_asof_with_receipt(&self, &str, &str) -> "]
+        {
+            let p = format!("pub fn datumesh_store::{owner}::{prefix}");
+            assert!(api.lines().any(|l| l.starts_with(&p)), "missing: {p}");
+        }
+    }
+    assert!(has("pub datumesh_store::Version::asof: alloc::string::String"));
+    // Nothing of 0.1.2 removed: the Version fields stay.
+    for f in ["cell_id", "receipt_hash", "tx"] {
+        assert!(has(&format!("pub datumesh_store::Version::{f}: alloc::string::String")));
+    }
+
     // Moved, not kept at the root.
     assert!(!api.contains("datumesh_store::PgStore::with_connector"));
     assert!(api.lines().any(|l| l.starts_with("pub fn datumesh_store::pg_unstable::with_connector<F>(")));

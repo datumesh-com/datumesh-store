@@ -37,6 +37,8 @@ fn as_of_before_between_after_and_at() {
 
     let v1 = s.version_asof(&id, TX1).unwrap().unwrap();
     assert_eq!((v1.cell_id.as_str(), v1.tx.as_str(), v1.receipt_hash.as_str()), (id.as_str(), TX1, h1.as_str()));
+    // The version's asof is its receipt's (here equal to its tx).
+    assert_eq!(v1.asof, TX1);
 
     let all: Vec<Version> = s.versions(&id, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap();
     assert_eq!(all.iter().map(|v| v.tx.as_str()).collect::<Vec<_>>(), [TX1, TX2]);
@@ -46,8 +48,9 @@ fn as_of_before_between_after_and_at() {
     assert_eq!(s.versions(&id, TX1, TX1).unwrap().len(), 1);
     assert_eq!(s.versions(&id, "2024-03-15T16:00:00.000001Z", TX2).unwrap().len(), 1);
     assert_eq!(s.versions(&id, TX2, TX1).unwrap().len(), 0);
+    assert_eq!(all.iter().map(|v| v.asof.as_str()).collect::<Vec<_>>(), [TX1, TX2]);
     let latest = s.latest(&id).unwrap().unwrap();
-    assert_eq!((latest.tx.as_str(), latest.receipt_hash.as_str()), (TX2, h2.as_str()));
+    assert_eq!((latest.tx.as_str(), latest.asof.as_str(), latest.receipt_hash.as_str()), (TX2, TX2, h2.as_str()));
 
     // evaluate: the stored value as of asof.
     let n = |x: &str| Scalar::from_lexical(Type::Number, x).unwrap();

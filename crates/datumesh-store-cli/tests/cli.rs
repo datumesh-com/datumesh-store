@@ -97,6 +97,7 @@ fn migrate_from_empty_rerun_and_check() {
     let db = Db::new();
     let out = ok(&db.run(&["migrate"]));
     assert!(out.contains("applied migration 1"), "{out}");
+    assert!(out.contains("applied migration 2 (0002_computed_versions.sql)"), "{out}");
     let out = ok(&db.run(&["migrate"]));
     assert!(out.contains("up to date"), "{out}");
     let out = ok(&db.run(&["migrate", "--check"]));
@@ -185,16 +186,36 @@ fn bench_runs_small() {
         "--blob-max",
         "65536",
     ]));
-    for op in ["version_asof", "receipt", "put_version", "dependents", "disk", "blob"] {
+    for op in [
+        "version_asof",
+        "receipt",
+        "put_version",
+        "dependents",
+        "computed_asof",
+        "computed_asof+receipt",
+        "computed_asof_with_receipt",
+        "stored_asof",
+        "stored_asof+receipt",
+        "stored_asof_with_receipt",
+        "put_computed",
+        "cell_dependents",
+        "disk",
+        "blob",
+    ] {
         assert!(out.contains(op), "{op}: {out}");
     }
     assert!(out.contains("p50") && out.contains("p99"), "{out}");
     let n: i64 = db.client().query_one("SELECT count(*) FROM versions", &[]).unwrap().get(0);
     assert_eq!(n, 200 + 50);
+    // Computed versions: each loaded version's receipt, each dependent, and the timed puts.
+    let n: i64 = db.client().query_one("SELECT count(*) FROM computed_versions", &[]).unwrap().get(0);
+    assert_eq!(n, 200 + 10 + 50);
+    assert!(out.contains("10 dependent cells"), "{out}");
 
     // A second run on the loaded database, without loading.
     let out = ok(&db.run(&["bench", "--skip-load", "--samples", "10", "--blob-max", "0"]));
     assert!(out.contains("version_asof") && out.contains("dependents"), "{out}");
+    assert!(out.contains("computed_asof") && out.contains("10 dependent cells"), "{out}");
     // The probe used for cold-restart timing answers.
     let out = ok(&db.run(&["bench", "--wait"]));
     assert!(out.contains("answered"), "{out}");
@@ -285,4 +306,69 @@ fn every_command_works_over_tls_with_the_ca() {
     assert!(out.contains("version_asof"), "{out}");
     let out = ok(&tls(&["bench", "--wait"]));
     assert!(out.contains("answered"), "{out}");
+}
+
+/// Computed versions are exported (`{"computed":{...}}` lines, after the versions) and a
+/// round trip through `import` keeps them; importing again changes nothing.
+#[test]
+fn export_and_import_keep_computed_versions() {
+    let db = Db::new();
+    ok(&db.run(&["migrate"]));
+    let dir = spec_vectors();
+    ok(&db.run(&["import", dir.to_str().unwrap()]));
+    // Every stored receipt as a computed version of its cell (one per key), in raw SQL.
+    let n = db
+        .client()
+        .execute(
+            "INSERT INTO computed_versions (cell_id, tx, tx_at, asof, asof_at, receipt_hash)
+             SELECT DISTINCT ON (cell_id, tx, asof) cell_id, tx, tx_at, asof, asof_at, hash
+               FROM receipts ORDER BY cell_id, tx, asof, hash",
+            &[],
+        )
+        .unwrap();
+    assert!(n >= 5, "{n}");
+    let export1 = ok(&db.run(&["export"]));
+    let lines: Vec<&str> = export1.lines().collect();
+    let computed: Vec<&&str> = lines.iter().filter(|l| l.starts_with(r#"{"computed":{"#)).collect();
+    assert_eq!(computed.len() as u64, n, "{export1}");
+    let first = lines.iter().position(|l| l.starts_with(r#"{"computed":"#)).unwrap();
+    let last_receipt = lines.iter().rposition(|l| l.starts_with(r#"{"receipt":"#)).unwrap();
+    assert!(last_receipt < first);
+    let line = datumesh_core::json::parse(computed[0].as_bytes()).unwrap();
+    let body = line.get("computed").unwrap();
+    for k in ["cell_id", "tx", "asof", "receipt_hash"] {
+        assert!(body.get(k).and_then(|v| v.as_str()).is_some(), "{k}: {}", computed[0]);
+    }
+
+    let db2 = Db::new();
+    ok(&db2.run(&["migrate"]));
+    let out = ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+    assert!(out.contains(&format!("{n} computed")), "{out}");
+    assert_eq!(ok(&db2.run(&["export"])), export1);
+    ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+    assert_eq!(ok(&db2.run(&["export"])), export1);
+
+    // A computed line naming another asof than its receipt's is refused.
+    let bad = computed[0].replace(r#""asof":"2"#, r#""asof":"1"#);
+    assert_ne!(&bad, computed[0]);
+    let o = db2.run_stdin(&["import", "-"], Some(bad.as_bytes()));
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o.stdout));
+    assert!(text(&o.stderr).contains("asof"), "{}", text(&o.stderr));
+}
+
+/// An export written by 0.1.2 (no computed versions; tests/fixtures/export-0.1.2.jsonl,
+/// the specification vectors imported and exported by datumesh-store 0.1.2) imports, and
+/// exports the same lines again.
+#[test]
+fn import_of_a_0_1_2_export() {
+    let fixture =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/export-0.1.2.jsonl")).unwrap();
+    let db = Db::new();
+    ok(&db.run(&["migrate"]));
+    let out = ok(&db.run_stdin(&["import", "-"], Some(&fixture)));
+    assert!(out.contains("0 errors"), "{out}");
+    assert_eq!(ok(&db.run(&["export"])), text(&fixture));
+    // The receipts have their asof.
+    let missing: i64 = db.client().query_one("SELECT count(*) FROM receipts WHERE asof IS NULL", &[]).unwrap().get(0);
+    assert_eq!(missing, 0);
 }

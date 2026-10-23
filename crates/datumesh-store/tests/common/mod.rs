@@ -195,15 +195,22 @@ pub fn signing_key(v: &Value) -> SigningKey {
 /// A new version of the stored-number cell (EUR/USD fx_rate): same cell, the given value,
 /// recorded at `tx` and answered as of `tx`, signed with the vector's key.
 pub fn stored_number_at(value: &str, tx: &str) -> Vec<u8> {
+    stored_number_with(value, tx, tx)
+}
+
+/// A receipt of the stored-number cell (EUR/USD fx_rate) with the given value, recorded at
+/// `tx`, answered as of `asof` (`tx <= asof`: later is a late-signed receipt) and issued at
+/// `asof`, signed with the vector's key.
+pub fn stored_number_with(value: &str, tx: &str, asof: &str) -> Vec<u8> {
     let v = vector("receipt/stored-number");
     let base = Receipt::from_json(&input(&v)).unwrap();
     let r = ReceiptBuilder::new()
         .cell(base.cell().clone())
         .value(Scalar::from_lexical(Type::Number, value).unwrap())
         .valid(base.valid().clone())
-        .asof(tx)
+        .asof(asof)
         .tx(tx)
-        .issued(tx)
+        .issued(asof)
         .publisher(base.publisher())
         .signer_host(base.signer_host())
         .licence(base.licence())
@@ -211,6 +218,34 @@ pub fn stored_number_at(value: &str, tx: &str) -> Vec<u8> {
         .sign(&signing_key(&v))
         .unwrap();
     receipt_json(&r)
+}
+
+/// A receipt of the computed-with-lineage cell (convert 100 EUR to USD) whose inputs are
+/// `inputs`, recorded at `tx`, as of `asof`, issued at `asof`, signed with the vector's key
+/// (calc.example.net).
+pub fn lineage_with(inputs: &[&str], value: &str, tx: &str, asof: &str) -> Vec<u8> {
+    let v = vector("receipt/computed-with-lineage");
+    let base = Receipt::from_json(&input(&v)).unwrap();
+    let r = ReceiptBuilder::new()
+        .cell(base.cell().clone())
+        .value(Scalar::from_lexical(Type::Number, value).unwrap())
+        .valid(base.valid().clone())
+        .asof(asof)
+        .tx(tx)
+        .issued(asof)
+        .publisher(base.publisher())
+        .signer_host(base.signer_host())
+        .inputs(inputs.iter().map(|s| s.to_string()))
+        .licence(base.licence())
+        .summary("100 EUR in USD.")
+        .sign(&signing_key(&v))
+        .unwrap();
+    receipt_json(&r)
+}
+
+/// The number of rows of a table.
+pub fn count(db: &TestDb, table: &str) -> i64 {
+    db.client().query_one(&format!("SELECT count(*) FROM {table}"), &[]).unwrap().get(0)
 }
 
 /// The descriptor of the stored-number vector (fx_rate, stored), canonical.
