@@ -46,7 +46,7 @@ fn check(name: &str, source: &str) -> (bool, String) {
     std::fs::write(dir.join("src/lib.rs"), source).unwrap();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let out = Command::new(cargo)
-        .args(["check", "--offline", "--quiet", "--message-format=short"])
+        .args(["check", "--offline", "--quiet", "--message-format=short", "--color=never"])
         .current_dir(&dir)
         .env("CARGO_TARGET_DIR", PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sealed-target"))
         .env_remove("RUSTFLAGS")
