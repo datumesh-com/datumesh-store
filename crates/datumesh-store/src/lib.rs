@@ -116,6 +116,44 @@ pub struct Namespace {
 /// The [`Resolver`] methods keep the core's `Option` signatures: there a malformed argument
 /// or a database failure is `None` (logged with `tracing` when it is a failure), which
 /// `verify` reports as unavailable.
+///
+/// Only this crate implements `Store` (it is sealed): even a complete implementation that
+/// delegates every method to a [`PgStore`] is refused (`E0277`: the private supertrait is
+/// not implemented; `tests/sealed.rs` checks that this is the only error):
+///
+/// ```compile_fail
+/// use std::borrow::Cow;
+/// use datumesh_core::{Cell, Scalar};
+/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, Store, Version};
+///
+/// struct Wrapper(PgStore);
+/// impl Resolver for Wrapper {
+///     fn descriptor(&self, h: &str) -> Option<Cow<'_, [u8]>> { self.0.descriptor(h) }
+///     fn receipt(&self, h: &str) -> Option<Cow<'_, [u8]>> { self.0.receipt(h) }
+///     fn evaluate(&self, c: &Cell, a: &str) -> Option<Scalar> { self.0.evaluate(c, a) }
+/// }
+/// impl Store for Wrapper {
+///     fn put_descriptor(&self, b: &[u8]) -> Result<String> { self.0.put_descriptor(b) }
+///     fn put_receipt(&self, b: &[u8]) -> Result<String> { self.0.put_receipt(b) }
+///     fn put_blob(&self, b: &[u8]) -> Result<String> { self.0.put_blob(b) }
+///     fn blob(&self, s: &str) -> Result<Option<Cow<'_, [u8]>>> { self.0.blob(s) }
+///     fn put_version(&self, c: &str, t: &str, r: &str) -> Result<()> { self.0.put_version(c, t, r) }
+///     fn version_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.version_asof(c, a) }
+///     fn versions(&self, c: &str, f: &str, t: &str) -> Result<Vec<Version>> { self.0.versions(c, f, t) }
+///     fn latest(&self, c: &str) -> Result<Option<Version>> { self.0.latest(c) }
+///     fn dependents(&self, r: &str) -> Result<Vec<String>> { self.0.dependents(r) }
+///     fn inputs(&self, r: &str) -> Result<Vec<String>> { self.0.inputs(r) }
+///     fn put_namespace(&self, h: &str, k: &[u8], v: &str) -> Result<()> { self.0.put_namespace(h, k, v) }
+///     fn namespace(&self, h: &str) -> Result<Option<Namespace>> { self.0.namespace(h) }
+///     fn bind_name(&self, n: &str, f: &str, t: &str) -> Result<()> { self.0.bind_name(n, f, t) }
+///     fn resolve_name(&self, n: &str, a: &str) -> Result<Option<String>> { self.0.resolve_name(n, a) }
+///     fn resolve_binding(&self, n: &str, a: &str) -> Result<Option<Binding>> { self.0.resolve_binding(n, a) }
+///     fn put_computed(&self, c: &str, t: &str, r: &str) -> Result<()> { self.0.put_computed(c, t, r) }
+///     fn computed_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.computed_asof(c, a) }
+///     fn stored_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.stored_asof(c, a) }
+///     fn cell_dependents(&self, c: &str) -> Result<Vec<String>> { self.0.cell_dependents(c) }
+/// }
+/// ```
 pub trait Store: Resolver {
     /// Stores a descriptor (checked and canonicalised by the core); returns its function
     /// hash. Idempotent.

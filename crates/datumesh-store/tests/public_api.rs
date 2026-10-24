@@ -83,6 +83,16 @@ fn the_api_has_pg_unstable_and_the_replacements() {
     for f in ["cell_id", "receipt_hash", "tx"] {
         assert!(has(&format!("pub datumesh_store::Version::{f}: alloc::string::String")));
     }
+    // 0.3.0: the binding answering as of A, with when it began.
+    for item in [
+        "#[non_exhaustive] pub struct datumesh_store::Binding",
+        "pub datumesh_store::Binding::fn_hash: alloc::string::String",
+        "pub datumesh_store::Binding::tx: alloc::string::String",
+        "pub fn datumesh_store::Store::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>",
+        "pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
 
     // Moved, not kept at the root.
     assert!(!api.contains("datumesh_store::PgStore::with_connector"));

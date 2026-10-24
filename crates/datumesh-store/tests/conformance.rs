@@ -1,4 +1,7 @@
-//! Conformance: the core's resolver test kit passes for `PgStore` (time-aware); every
+//! Conformance: the core's resolver test kit passes for `PgStore` (time-aware, with the
+//! kit's default answer rule `AnswerRule::TxAndAsof`: since 0.3.0 `evaluate` answers as
+//! `stored_asof` does, so a version answers as of A only when its tx and its receipt's asof
+//! are both at or before A); every
 //! receipt vector is stored exactly when it verifies (steps 1-6) against its key documents,
 //! refused with verify's code otherwise, and round-trips through the store.
 //!
@@ -12,7 +15,7 @@
 mod common;
 
 use common::*;
-use datumesh_core::testkit::{Fixtures, Kit};
+use datumesh_core::testkit::{AnswerRule, Fixtures, Kit};
 use datumesh_core::{ErrorCode, Receipt, Resolver};
 use datumesh_store::{PgStore, Store};
 
@@ -36,10 +39,24 @@ fn load(db: &TestDb, fx: &Fixtures) -> PgStore {
 
 #[test]
 fn testkit_passes_time_aware() {
+    // The kit's default answer rule, TxAndAsof (datumesh-core 0.3.3).
     let db = TestDb::migrated();
     if let Err(report) = Kit::new().time_aware(true).run(|fx| load(&db, fx)) {
         panic!("{report}");
     }
+}
+
+#[test]
+fn testkit_passes_with_tx_and_asof_and_fails_with_tx_only() {
+    // Named explicitly: the store answers with both times. Under the old tx-only rule the
+    // kit expects the EUR/CHF cell's first version from its tx on, before its receipt's
+    // asof, which the store does not answer: that rule fails.
+    let db = TestDb::migrated();
+    if let Err(report) = Kit::new().time_aware(true).answer_rule(AnswerRule::TxAndAsof).run(|fx| load(&db, fx)) {
+        panic!("{report}");
+    }
+    let db = TestDb::migrated();
+    assert!(Kit::new().time_aware(true).answer_rule(AnswerRule::TxOnly).run(|fx| load(&db, fx)).is_err());
 }
 
 #[test]

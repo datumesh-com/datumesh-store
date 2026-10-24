@@ -10,7 +10,7 @@ repository = "https://github.com/datumesh-com/datumesh-store"
 homepage = "https://datumesh.com"
 
 [workspace.dependencies]
-datumesh-core = "0.3.2"
+datumesh-core = "0.3.3"
 postgres = "0.19.14"
 tracing = "0.1.44"
 # TLS for PostgreSQL connections: rustls with the ring provider (selected explicitly per

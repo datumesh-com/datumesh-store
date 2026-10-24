@@ -1,6 +1,8 @@
 //! As-of reads: v1 at tx1, v2 at tx2. Before tx1 nothing; from tx1 (inclusive) v1; from
 //! tx2 (inclusive) v2. `versions` lists the history in tx order between two instants, both
-//! inclusive; `latest` is v2. `evaluate` of the stored function follows the same rule.
+//! inclusive; `latest` is v2. `evaluate` of the stored function follows the same rule when
+//! asof = tx; with a late-signed receipt it answers with both times (`stored_asof`), while
+//! `version_asof` keeps looking at tx only.
 
 mod common;
 
@@ -89,4 +91,54 @@ fn evaluate_is_none_for_functions_that_are_not_stored() {
     let r = Receipt::from_json(&b).unwrap();
     s2.put_version(&r.cell().id(), r.tx(), &h).unwrap();
     assert_eq!(s2.evaluate(r.cell(), r.asof()), None);
+}
+
+/// `evaluate` answers as `stored_asof` does (the kit's `AnswerRule::TxAndAsof`): a version
+/// answers as of A only when its tx and its receipt's asof are both at or before A. The
+/// vectors' stored-number receipt (tx 2024-03-15T16:00, asof 2024-03-16T09:00) gives no value
+/// from its tx until its asof; a late-signed second version (tx 2024-03-18T10:00, asof
+/// 2024-03-19T12:00) leaves the first answering until its asof. `version_asof` is unchanged.
+#[test]
+fn evaluate_answers_with_both_times() {
+    let db = TestDb::migrated();
+    let s = db.store();
+    s.put_descriptor(&fx_rate_descriptor()).unwrap();
+    let v = vector("receipt/stored-number");
+    let b1 = input(&v);
+    let r1 = Receipt::from_json(&b1).unwrap();
+    let (tx1, asof1) = ("2024-03-15T16:00:00.000000Z", "2024-03-16T09:00:00.000000Z");
+    assert_eq!((r1.tx(), r1.asof()), (tx1, asof1));
+    let (tx2, asof2) = ("2024-03-18T10:00:00.000000Z", "2024-03-19T12:00:00.000000Z");
+    let b2 = stored_number_with("1.0893", tx2, asof2);
+    let h1 = s.put_receipt(&b1).unwrap();
+    let h2 = s.put_receipt(&b2).unwrap();
+    let cell = r1.cell().clone();
+    let id = cell.id();
+    s.put_version(&id, tx1, &h1).unwrap();
+    s.put_version(&id, tx2, &h2).unwrap();
+
+    let v1 = Some(r1.value().clone());
+    let v2 = Some(Scalar::from_lexical(Type::Number, "1.0893").unwrap());
+    let cases = [
+        ("2024-03-15T15:59:59.999999Z", None, None),
+        // From v1's tx until (not including) its asof: no value; version_asof says v1.
+        (tx1, None, Some(&h1)),
+        ("2024-03-16T00:00:00.000000Z", None, Some(&h1)),
+        ("2024-03-16T08:59:59.999999Z", None, Some(&h1)),
+        (asof1, v1.clone(), Some(&h1)),
+        ("2024-03-17T00:00:00.000000Z", v1.clone(), Some(&h1)),
+        // v2 recorded but not yet known: v1 still answers; version_asof says v2.
+        (tx2, v1.clone(), Some(&h2)),
+        ("2024-03-19T11:59:59.999999Z", v1.clone(), Some(&h2)),
+        (asof2, v2.clone(), Some(&h2)),
+        ("9999-12-31T23:59:59.999999Z", v2.clone(), Some(&h2)),
+    ];
+    for (a, value, by_tx) in cases {
+        assert_eq!(s.evaluate(&cell, a), value, "evaluate as of {a}");
+        assert_eq!(s.version_asof(&id, a).unwrap().map(|v| v.receipt_hash).as_ref(), by_tx, "version_asof as of {a}");
+        // evaluate is the value of stored_asof's receipt.
+        let by_both = s.stored_asof(&id, a).unwrap().map(|v| v.receipt_hash);
+        let want = by_both.map(|h| if h == h1 { v1.clone().unwrap() } else { v2.clone().unwrap() });
+        assert_eq!(s.evaluate(&cell, a), want, "stored_asof as of {a}");
+    }
 }
