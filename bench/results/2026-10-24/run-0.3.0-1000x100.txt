@@ -1,0 +1,32 @@
+applied migration 1 (0001_initial.sql)
+applied migration 2 (0002_computed_versions.sql)
+load: 100000 versions (1000 cells x 100) in 95.0 s (1053 versions/s: sign + put_receipt (verifying) + put_version + put_computed, 6 threads, synchronous_commit=off)
+load: 1000 dependents of e10cdad90b2ef317299a0d8f1d08ce47319a011feb8f5a243adbaedf90d0bba3 in 4.2 s
+op                          samples     p50 µs     p99 µs    mean µs
+version_asof                  10000        247        515        267  10000 found
+receipt                       10000        183        405        197  
+put_version                   10000       1949       3493       2025  one transaction each, synchronous_commit as configured
+dependents                    10000       1557       2436       1622  1000 dependents each
+computed_asof                 10000        199        390        209  10000 found
+computed_asof+receipt         10000        378        745        396  10000 found
+computed_asof_with_receipt    10000        229        430        238  10000 found
+stored_asof                   10000        219        458        230  10000 found
+stored_asof+receipt           10000        387        713        403  10000 found
+stored_asof_with_receipt      10000        197        423        211  10000 found
+put_computed                  10000       1566       2760       1635  one transaction each, any order, synchronous_commit as configured
+cell_dependents               10000       6680      11506       7011  1000 dependent cells each
+resolve_binding               10000        188        464        202  9913 found; 100 names x 100 bindings
+resolve_name                  10000        169        362        179  9904 found; 100 names x 100 bindings
+disk: table                          table MB   indexes MB     total MB
+disk: receipts                          135.4         37.2        172.6
+disk: computed_versions                  26.4         51.0         77.4
+disk: versions                           21.6         32.8         54.4
+disk: name_bindings                       1.6          1.2          2.9
+disk: edges                               0.2          0.5          0.7
+disk: namespaces                          0.0          0.0          0.0
+disk: descriptors                         0.0          0.0          0.0
+disk: datumesh_schema_migrations          0.0          0.0          0.0
+disk: blobs                               0.0          0.0          0.0
+disk: (all tables)                      185.2        122.9        308.0
+disk: database 315.8 MB
+blob                  bytes       put ms       get ms     put MB/s     get MB/s

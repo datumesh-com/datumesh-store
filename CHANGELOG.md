@@ -2,6 +2,41 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.3.0 (unreleased)
+
+For the engine: when a name binding began. `Store` is sealed, and the `Resolver`'s
+`evaluate` answers with both times. Breaking (`API-CHANGES-0.3.0.md`): a new required
+`Store` method, and the seal, for code outside this crate that implemented `Store`; the
+behaviour of `evaluate` for late-signed receipts.
+
+### Added
+
+- `Store::resolve_binding(fn_name, asof) -> Result<Option<Binding>>`: the name binding that
+  answers as of A, the one with the latest `tx <= A`, with its function hash and its `tx`
+  (when it began). A name bound again to a hash it meant before, even the hash of the
+  binding before it, begins again at the later `tx`. Malformed arguments are the core's
+  codes, without a query. `resolve_name` is unchanged (it is the binding's `fn_hash`).
+- `Binding { fn_hash, tx }` (`#[non_exhaustive]`).
+- The command: `bench` times `resolve_binding` and `resolve_name` (100 names with 100
+  bindings each).
+
+### Changed
+
+- **`Store` is sealed** (a private supertrait): only this crate implements it. The store is
+  the trust boundary (it verifies every receipt against its host's key document before it
+  keeps it, and callers rely on what it answers as checked). Code that implemented `Store`
+  (a wrapper, an in-memory store for tests) no longer compiles. `Store` is still object-safe
+  (`Arc<dyn Store + Send + Sync>`).
+- **`Resolver::evaluate` of `PgStore` answers with both times**: the value of a stored
+  function as of A is that of `stored_asof`'s version (the latest by tx with `tx <= A` and
+  its receipt's `asof <= A`), not `version_asof`'s (tx only). A late-signed receipt (asof
+  later than tx) gives a value only from its asof on; until then the version before it, or
+  none. Nothing changes when publishers set `asof = tx` (spec-0.3.0's SHOULD). This is
+  `datumesh-core` 0.3.3's testkit `AnswerRule::TxAndAsof`, its default, which the
+  conformance test runs. `version_asof` keeps its tx-only meaning.
+- Requires `datumesh-core` 0.3.3 (was 0.3.2). The `spec` submodule stays at `spec-0.3.0`.
+- `datumesh-store-cli` 0.3.0 depends on `datumesh-store = "=0.3.0"`.
+
 ## 0.2.0 (2026-10-24)
 
 Additions for the engine: computed versions, answering as of A with both times, cells that

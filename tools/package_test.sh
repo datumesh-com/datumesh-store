@@ -1,7 +1,7 @@
 #!/bin/sh
 # Packaging test: `cargo package --workspace`, unpack both .crate files in a fresh
 # directory, build a new project that depends on the packaged datumesh-store (and
-# datumesh-core 0.3.1 from crates.io) and run the README example against PostgreSQL 16 in a
+# datumesh-core 0.3.3 from crates.io) and run the README example against PostgreSQL 16 in a
 # database of its own (an empty one: the example makes the schema through the store, and
 # names no `postgres` type); build the packaged command (with the packaged library patched
 # in) and run `migrate --check` there. The packaged library must carry no test material.
@@ -46,7 +46,7 @@ if tar tzf "$work/datumesh-store-$version.crate" | grep -E '\.(pem|crt|key)$|/te
   echo "test material in the packaged library" >&2
   exit 1
 fi
-printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ndatumesh-store = { path = "../datumesh-store-%s" }\ndatumesh-core = "0.3.1"\n' "$version" > "$work/app/Cargo.toml"
+printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\ndatumesh-store = { path = "../datumesh-store-%s" }\ndatumesh-core = "0.3.3"\n' "$version" > "$work/app/Cargo.toml"
 printf '[patch.crates-io]\ndatumesh-store = { path = "../datumesh-store-%s" }\n' "$version" > "$work/datumesh-store-cli-$version/.cargo/config.toml"
 
 psql_admin "CREATE DATABASE $db"

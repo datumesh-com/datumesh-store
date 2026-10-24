@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "datumesh-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "datumesh-core",
  "postgres",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "datumesh-store-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "datumesh-core",
  "datumesh-store",

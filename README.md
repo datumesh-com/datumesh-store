@@ -1,6 +1,6 @@
 # datumesh-store
 
-A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function descriptors, signed receipts, blobs, versions of cells over transaction time (stored and computed), lineage, namespaces' key documents and function names. `PgStore` implements the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. It passes `datumesh-core`'s resolver test kit as a time-aware resolver.
+A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function descriptors, signed receipts, blobs, versions of cells over transaction time (stored and computed), lineage, namespaces' key documents and function names. `PgStore` implements the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. It passes `datumesh-core`'s resolver test kit as a time-aware resolver under the kit's default answer rule (`AnswerRule::TxAndAsof`: a version answers as of A when its `tx` and its receipt's `asof` are both at or before A). `Store` is sealed: only this crate implements it (see [The store](#the-store)).
 
 - `datumesh-store`: the library.
 - `datumesh-store-cli`: the `datumesh-store` command: `migrate [--check]`, `import`, `export`, `bench`.
@@ -9,8 +9,8 @@ A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function d
 
 ```toml
 [dependencies]
-datumesh-store = "0.2.0"
-datumesh-core = "0.3.2"
+datumesh-store = "0.3.0"
+datumesh-core = "0.3.3"
 ```
 
 Store the key documents of `spec/vectors/receipt/stored-number.json`, its receipt (verified against them on the way in), its function's descriptor and the version it states, then verify the receipt through the store (it recomputes the stored value as of the receipt's `asof`):
@@ -77,9 +77,12 @@ The API is synchronous. From async code, call it on a blocking thread (`tokio::t
 | `cell_dependents(cell_id)` | The cells that read a cell: those of stored receipts listing any stored receipt of the cell among their inputs. Ascending, unique. |
 | `put_namespace(host, keydoc, validated_at)` / `namespace(host)` | A host's key document, checked as a 200 response for that host (`keys_from_response`), with its validation time; re-validation only moves forward. Store it before the host's receipts. A later document (a key revoked or dropped) does not touch receipts already stored: they verified when they were stored, and putting one again stays idempotent; it applies to every new receipt from then on. |
 | `bind_name(fn_name, fn_hash, tx)` / `resolve_name(fn_name, asof)` | Which function a fully qualified name meant from `tx` on. Append-only, in tx order; the descriptor must be stored. |
-| `descriptor`, `receipt`, `evaluate` (`Resolver`) | Stored bytes (`Cow::Owned`); `evaluate` gives a value only for a `stored` function: that of `version_asof(cell, asof)`. |
+| `resolve_binding(fn_name, asof)` | The binding answering as of A, a `Binding { fn_hash, tx }`: the function hash and when the binding began (its `tx`). A name bound again to a hash it meant before begins again at the later `tx`. `resolve_name` is its `fn_hash`. |
+| `descriptor`, `receipt`, `evaluate` (`Resolver`) | Stored bytes (`Cow::Owned`); `evaluate` gives a value only for a `stored` function: that of `stored_asof(cell, asof)` (tx and receipt asof both `<= asof`; until 0.2.0 it was `version_asof`'s, tx only). |
 
 Every `Store` method returns a `Result`. Malformed input is refused with the core's error code (`Error::Invalid`), without a query: hashes and cell ids are 64 lowercase hex digits, instants `YYYY-MM-DDTHH:MM:SS.ffffffZ`, hosts DNS names, function names fully qualified. A database failure is `Error::Database` (or `Error::PoolTimeout`), holding a `DatabaseError`: `message()` (the server's message, or the driver's text), `code()` (the SQLSTATE, e.g. `42P01`), and the driver's error as its `source()`; reads answer `Ok(None)` / `Ok(vec![])` only when nothing is stored. The `Resolver` methods (`descriptor`, `receipt`, `evaluate`) keep the core's `Option` signatures: a malformed argument or a database failure is `None` there (a failure is logged with `tracing`, target `datumesh_store`), which `verify` reports as unavailable.
+
+`Store` is sealed (a private supertrait): only this crate implements it. The store is the trust boundary: every receipt in it verified against its host's key document when it was stored, and callers rely on what it answers as checked; an implementation elsewhere could answer anything. It is still a trait object (`Arc<dyn Store + Send + Sync>`).
 
 `PgStore::connect(url)` and `PgStore::connect_with(url, PoolOptions)` connect (TLS: see below). Connecting opens one connection and does nothing else on it (no statement is prepared, the schema is not looked at), so a store on an empty database is how the schema is made: `migrate::apply(&store)`. The pool is the crate's own: a mutex and a condition variable, no global state, no background threads, a bounded number of connections, a checkout timeout, connections the server closed are replaced, and each statement is prepared once per connection. Every `put_*` is one transaction.
 
@@ -99,7 +102,7 @@ So a server with `ssl=on` and a self-signed certificate (or one from a private C
 
 ### `pg_unstable`
 
-No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.2.0"`) if you use it.
+No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.3.0"`) if you use it.
 
 ## Schema
 
@@ -145,7 +148,7 @@ Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmod
 
 Disk: `receipts` 1,129 MB + 324 MB indexes, `versions` 197 MB + 314 MB indexes; 1,965 MB for all tables (about 2.0 KB per version, of which the canonical receipt is about 1.1 KB). Cold restart: `docker stop` 0.4 s (about 4 s right after the load, a shutdown checkpoint); after dropping the page cache, `docker start` to the first answered `version_asof` 1.2-1.6 s, of which about 0.5 s is starting the tool's own container; the probe itself answered 112-168 ms after it started.
 
-Version 0.2.0's additions, at 1,000 cells × 100 versions on the development server with default settings (warm cache; `bench/results/2026-10-24`), p50 / p99: `computed_asof` 221 / 505 µs, `stored_asof` 226 / 476 µs (`version_asof` in the same run 238 / 534 µs), `computed_asof_with_receipt` 222 / 513 µs and `stored_asof_with_receipt` 219 / 516 µs (against 397 / 744 and 387 / 727 µs for the read followed by `receipt`), `put_computed` 1.72 / 2.69 ms, `cell_dependents` with 1,000 dependent cells 6.38 / 11.29 ms.
+Version 0.2.0's additions, at 1,000 cells × 100 versions on the development server with default settings (warm cache; `bench/results/2026-10-24`), p50 / p99: `computed_asof` 221 / 505 µs, `stored_asof` 226 / 476 µs (`version_asof` in the same run 238 / 534 µs), `computed_asof_with_receipt` 222 / 513 µs and `stored_asof_with_receipt` 219 / 516 µs (against 397 / 744 and 387 / 727 µs for the read followed by `receipt`), `put_computed` 1.72 / 2.69 ms, `cell_dependents` with 1,000 dependent cells 6.38 / 11.29 ms. Version 0.3.0's `resolve_binding` in the same setting: 188 / 464 µs (`resolve_name` 169 / 362 µs), 100 names × 100 bindings.
 
 Blobs (`put_blob` / `blob`, median, two runs): 1 MiB 34 / 5-6 ms, 4 MiB 127-135 / 19 ms, 16 MiB 330-473 / 63-82 ms, 64 MiB 1,683-1,875 / 298-310 ms; writes level off near 30-50 MB/s from 1 MiB on and every value is read and written whole, in memory on both sides. Keep blobs up to 1 MiB in the table; above that, object storage (content-addressed by the same SHA-256) is the better home.
 
