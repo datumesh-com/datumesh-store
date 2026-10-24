@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.3.0 (unreleased)
+## 0.3.0 (2026-10-24)
 
 For the engine: when a name binding began. `Store` is sealed, and the `Resolver`'s
 `evaluate` answers with both times. Breaking (`API-CHANGES-0.3.0.md`): a new required
