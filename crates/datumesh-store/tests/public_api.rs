@@ -94,6 +94,9 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         assert!(has(item), "missing: {item}");
     }
 
+    // Sealed: the private supertrait (named only in the listing; no crate can implement it).
+    assert!(has("pub trait datumesh_store::Store: datumesh_core::verify::Resolver + datumesh_store::sealed::Sealed"));
+
     // Moved, not kept at the root.
     assert!(!api.contains("datumesh_store::PgStore::with_connector"));
     assert!(api.lines().any(|l| l.starts_with("pub fn datumesh_store::pg_unstable::with_connector<F>(")));

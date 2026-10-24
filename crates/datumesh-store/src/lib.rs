@@ -33,8 +33,8 @@
 //!   added in any order, keyed on (cell, tx, asof), insert-only
 //!   ([`Store::put_computed`], [`Store::computed_asof`]).
 //! * Answering as of A: a receipt answers as of A only when its `tx` and its `asof` are
-//!   both at or before A ([`Store::stored_asof`]; [`Store::version_asof`] looks at `tx`
-//!   only).
+//!   both at or before A ([`Store::stored_asof`], and the [`Resolver`]'s `evaluate` of a
+//!   stored function; [`Store::version_asof`] looks at `tx` only).
 //! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not;
 //!   [`Store::cell_dependents`] lifts it to cells.
 //! * Namespaces: a host's key document (checked as SPEC 9.2 requires), with when it was
@@ -42,7 +42,8 @@
 //!   dropped) does not touch receipts already stored: they verified when they were stored,
 //!   and putting one of them again is still idempotent.
 //! * Names: which function hash a fully qualified function name meant from a transaction
-//!   time on. Append-only, like versions.
+//!   time on. Append-only, like versions. [`Store::resolve_binding`] gives the binding
+//!   answering as of A with when it began; [`Store::resolve_name`] its hash.
 //!
 //! Instants are compared as text (fixed width, `COLLATE "C"`), which is exact; each is also
 //! stored as `timestamptz`, which round-trips every instant of the specification exactly.
@@ -51,6 +52,11 @@
 //! the core's code, a database failure [`Error::Database`]. The [`Resolver`] methods keep the
 //! core's `Option` signatures; there a failure is logged with `tracing` (target
 //! `datumesh_store`) and answered `None`, which `verify` reports as unavailable.
+//!
+//! [`Store`] is sealed: only this crate implements it. The store is the trust boundary:
+//! everything in it was checked on the way in (every receipt verified against its host's
+//! key document), and its callers rely on that rather than checking again. A `dyn Store`
+//! is still a trait object as before.
 //!
 //! The schema comes from [`migrate::apply`] (the `datumesh-store migrate` command), through
 //! a store on the (possibly empty) database.
@@ -91,6 +97,18 @@ pub struct Version {
     pub asof: String,
 }
 
+/// A name binding: from transaction time `tx` on, a fully qualified function name means the
+/// function `fn_hash` ([`Store::bind_name`]). Since 0.3.0.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Binding {
+    /// The function hash the name means.
+    pub fn_hash: String,
+    /// When the binding began: the transaction time from which the name means `fn_hash`
+    /// (an instant, SPEC 3.3).
+    pub tx: String,
+}
+
 /// A namespace's host and its key document.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -117,7 +135,10 @@ pub struct Namespace {
 /// or a database failure is `None` (logged with `tracing` when it is a failure), which
 /// `verify` reports as unavailable.
 ///
-/// Only this crate implements `Store` (it is sealed): even a complete implementation that
+/// Only this crate implements `Store` (it is sealed, since 0.3.0): the store is the trust
+/// boundary, where every receipt is verified against its host's key document before it is
+/// kept, and what a store answers is relied on as checked. An implementation elsewhere
+/// could answer anything. `Store` stays object-safe (`Arc<dyn Store + Send + Sync>`). Even a complete implementation that
 /// delegates every method to a [`PgStore`] is refused (`E0277`: the private supertrait is
 /// not implemented; `tests/sealed.rs` checks that this is the only error):
 ///
@@ -154,7 +175,7 @@ pub struct Namespace {
 ///     fn cell_dependents(&self, c: &str) -> Result<Vec<String>> { self.0.cell_dependents(c) }
 /// }
 /// ```
-pub trait Store: Resolver {
+pub trait Store: Resolver + sealed::Sealed {
     /// Stores a descriptor (checked and canonicalised by the core); returns its function
     /// hash. Idempotent.
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String>;
@@ -197,8 +218,14 @@ pub trait Store: Resolver {
     /// `fn_hash`, whose descriptor must be stored. `tx` must be later than the name's latest
     /// binding ([`Error::NotLater`]).
     fn bind_name(&self, fn_name: &str, fn_hash: &str, tx: &str) -> Result<()>;
-    /// The function hash `fn_name` meant as of `asof`.
+    /// The function hash `fn_name` meant as of `asof`: the hash of
+    /// [`resolve_binding`](Store::resolve_binding)'s binding.
     fn resolve_name(&self, fn_name: &str, asof: &str) -> Result<Option<String>>;
+    /// The binding of `fn_name` that answers as of `asof`: the one with the latest `tx <=
+    /// asof`, with its function hash and its `tx`, when it began; `None` before the first.
+    /// A name bound again to a hash it meant before (even the hash of the binding before
+    /// it) begins again: the later binding's `tx`. Since 0.3.0.
+    fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>>;
 
     /// Records that `receipt_hash` (stored, a receipt of `cell_id` at `tx`) is a computed
     /// version of the cell. Insert-only, in any order (an older version may be added after a
@@ -241,6 +268,13 @@ pub trait Store: Resolver {
             None => Ok(None),
         }
     }
+}
+
+/// The seal of [`Store`]: a public trait in a private module, so no other crate can name it,
+/// and so none can implement `Store`.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::PgStore {}
 }
 
 /// A version and its receipt's bytes, for the default `*_with_receipt` methods.

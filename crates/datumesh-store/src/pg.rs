@@ -6,7 +6,7 @@ use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::sql::Q;
-use crate::{Namespace, Store, Version};
+use crate::{Binding, Namespace, Store, Version};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, Descriptor, ErrorCode, Keys, Receipt, Resolver, Scalar,
@@ -175,8 +175,12 @@ impl Resolver for PgStore {
     }
 
     /// `Some` only for a `stored` function (descriptor `code.lang` is `stored`, and the store
-    /// has the descriptor): the value of the receipt of the cell's latest version with
-    /// `tx <= asof`. `None` for every other function, and when no version is that old.
+    /// has the descriptor): the value of the receipt of the version that answers as of
+    /// `asof`, [`stored_asof`](Store::stored_asof)'s: the latest version (by tx) with `tx <=
+    /// asof` whose receipt's asof is also `<= asof` (the core's testkit
+    /// `AnswerRule::TxAndAsof`). `None` for every other function, and when no version
+    /// answers. (Until 0.2.0 it looked at `tx` only, as [`version_asof`](Store::version_asof)
+    /// still does; the same when every receipt's asof is its tx.)
     fn evaluate(&self, cell: &Cell, asof: &str) -> Option<Scalar> {
         if !is_instant(asof) {
             return None;
@@ -506,6 +510,16 @@ impl Store for PgStore {
         Ok(self
             .asof_with_receipt("stored_asof_with_receipt", Q::StoredAsofReceipt, cell_id, asof)?
             .map(|(v, b)| (v, Cow::Owned(b))))
+    }
+
+    fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {
+        check_function_name(fn_name, "fn_name")?;
+        check_instant(asof, "asof")?;
+        self.run("resolve_binding", |c| {
+            let st = c.stmt(Q::BindingAsof)?;
+            let Some(row) = c.client.query_opt(&st, &[&fn_name, &asof]).db()? else { return Ok(None) };
+            Ok(Some(Binding { fn_hash: row.try_get(0).db()?, tx: row.try_get(1).db()? }))
+        })
     }
 
     fn resolve_name(&self, fn_name: &str, asof: &str) -> Result<Option<String>> {

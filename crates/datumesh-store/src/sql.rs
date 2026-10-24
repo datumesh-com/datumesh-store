@@ -74,8 +74,9 @@ statements! {
         [TEXT, TEXT];
     VersionPut = "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
         [TEXT, TEXT, TEXT];
+    // The Resolver's evaluate of a stored function: the receipt of stored_asof's version.
     ValueAsof = "SELECT r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
-                 WHERE v.cell_id = $1 AND v.tx <= $2 ORDER BY v.tx DESC LIMIT 1"
+                 WHERE v.cell_id = $1 AND v.tx <= $2 AND r.asof <= $2 ORDER BY v.tx DESC LIMIT 1"
         [TEXT, TEXT];
 
     ComputedPut = "INSERT INTO computed_versions (cell_id, tx, tx_at, asof, asof_at, receipt_hash)
@@ -115,5 +116,7 @@ statements! {
     NamePut = "INSERT INTO name_bindings (fn_name, tx, tx_at, fn_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
         [TEXT, TEXT, TEXT];
     NameAsof = "SELECT fn_hash FROM name_bindings WHERE fn_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
+        [TEXT, TEXT];
+    BindingAsof = "SELECT fn_hash, tx FROM name_bindings WHERE fn_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
         [TEXT, TEXT];
 }

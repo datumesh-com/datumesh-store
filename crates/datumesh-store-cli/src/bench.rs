@@ -18,7 +18,9 @@
 //! `computed_asof` and `stored_asof` (random cell, random asof), each alone, followed by
 //! `receipt` of the answer, and as `*_with_receipt` (one query); `put_computed` (a receipt of
 //! a random cell at a random earlier tx, sometimes late-signed, stored beforehand, untimed);
-//! `cell_dependents` of the cell with the dependents.
+//! `cell_dependents` of the cell with the dependents; `resolve_binding` and `resolve_name`
+//! (random name, random asof) over `NAMES` names with `BINDINGS` bindings each, alternating
+//! between the two functions (bound once, untimed, when not bound yet).
 //! Then disk use per table and `put_blob` / `blob` for sizes from 1 KiB to `--blob-max`.
 //!
 //! `bench --wait` polls until a fresh connection answers a `version_asof`, for timing a
@@ -48,6 +50,9 @@ const CALC_SEED: &str = "81589e69e00a82e983f0274d169ffa6c2ea7bc26833833826e57ce6
 /// 2021-01-01T00:00:00Z in microseconds since the Unix epoch: the first version's tx.
 const T0: i64 = 1_609_459_200_000_000;
 const HOUR: i64 = 3_600_000_000;
+/// Names bound for timing `resolve_binding`, and bindings per name (one an hour from T0).
+const NAMES: usize = 100;
+const BINDINGS: usize = 100;
 
 pub(crate) struct Options {
     cells: usize,
@@ -241,6 +246,37 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
             }
         }
         row("cell_dependents", &mut t, &format!("{n} dependent cells each"));
+    }
+
+    // resolve_binding / resolve_name: a random name as of a random time within (and a
+    // little past) its bindings.
+    let names: Vec<String> = (0..NAMES).map(|i| format!("bench.example.org/name_{i}")).collect();
+    let end = T0 + BINDINGS as i64 * HOUR;
+    for name in &names {
+        if measure.resolve_binding(name, &instant(end))?.is_none() {
+            for k in 0..BINDINGS {
+                let h = if k % 2 == 0 { &fx_rate } else { &convert };
+                measure.bind_name(name, h, &instant(T0 + k as i64 * HOUR))?;
+            }
+        }
+    }
+    type Name<'a> = &'a dyn Fn(&str, &str) -> Result<bool, Fail>;
+    let lookups: [(&str, Name<'_>); 2] = [
+        ("resolve_binding", &|n, a| Ok(measure.resolve_binding(n, a)?.is_some())),
+        ("resolve_name", &|n, a| Ok(measure.resolve_name(n, a)?.is_some())),
+    ];
+    for (op, lookup) in lookups {
+        let mut t = Vec::with_capacity(o.samples);
+        let mut found = 0;
+        for _ in 0..o.samples {
+            let n = &names[rng.below(names.len())];
+            let asof = instant(T0 - HOUR + rng.below_i64(end - T0 + 2 * HOUR));
+            let s = Instant::now();
+            let r = lookup(n, &asof);
+            t.push(s.elapsed());
+            found += usize::from(r?);
+        }
+        row(op, &mut t, &format!("{found} found; {NAMES} names x {BINDINGS} bindings"));
     }
 
     disk(url)?;
