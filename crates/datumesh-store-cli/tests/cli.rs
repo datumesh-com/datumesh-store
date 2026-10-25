@@ -236,6 +236,8 @@ fn bench_runs_small() {
         "put_computed",
         "cell_dependents",
         "slice_members",
+        "slice_values",
+        "slice_changed_after",
         "versions_between",
         "put_manifest",
         "manifest",

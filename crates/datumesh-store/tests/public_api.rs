@@ -121,6 +121,24 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         assert!(has(item), "missing: {item}");
     }
 
+    // 0.3.2: member values without receipt bytes, and whether a slice changes after A.
+    for owner in ["Store", "PgStore"] {
+        for (m, ret) in [
+            ("slice_values", "datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>"),
+            ("slice_changed_after", "datumesh_store::Result<bool>"),
+        ] {
+            let item = format!("pub fn datumesh_store::{owner}::{m}(&self, &datumesh_core::slice::Slice, &str) -> {ret}");
+            assert!(has(&item), "missing: {item}");
+        }
+    }
+    for item in [
+        "#[non_exhaustive] pub struct datumesh_store::SliceValue",
+        "pub datumesh_store::SliceValue::version: datumesh_store::Version",
+        "pub datumesh_store::SliceValue::value: datumesh_core::model::Scalar",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+
     // Sealed: the private supertrait (named only in the listing; no crate can implement it).
     assert!(has("pub trait datumesh_store::Store: datumesh_core::verify::Resolver + datumesh_store::sealed::Sealed"));
 

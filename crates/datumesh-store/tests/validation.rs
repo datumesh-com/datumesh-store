@@ -196,6 +196,8 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
         )
         .unwrap();
         db_err(s.slice_members(&sl, r.asof()).unwrap_err());
+        db_err(s.slice_values(&sl, r.asof()).unwrap_err());
+        db_err(s.slice_changed_after(&sl, r.asof()).unwrap_err());
         db_err(s.versions_between(&cell, r.tx(), r.tx(), r.asof()).unwrap_err());
         db_err(s.member_manifests(&h).unwrap_err());
         db_err(s.slice_entries(&h).unwrap_err());
