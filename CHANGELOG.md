@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.3.2 (unreleased)
+## 0.3.2 (2026-10-26)
 
 For the engine 0.3.1: the members of a slice as values, and a cheap check that a slice does
 not change after A. Additions only (`API-CHANGES-0.3.2.md`).
