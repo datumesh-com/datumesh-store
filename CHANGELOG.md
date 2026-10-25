@@ -2,6 +2,56 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.3.1 (unreleased)
+
+For the formula dialect (spec-0.4.0, slice-as-lineage): the members of a slice as of A,
+version ranges, manifests, and receipts whose inputs cite slices. Additions only
+(`API-CHANGES-0.3.1.md`); `Store` is sealed, so its new required methods break no
+implementor.
+
+### Added
+
+- `Store::slice_members(slice, asof) -> Result<Vec<SliceMember>>`: the members of a
+  `datumesh_core::Slice` as of A (SPEC 15.13): the cells of its function whose bound
+  arguments are equal, ranged ones within the range in the type's order (numbers as exact
+  decimals, dates and instants chronologically, strings by code point) and open ones any
+  value, with the stored version answering as of A (`tx <= A` and the receipt's
+  `asof <= A`, as `stored_asof`) and its receipt's bytes; in key order (open and ranged
+  arguments by ascending name, each in its type's order). A version slice is
+  `versions_between` of its cell. Found with a range scan of a new typed-argument index.
+- `Store::versions_between(cell_id, from, to, asof)`: the stored versions with
+  `from <= tx <= to` answering as of A, ascending, with their receipts (a version slice).
+- `SliceMember { version, receipt }` (`#[non_exhaustive]`).
+- `Store::put_manifest(bytes)`: a manifest, checked by the core (`Manifest::from_json`),
+  stored canonical under its entry (returned); idempotent, insert-only; members need not
+  be stored. `Resolver::manifest(entry)` of `PgStore` serves it (core 0.3.4's provided
+  method, overridden). `Store::member_manifests(receipt_hash)`: the manifests listing a
+  receipt.
+- `Store::slice_entries(receipt_hash)`, `Store::slice_dependents(entry)`: the slice-entry
+  lineage, both ways.
+- Migration 3 (`0003_slices.sql`): `cells` and `cell_args` (the typed-argument index,
+  filled from the canonical receipt bytes by a trigger on `receipts` and backfilled for
+  every stored receipt), `manifests`, `manifest_members`, `slice_edges`; all insert-only.
+- The command: `export`/`import` carry manifests (`{"manifest": "<JSON text>"}` lines);
+  `import` takes the manifests of vectors; `bench` times the new methods
+  (`--slice-cells N`, default 100,000).
+
+### Changed
+
+- `put_receipt` accepts receipts whose `inputs` hold slice entries (core 0.3.4 verifies them
+  at level signed) and records each entry; its manifest is not required, before or after
+  (SPEC 10.1 needs it only to recompute). `inputs` and `dependents` keep listing receipt
+  hashes only. `cell_dependents` also finds the cells reading a cell through a slice whose
+  stored manifest lists one of its receipts. (No receipt stored by 0.3.0 has a slice entry,
+  so nothing changes for existing data.)
+- `put_descriptor` (and `evaluate`, reading a stored descriptor) checks descriptors as
+  spec-0.4.0's `FunctionDescriptor`: `signature.order` and argument `extent` are accepted
+  (0.3.0 refused them with `E_SCHEMA`, as a spec-0.3.0 verifier must); formula
+  descriptors always carry `order`. A descriptor without them is checked as before.
+- Requires `datumesh-core` 0.3.4 (was 0.3.3). The `spec` submodule moves to `spec-0.4.0`
+  (f3d3e2c).
+- `datumesh-store-cli` 0.3.1 depends on `datumesh-store = "=0.3.1"`.
+
 ## 0.3.0 (2026-10-24)
 
 For the engine: when a name binding began. `Store` is sealed, and the `Resolver`'s
