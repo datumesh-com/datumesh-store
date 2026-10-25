@@ -127,7 +127,8 @@ fn the_api_has_pg_unstable_and_the_replacements() {
             ("slice_values", "datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>"),
             ("slice_changed_after", "datumesh_store::Result<bool>"),
         ] {
-            let item = format!("pub fn datumesh_store::{owner}::{m}(&self, &datumesh_core::slice::Slice, &str) -> {ret}");
+            let item =
+                format!("pub fn datumesh_store::{owner}::{m}(&self, &datumesh_core::slice::Slice, &str) -> {ret}");
             assert!(has(&item), "missing: {item}");
         }
     }
@@ -135,6 +136,7 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         "#[non_exhaustive] pub struct datumesh_store::SliceValue",
         "pub datumesh_store::SliceValue::version: datumesh_store::Version",
         "pub datumesh_store::SliceValue::value: datumesh_core::model::Scalar",
+        "pub datumesh_store::SliceValue::cell: datumesh_core::model::Cell",
     ] {
         assert!(has(item), "missing: {item}");
     }

@@ -1,9 +1,10 @@
 //! `slice_values` and `slice_changed_after` (0.3.2).
 //!
 //! * `slice_values(slice, A)`: the members `slice_members(slice, A)` gives, in the same order
-//!   and by the same answering rule, as each member's version (cell, tx, receipt hash, asof)
-//!   and its typed value, without the receipt bytes (the value is read from a stored column,
-//!   not by parsing receipts).
+//!   and by the same answering rule, as each member's version (cell, tx, receipt hash, asof),
+//!   its typed value and its cell (with its arguments, which the engine hands to the runtime),
+//!   without the receipt bytes (value and cell are read from stored columns and the
+//!   typed-argument index, not by parsing receipts).
 //! * `slice_changed_after(slice, A)`: whether a matching cell of the slice has a stored
 //!   version that could answer differently after A: a version with `tx > A` or a receipt
 //!   `asof > A` (its answering start is after A). One indexed query.
@@ -28,7 +29,10 @@ fn agree(s: &PgStore, sl: &datumesh_core::Slice, asof: &str) -> Vec<SliceValue> 
     assert_eq!(ms.len(), vs.len());
     for (m, v) in ms.iter().zip(&vs) {
         assert_eq!(m.version, v.version);
-        assert_eq!(&v.value, Receipt::from_json(&m.receipt).unwrap().value());
+        let r = Receipt::from_json(&m.receipt).unwrap();
+        assert_eq!(&v.value, r.value());
+        assert_eq!(&v.cell, r.cell());
+        assert_eq!(v.cell.id(), v.version.cell_id);
     }
     vs
 }
@@ -218,11 +222,15 @@ fn values_and_changes_over_100000_cells() {
             .unwrap()
             .get(0)
     };
+    // Unchanged after A (the expensive answer, every member looked at if it were a scan).
     let before = seq_scans();
     let start = std::time::Instant::now();
     assert!(!s.slice_changed_after(&sl, &day(1)).unwrap());
-    assert!(s.slice_changed_after(&sl, "2023-12-31T00:00:00.000000Z").unwrap());
     let took = start.elapsed();
     assert_eq!(seq_scans(), before, "slice_changed_after scanned a table sequentially");
-    assert!(took < std::time::Duration::from_secs(1), "{took:?}");
+    assert!(took < std::time::Duration::from_millis(500), "{took:?}");
+    // Changed: the first match ends it (any plan may be chosen when every receipt matches).
+    let start = std::time::Instant::now();
+    assert!(s.slice_changed_after(&sl, "2023-12-31T00:00:00.000000Z").unwrap());
+    assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
 }
