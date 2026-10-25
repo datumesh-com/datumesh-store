@@ -72,6 +72,24 @@ macro_rules! slice_members {
     };
 }
 
+/// Whether a candidate cell of a slice (narrowed by `$drive`) has a stored version whose
+/// receipt's asof is after A.
+macro_rules! changed_cand {
+    ($drive:expr) => {
+        concat!(
+            "SELECT true FROM cells c
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
+                AND EXISTS (SELECT 1 FROM receipts r WHERE r.cell_id = c.cell_id AND r.asof > $5
+                               AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash))
+                AND ",
+            slice_match!(),
+            " ",
+            $drive,
+            " LIMIT 1"
+        )
+    };
+}
+
 /// The candidates of a slice narrowed to a range of one argument ($12-$15: name, type, lo,
 /// hi) of the typed-argument index: of a number, and of any other type.
 macro_rules! drive_text {
@@ -240,14 +258,28 @@ statements! {
                               WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT, TEXT];
     // Whether a matching cell has a stored version whose receipt's asof (never earlier than
-    // its tx) is after A ($5): receipts of the function by asof, then the cell's constraints.
-    SliceChangedAfter = concat!(
-        "SELECT EXISTS (SELECT 1 FROM receipts r JOIN cells c ON c.cell_id = r.cell_id
+    // its tx) is after A ($5), the slice's parameters as for its members ($11-$15 unused
+    // here). From the function's receipts by asof, then each one's cell against the slice:
+    ChangedRecent = concat!(
+        "SELECT true FROM receipts r JOIN cells c ON c.cell_id = r.cell_id
           WHERE r.fn_hash = $1 AND r.asof > $5 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
             AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash) AND ",
         slice_match!(),
-        ")"
-    ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY];
+        " LIMIT 1"
+    ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    // or from the slice's candidate cells, then each one's receipts by cell and asof.
+    ChangedCandAll = changed_cand!("") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    ChangedCandText = changed_cand!(drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    ChangedCandNum = changed_cand!(drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    // How many receipts of the function have an asof after A, and how many cells it has (up
+    // to 10,001), to choose between the two.
+    // (Ordered as the indexes are, so that a probe is an index scan of at most 10,001 entries
+    // even when every row matches.)
+    ProbeRecent = "SELECT count(*) FROM (SELECT 1 FROM receipts WHERE fn_hash = $1 AND asof > $2
+                                          ORDER BY fn_hash, asof LIMIT 10001) x"
+        => [TEXT, TEXT];
+    ProbeCells = "SELECT count(*) FROM (SELECT 1 FROM cells WHERE fn_hash = $1 ORDER BY fn_hash, cell_id LIMIT 10001) x"
+        => [TEXT];
     // The same for a version slice: a version of the cell with tx in [from, to] ($2, $3).
     VersionsChangedAfter = "SELECT EXISTS (SELECT 1 FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                              WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND r.asof > $4)"

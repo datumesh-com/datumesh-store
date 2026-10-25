@@ -6,9 +6,10 @@
 -- stored canonical bytes; a row's columns must equal them (CHECK constraints); an insert that
 -- does not name them (a 0.3.1 writer, and put_receipt) gets them from the bytes (a trigger).
 --
--- receipts_fn_hash_asof: receipts by function and asof, for `slice_changed_after`: a stored
--- version of a cell answers differently after A only if its receipt's asof (never earlier
--- than its tx) is after A.
+-- receipts_fn_hash_asof, receipts_cell_asof: receipts by function and asof, and by cell and
+-- asof, for `slice_changed_after`: a stored version of a cell answers differently after A
+-- only if its receipt's asof (never earlier than its tx) is after A. It starts from the
+-- function's recent receipts or from the slice's candidate cells, whichever is fewer.
 
 CREATE FUNCTION datumesh_receipt_value_type(bytes bytea) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
@@ -41,3 +42,4 @@ CREATE TRIGGER receipts_value_from_bytes BEFORE INSERT ON receipts
     FOR EACH ROW WHEN (NEW.value_type IS NULL OR NEW.value IS NULL) EXECUTE FUNCTION datumesh_receipts_value();
 
 CREATE INDEX receipts_fn_hash_asof ON receipts (fn_hash, asof);
+CREATE INDEX receipts_cell_asof ON receipts (cell_id, asof);

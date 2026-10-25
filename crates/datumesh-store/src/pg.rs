@@ -800,59 +800,65 @@ impl Pattern {
         ]
     }
 
-    /// Whether a matching cell has a stored version answering from after `asof`.
+    /// Whether a matching cell has a stored version answering from after `asof`: from
+    /// whichever side is smaller (both probed, up to 10,001), the function's receipts with an
+    /// asof after `asof` (then each one's cell checked against the slice), or the slice's
+    /// candidate cells (then each one's receipts by cell and asof).
     fn changed_after(&self, c: &mut Conn, asof: &str) -> Result<bool> {
-        let [names, kinds, types, los, his] = self.columns();
-        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
-        let st = c.stmt(Q::SliceChangedAfter)?;
-        c.client
-            .query_one(
-                &st,
-                &[&self.fn_hash, &self.ns, &self.fn_name, &nargs, &asof, &names, &kinds, &types, &los, &his],
-            )
-            .db()?
-            .try_get(0)
-            .db()
+        let (drive, candidates) = self.drive(c, true)?;
+        let st = c.stmt(Q::ProbeRecent)?;
+        let recent: i64 = c.client.query_one(&st, &[&self.fn_hash, &asof]).db()?.try_get(0).db()?;
+        let qs = if recent <= candidates.unwrap_or(i64::MAX) {
+            [Q::ChangedRecent; 3]
+        } else {
+            [Q::ChangedCandAll, Q::ChangedCandText, Q::ChangedCandNum]
+        };
+        let rows = self.query(c, asof, qs, drive)?;
+        match rows.first() {
+            Some(r) => r.try_get(0).db(),
+            None => Ok(false),
+        }
     }
 
-    /// The rows of one of the member queries `qs` (all cells, a text range, a number range),
-    /// each made into a `T` (the cell id in column `at`, the key after it), in key order.
-    fn rows<T>(
-        &self,
-        c: &mut Conn,
-        asof: &str,
-        qs: [Q; 3],
-        at: usize,
-        make: impl Fn(&postgres::Row, &str) -> Result<T>,
-        cell_of: impl Fn(&T) -> &String,
-    ) -> Result<Vec<T>> {
-        let [names, kinds, types, los, his] = self.columns();
-        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
-        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
-        // The candidates: the bound or ranged argument holding the fewest cells (probed when
-        // there are several), else every cell of the function.
+    /// The bound or ranged argument holding the fewest cells (probed, up to 10,001, when
+    /// there are several, or when `count` asks), else none (every cell of the function); and
+    /// the number of candidates when probed.
+    fn drive(&self, c: &mut Conn, count: bool) -> Result<(Option<&Constraint>, Option<i64>)> {
+        let mut probe = |a: Option<&Constraint>| -> Result<i64> {
+            match a {
+                None => {
+                    let st = c.stmt(Q::ProbeCells)?;
+                    c.client.query_one(&st, &[&self.fn_hash]).db()?.try_get(0).db()
+                }
+                Some(a) => {
+                    let st = c.stmt(if a.ty == "number" { Q::SliceProbeNum } else { Q::SliceProbeText })?;
+                    c.client.query_one(&st, &[&self.fn_hash, &a.name, &a.ty, &a.lo, &a.hi]).db()?.try_get(0).db()
+                }
+            }
+        };
         let constrained: Vec<&Constraint> = self.args.iter().filter(|a| a.kind != Kind::Open).collect();
-        let drive = match constrained.as_slice() {
-            [] => None,
-            [one] => Some(*one),
+        Ok(match constrained.as_slice() {
+            [] => (None, if count { Some(probe(None)?) } else { None }),
+            [one] => (Some(*one), if count { Some(probe(Some(one))?) } else { None }),
             several => {
                 let mut best: Option<(i64, &Constraint)> = None;
                 for a in several {
-                    let q = if a.ty == "number" { Q::SliceProbeNum } else { Q::SliceProbeText };
-                    let st = c.stmt(q)?;
-                    let n: i64 = c
-                        .client
-                        .query_one(&st, &[&self.fn_hash, &a.name, &a.ty, &a.lo, &a.hi])
-                        .db()?
-                        .try_get(0)
-                        .db()?;
+                    let n = probe(Some(a))?;
                     if best.is_none_or(|(m, _)| n < m) {
                         best = Some((n, a));
                     }
                 }
-                best.map(|(_, a)| a)
+                (best.map(|(_, a)| a), best.map(|(n, _)| n))
             }
-        };
+        })
+    }
+
+    /// Runs one of a family of slice queries `qs` (all cells, a text range, a number range)
+    /// with the slice's parameters and the candidates narrowed by `drive`.
+    fn query(&self, c: &mut Conn, asof: &str, qs: [Q; 3], drive: Option<&Constraint>) -> Result<Vec<postgres::Row>> {
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
         let (q, d_name, d_ty, d_lo, d_hi) = match drive {
             None => (qs[0], "", "", "", ""),
             Some(a) => {
@@ -861,8 +867,7 @@ impl Pattern {
             }
         };
         let st = c.stmt(q)?;
-        let rows = c
-            .client
+        c.client
             .query(
                 &st,
                 &[
@@ -883,7 +888,22 @@ impl Pattern {
                     &d_hi,
                 ],
             )
-            .db()?;
+            .db()
+    }
+
+    /// The rows of one of the member queries `qs` (all cells, a text range, a number range),
+    /// each made into a `T` (the cell id in column `at`, the key after it), in key order.
+    fn rows<T>(
+        &self,
+        c: &mut Conn,
+        asof: &str,
+        qs: [Q; 3],
+        at: usize,
+        make: impl Fn(&postgres::Row, &str) -> Result<T>,
+        cell_of: impl Fn(&T) -> &String,
+    ) -> Result<Vec<T>> {
+        let (drive, _) = self.drive(c, false)?;
+        let rows = self.query(c, asof, qs, drive)?;
         let mut out: Vec<(Vec<String>, T)> = Vec::with_capacity(rows.len());
         for r in &rows {
             let cell_id: String = r.try_get(at).db()?;

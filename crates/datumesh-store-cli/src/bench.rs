@@ -367,7 +367,9 @@ fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State,
                     return Err(Fail(1, format!("slice_changed_after as of {at}: {ch}")));
                 }
                 changed += 1;
-                n = store.slice_values(&sl, &asof)?.len();
+                if n == 0 {
+                    n = store.slice_values(&sl, &asof)?.len();
+                }
             } else {
                 let ms = store.slice_members(&sl, &asof)?;
                 t.push(s.elapsed());
