@@ -2,6 +2,34 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.3.2 (unreleased)
+
+For the engine 0.3.1: the members of a slice as values, and a cheap check that a slice does
+not change after A. Additions only (`API-CHANGES-0.3.2.md`).
+
+### Added
+
+- `Store::slice_values(slice, asof) -> Result<Vec<SliceValue>>`: the members
+  `slice_members` gives, in its order and by its answering rule, each as its version, its
+  receipt's typed value and its cell (with its arguments), without receipt bytes.
+- `SliceValue { version, value, cell }` (`#[non_exhaustive]`).
+- `Store::slice_changed_after(slice, asof) -> Result<bool>`: whether a cell matching the
+  slice (for a version slice, its cell with a `tx` in `[from, to]`) has a stored version whose
+  receipt's asof is after A, with index scans only: two bounded probes choose between the
+  function's receipts with an asof after A (new index `receipts (fn_hash, asof)`) and the
+  slice's candidate cells (new index `receipts (cell_id, asof)`), and one query walks the
+  smaller, stopping at the first match. `false` means the members and their versions answer the same as of
+  every later time until such a version is stored; `true` can be conservative.
+- Migration 4 (`0004_receipt_values.sql`): `receipts.value_type` and `receipts.value`
+  (backfilled from the canonical bytes, checked equal to them, filled by a trigger when an
+  insert does not name them, as `asof` is), and the indexes `receipts_fn_hash_asof`, `receipts_cell_asof`.
+- The command: `bench` times `slice_values` and `slice_changed_after` on the shapes of
+  `slice_members`.
+
+### Changed
+
+- `datumesh-store-cli` 0.3.2 depends on `datumesh-store = "=0.3.2"`.
+
 ## 0.3.1 (2026-10-25)
 
 For the formula dialect (spec-0.4.0, slice-as-lineage): the members of a slice as of A,

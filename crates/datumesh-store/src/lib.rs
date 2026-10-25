@@ -360,8 +360,10 @@ pub trait Store: Resolver + sealed::Sealed {
     /// slice one with `tx` in `[from, to]`. `false` means [`slice_members`](Store::slice_members)
     /// (and `slice_values`) give the same answer as of every time from `asof` on, until a
     /// version is stored with an asof after it; `true` may be conservative (a late-signed
-    /// version superseded before its asof never answers). One indexed query (receipts by
-    /// function and asof), whatever the slice's size. Since 0.3.2.
+    /// version superseded before its asof never answers). Index scans only, whatever the
+    /// slice's size: two bounded probes (at most 10,001 entries each) choose whether to walk
+    /// the function's receipts with an asof after `asof` or the slice's candidate cells,
+    /// whichever is fewer, and one query walks it, stopping at the first match. Since 0.3.2.
     fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
