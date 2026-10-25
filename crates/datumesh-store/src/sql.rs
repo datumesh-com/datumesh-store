@@ -30,32 +30,61 @@ macro_rules! statements {
     };
 }
 
-/// The statement of the members of a slice of cells, with the candidates narrowed by
+/// Whether cell `c` meets every constraint of a slice ($6-$10: name, kind open / value /
+/// range, type, lo, hi; a value's lexical form is its lo).
+macro_rules! slice_match {
+    () => {
+        "NOT EXISTS (
+            SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS k(name, kind, type, lo, hi)
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM cell_args a
+                  WHERE a.cell_id = c.cell_id AND a.name = k.name
+                    AND CASE WHEN k.kind = 'open' THEN true
+                             WHEN k.kind = 'value' THEN a.type = k.type AND a.value = k.lo
+                             WHEN k.type = 'number' THEN a.type = 'number' AND a.num BETWEEN k.lo::numeric AND k.hi::numeric
+                             ELSE a.type = k.type AND a.value BETWEEN k.lo AND k.hi END))"
+    };
+}
+
+/// The statement of the members of a slice of cells: the columns `$outer` of the version
+/// answering (`$inner` of the receipt), the cell id, and its key; the candidates narrowed by
 /// `$drive`.
 macro_rules! slice_members {
-    ($drive:literal) => {
+    ($inner:literal, $outer:literal, $drive:expr) => {
         concat!(
-            "SELECT m.tx, m.receipt_hash, m.asof, m.bytes, c.cell_id,
+            "SELECT m.tx, m.receipt_hash, m.asof, ",
+            $outer,
+            ", c.cell_id,
                     ARRAY(SELECT a.type || ':' || a.value FROM cell_args a
                            WHERE a.cell_id = c.cell_id AND a.name = ANY($11::text[]) ORDER BY a.name)
                FROM cells c
-              CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, r.bytes
+              CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, ",
+            $inner,
+            "
                                     FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                                    WHERE v.cell_id = c.cell_id AND v.tx <= $5 AND r.asof <= $5
                                    ORDER BY v.tx DESC LIMIT 1) m
-              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
-                AND NOT EXISTS (
-                    SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS k(name, kind, type, lo, hi)
-                     WHERE NOT EXISTS (
-                         SELECT 1 FROM cell_args a
-                          WHERE a.cell_id = c.cell_id AND a.name = k.name
-                            AND CASE WHEN k.kind = 'open' THEN true
-                                     WHEN k.kind = 'value' THEN a.type = k.type AND a.value = k.lo
-                                     WHEN k.type = 'number' THEN a.type = 'number' AND a.num BETWEEN k.lo::numeric AND k.hi::numeric
-                                     ELSE a.type = k.type AND a.value BETWEEN k.lo AND k.hi END))
-                ",
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND ",
+            slice_match!(),
+            " ",
             $drive
         )
+    };
+}
+
+/// The candidates of a slice narrowed to a range of one argument ($12-$15: name, type, lo,
+/// hi) of the typed-argument index: of a number, and of any other type.
+macro_rules! drive_text {
+    () => {
+        "AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
+                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = $13 AND a.value BETWEEN $14 AND $15)"
+    };
+}
+macro_rules! drive_num {
+    () => {
+        "AND $13 = 'number' AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
+                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = 'number'
+                              AND a.num BETWEEN $14::numeric AND $15::numeric)"
     };
 }
 
@@ -182,16 +211,18 @@ statements! {
     // answering as of A and the "type:value" of its key arguments ($11, in name order).
     // Candidates come from all the function's cells, or from a range scan of one argument
     // ($12-$15: name, type, lo, hi) of the typed-argument index.
-    SliceMembersAll = slice_members!("") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceMembersText = slice_members!(
-        "AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
-                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = $13 AND a.value BETWEEN $14 AND $15)"
-    ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceMembersNum = slice_members!(
-        "AND $13 = 'number' AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
-                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = 'number'
-                              AND a.num BETWEEN $14::numeric AND $15::numeric)"
-    ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersAll = slice_members!("r.bytes", "m.bytes", "") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersText = slice_members!("r.bytes", "m.bytes", drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersNum = slice_members!("r.bytes", "m.bytes", drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    // The same with the receipt's value and the member's cell from the index (0.3.2): (tx,
+    // receipt_hash, asof, value_type, value, ns, fn, fn_hash, "name:type:value" of each
+    // argument by name, cell_id, key).
+    SliceValuesAll = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", "") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceValuesText = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceValuesNum = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbeText = "SELECT count(*) FROM (SELECT 1 FROM cell_args a
                        WHERE a.fn_hash = $1 AND a.name = $2 AND a.type = $3 AND a.value BETWEEN $4 AND $5 LIMIT 10001) x"
@@ -200,4 +231,25 @@ statements! {
                       WHERE a.fn_hash = $1 AND a.name = $2 AND a.type = 'number' AND $3 = 'number'
                         AND a.num BETWEEN $4::numeric AND $5::numeric LIMIT 10001) x"
         => [TEXT, TEXT, TEXT, TEXT, TEXT];
+
+    // 0.3.2: a version slice's values.
+    VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.ns, c.fn, c.fn_hash,
+                                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
+                                           WHERE a.cell_id = c.cell_id ORDER BY a.name)
+                               FROM versions v JOIN receipts r ON r.hash = v.receipt_hash JOIN cells c ON c.cell_id = v.cell_id
+                              WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4 ORDER BY v.tx"
+        => [TEXT, TEXT, TEXT, TEXT];
+    // Whether a matching cell has a stored version whose receipt's asof (never earlier than
+    // its tx) is after A ($5): receipts of the function by asof, then the cell's constraints.
+    SliceChangedAfter = concat!(
+        "SELECT EXISTS (SELECT 1 FROM receipts r JOIN cells c ON c.cell_id = r.cell_id
+          WHERE r.fn_hash = $1 AND r.asof > $5 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
+            AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash) AND ",
+        slice_match!(),
+        ")"
+    ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY];
+    // The same for a version slice: a version of the cell with tx in [from, to] ($2, $3).
+    VersionsChangedAfter = "SELECT EXISTS (SELECT 1 FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                             WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND r.asof > $4)"
+        => [TEXT, TEXT, TEXT, TEXT];
 }

@@ -188,7 +188,9 @@ fn migration_3_backfills_the_typed_argument_index() {
     assert!(all.len() >= 25, "{}", all.len());
 
     let s = db.bare_store();
-    assert_eq!(migrate::apply(&s).unwrap(), [3]);
+    // This migration and every later one.
+    let later: Vec<u32> = migrate::MIGRATIONS[2..].iter().map(|m| m.version).collect();
+    assert_eq!(migrate::apply(&s).unwrap(), later);
     assert_index_is_the_cores(&mut c, &all);
 
     // The schema is what the migrations make; re-running is a no-op.

@@ -123,7 +123,9 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
 
     // Migrate through a store, as `datumesh-store migrate` does (and the migrations after 2).
     let s = db.bare_store();
-    assert_eq!(migrate::apply(&s).unwrap(), [2, 3]);
+    // This migration and every later one.
+    let later: Vec<u32> = migrate::MIGRATIONS[1..].iter().map(|m| m.version).collect();
+    assert_eq!(migrate::apply(&s).unwrap(), later);
 
     // Every stored receipt's asof is the core's.
     let rows = c

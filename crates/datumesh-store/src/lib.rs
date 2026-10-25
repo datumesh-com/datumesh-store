@@ -43,6 +43,8 @@
 //! * Slices (0.3.1, SPEC 15.13): every stored receipt's cell is indexed by its typed
 //!   arguments, so that [`Store::slice_members`] finds the members of a slice as of A with
 //!   a range scan, in key order; [`Store::versions_between`] gives a version slice.
+//!   [`Store::slice_values`] gives the members' values without receipts (0.3.2) and
+//!   [`Store::slice_changed_after`] whether they may answer differently later.
 //!   Manifests ([`Store::put_manifest`], served by [`Resolver::manifest`]) are kept by
 //!   entry and found from each member ([`Store::member_manifests`]). A receipt citing a
 //!   slice can be stored before its manifest, and a manifest before its members.
@@ -76,7 +78,7 @@
 use std::borrow::Cow;
 
 pub use datumesh_core::Resolver;
-use datumesh_core::Slice;
+use datumesh_core::{Cell, Scalar, Slice};
 
 mod error;
 pub mod migrate;
@@ -117,6 +119,20 @@ pub struct SliceMember {
     pub version: Version,
     /// The receipt's bytes, canonical JSON.
     pub receipt: Vec<u8>,
+}
+
+/// A member of a slice with its value and without its receipt's bytes
+/// ([`Store::slice_values`]). Since 0.3.2.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SliceValue {
+    /// The version answering (its cell, tx, receipt hash and asof).
+    pub version: Version,
+    /// The receipt's typed value.
+    pub value: Scalar,
+    /// The member's cell, with its arguments (from the store's typed-argument index; equal
+    /// to the receipt's `cell`, and `cell.id()` is `version.cell_id`).
+    pub cell: Cell,
 }
 
 /// A name binding: from transaction time `tx` on, a fully qualified function name means the
@@ -168,7 +184,7 @@ pub struct Namespace {
 /// use std::borrow::Cow;
 /// use datumesh_core::{Cell, Scalar};
 /// use datumesh_core::Slice;
-/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, SliceMember, Store, Version};
+/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Version};
 ///
 /// struct Wrapper(PgStore);
 /// impl Resolver for Wrapper {
@@ -203,6 +219,8 @@ pub struct Namespace {
 ///     fn slice_dependents(&self, e: &str) -> Result<Vec<String>> { self.0.slice_dependents(e) }
 ///     fn slice_members(&self, s: &Slice, a: &str) -> Result<Vec<SliceMember>> { self.0.slice_members(s, a) }
 ///     fn versions_between(&self, c: &str, f: &str, t: &str, a: &str) -> Result<Vec<SliceMember>> { self.0.versions_between(c, f, t, a) }
+///     fn slice_values(&self, s: &Slice, a: &str) -> Result<Vec<SliceValue>> { self.0.slice_values(s, a) }
+///     fn slice_changed_after(&self, s: &Slice, a: &str) -> Result<bool> { self.0.slice_changed_after(s, a) }
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
@@ -330,6 +348,21 @@ pub trait Store: Resolver + sealed::Sealed {
     /// receipt's bytes: SPEC 15.13's version slice. Empty when `from` is after `to`. Since
     /// 0.3.1.
     fn versions_between(&self, cell_id: &str, from: &str, to: &str, asof: &str) -> Result<Vec<SliceMember>>;
+    /// The members [`slice_members`](Store::slice_members) gives, in its order and by its
+    /// answering rule, each as its version, its receipt's typed value and its cell (with its
+    /// arguments), without the receipt's bytes (the value is a stored column of the receipt
+    /// and the cell comes from the typed-argument index, neither parsed per call).
+    /// Since 0.3.2.
+    fn slice_values(&self, slice: &Slice, asof: &str) -> Result<Vec<SliceValue>>;
+    /// Whether the members of `slice`, or their versions, may answer differently as of some
+    /// time after `asof`: whether a cell matching the slice has a stored version whose
+    /// receipt's `asof` is after `asof` (its `tx` is never later than that), for a version
+    /// slice one with `tx` in `[from, to]`. `false` means [`slice_members`](Store::slice_members)
+    /// (and `slice_values`) give the same answer as of every time from `asof` on, until a
+    /// version is stored with an asof after it; `true` may be conservative (a late-signed
+    /// version superseded before its asof never answers). One indexed query (receipts by
+    /// function and asof), whatever the slice's size. Since 0.3.2.
+    fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

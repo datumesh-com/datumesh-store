@@ -6,12 +6,12 @@ use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::sql::Q;
-use crate::{Binding, Namespace, SliceMember, Store, Version};
+use crate::{Binding, Namespace, SliceMember, SliceValue, Store, Version};
 use datumesh_core::json::Value;
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_input_entry, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, ErrorCode, FunctionDescriptor, Keys, Manifest, Receipt,
-    Resolver, Scalar, Slice,
+    Resolver, Scalar, Slice, Type,
 };
 
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
@@ -159,6 +159,29 @@ fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
 /// A member from a row of (tx, receipt_hash, asof, bytes, ...).
 fn member_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
     Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
+}
+
+/// A member's value and cell from a row of (tx, receipt_hash, asof, value_type, value, ns,
+/// fn, fn_hash, "name:type:value" of each argument, ...): the cell is rebuilt from the
+/// typed-argument index (`cell_args` holds every argument's type and lexical form).
+fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
+    let bad =
+        |what: &str| Error::Invalid(datumesh_core::Error::new(ErrorCode::CanonType, "$", format!("a stored {what}")));
+    let scalar = |ty: &str, value: &str| -> Result<Scalar> {
+        let ty = Type::from_name(ty).ok_or_else(|| bad("type"))?;
+        Ok(Scalar::from_lexical(ty, value)?)
+    };
+    let (ty, value): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
+    let mut args = datumesh_core::Args::new();
+    for a in r.try_get::<_, Vec<String>>(8).db()? {
+        let mut parts = a.splitn(3, ':');
+        let (Some(name), Some(t), Some(v)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err(bad("argument"));
+        };
+        args.insert(name.to_string(), datumesh_core::Arg::Value(scalar(t, v)?));
+    }
+    let cell = Cell { args, fn_hash: r.try_get(7).db()?, fn_name: r.try_get(6).db()?, ns: r.try_get(5).db()? };
+    Ok(SliceValue { version: version_row(r, cell_id)?, value: scalar(&ty, &value)?, cell })
 }
 
 fn get_bytes(c: &mut Conn, q: Q, key: &str) -> Result<Option<Vec<u8>>> {
@@ -589,13 +612,8 @@ impl Store for PgStore {
     fn slice_members(&self, slice: &Slice, asof: &str) -> Result<Vec<SliceMember>> {
         check_instant(asof, "asof")?;
         let v = slice.to_value();
-        if slice.is_version_slice() {
-            let (Some(cell), Some(from), Some(to)) =
-                (v.get("cell"), v.get("from").and_then(Value::as_str), v.get("to").and_then(Value::as_str))
-            else {
-                return Err(Error::Invalid(datumesh_core::Error::new(ErrorCode::Schema, "$", "not a version slice")));
-            };
-            return self.versions_between(&sha256_hex(&cell.to_jcs()), from, to, asof);
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            return self.versions_between(&cell_id, &from, &to, asof);
         }
         let pattern = Pattern::of(&v)?;
         self.run("slice_members", |c| pattern.members(c, asof))
@@ -611,6 +629,33 @@ impl Store for PgStore {
             let rows = c.client.query(&st, &[&cell_id, &from, &to, &asof]).db()?;
             rows.iter().map(|r| member_row(r, cell_id)).collect()
         })
+    }
+
+    fn slice_values(&self, slice: &Slice, asof: &str) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            return self.run("slice_values", |c| {
+                let st = c.stmt(Q::VersionsBetweenValues)?;
+                let rows = c.client.query(&st, &[&cell_id, &from, &to, &asof]).db()?;
+                rows.iter().map(|r| value_row(r, &cell_id)).collect()
+            });
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_values", |c| pattern.values(c, asof))
+    }
+
+    fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            return self.run("slice_changed_after", |c| {
+                let st = c.stmt(Q::VersionsChangedAfter)?;
+                c.client.query_one(&st, &[&cell_id, &from, &to, &asof]).db()?.try_get(0).db()
+            });
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_changed_after", |c| pattern.changed_after(c, asof))
     }
 
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {
@@ -634,6 +679,17 @@ impl Store for PgStore {
                 None => None,
             })
         })
+    }
+}
+
+/// A version slice's cell id, `from` and `to`; `None` for a slice of cells.
+fn version_slice(slice: &Slice, v: &Value) -> Result<Option<(String, String, String)>> {
+    if !slice.is_version_slice() {
+        return Ok(None);
+    }
+    match (v.get("cell"), v.get("from").and_then(Value::as_str), v.get("to").and_then(Value::as_str)) {
+        (Some(cell), Some(from), Some(to)) => Ok(Some((sha256_hex(&cell.to_jcs()), from.to_string(), to.to_string()))),
+        _ => Err(Error::Invalid(datumesh_core::Error::new(ErrorCode::Schema, "$", "not a version slice"))),
     }
 }
 
@@ -722,12 +778,55 @@ impl Pattern {
 
     /// The members as of `asof`, in key order.
     fn members(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceMember>> {
+        let qs = [Q::SliceMembersAll, Q::SliceMembersText, Q::SliceMembersNum];
+        self.rows(c, asof, qs, 4, member_row, |m| &m.version.cell_id)
+    }
+
+    /// The members' values as of `asof`, in key order.
+    fn values(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceValue>> {
+        let qs = [Q::SliceValuesAll, Q::SliceValuesText, Q::SliceValuesNum];
+        self.rows(c, asof, qs, 9, value_row, |m| &m.version.cell_id)
+    }
+
+    /// The constraint columns of the member and change queries ($6-$10).
+    fn columns(&self) -> [Vec<String>; 5] {
         let col = |f: fn(&Constraint) -> &str| -> Vec<String> { self.args.iter().map(|a| f(a).to_string()).collect() };
-        let names = col(|a| a.name.as_str());
-        let kinds = col(|a| a.kind.as_str());
-        let types = col(|a| a.ty.as_str());
-        let los = col(|a| a.lo.as_str());
-        let his = col(|a| a.hi.as_str());
+        [
+            col(|a| a.name.as_str()),
+            col(|a| a.kind.as_str()),
+            col(|a| a.ty.as_str()),
+            col(|a| a.lo.as_str()),
+            col(|a| a.hi.as_str()),
+        ]
+    }
+
+    /// Whether a matching cell has a stored version answering from after `asof`.
+    fn changed_after(&self, c: &mut Conn, asof: &str) -> Result<bool> {
+        let [names, kinds, types, los, his] = self.columns();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let st = c.stmt(Q::SliceChangedAfter)?;
+        c.client
+            .query_one(
+                &st,
+                &[&self.fn_hash, &self.ns, &self.fn_name, &nargs, &asof, &names, &kinds, &types, &los, &his],
+            )
+            .db()?
+            .try_get(0)
+            .db()
+    }
+
+    /// The rows of one of the member queries `qs` (all cells, a text range, a number range),
+    /// each made into a `T` (the cell id in column `at`, the key after it), in key order.
+    fn rows<T>(
+        &self,
+        c: &mut Conn,
+        asof: &str,
+        qs: [Q; 3],
+        at: usize,
+        make: impl Fn(&postgres::Row, &str) -> Result<T>,
+        cell_of: impl Fn(&T) -> &String,
+    ) -> Result<Vec<T>> {
+        let [names, kinds, types, los, his] = self.columns();
         let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
         let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
         // The candidates: the bound or ranged argument holding the fewest cells (probed when
@@ -755,9 +854,9 @@ impl Pattern {
             }
         };
         let (q, d_name, d_ty, d_lo, d_hi) = match drive {
-            None => (Q::SliceMembersAll, "", "", "", ""),
+            None => (qs[0], "", "", "", ""),
             Some(a) => {
-                let q = if a.ty == "number" { Q::SliceMembersNum } else { Q::SliceMembersText };
+                let q = if a.ty == "number" { qs[2] } else { qs[1] };
                 (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
             }
         };
@@ -785,13 +884,13 @@ impl Pattern {
                 ],
             )
             .db()?;
-        let mut out: Vec<(Vec<String>, SliceMember)> = Vec::with_capacity(rows.len());
+        let mut out: Vec<(Vec<String>, T)> = Vec::with_capacity(rows.len());
         for r in &rows {
-            let cell_id: String = r.try_get(4).db()?;
-            let key: Vec<String> = r.try_get(5).db()?;
-            out.push((key, member_row(r, &cell_id)?));
+            let cell_id: String = r.try_get(at).db()?;
+            let key: Vec<String> = r.try_get(at + 1).db()?;
+            out.push((key, make(r, &cell_id)?));
         }
-        out.sort_by(|(a, ma), (b, mb)| cmp_keys(a, b).then_with(|| ma.version.cell_id.cmp(&mb.version.cell_id)));
+        out.sort_by(|(a, ma), (b, mb)| cmp_keys(a, b).then_with(|| cell_of(ma).cmp(cell_of(mb))));
         Ok(out.into_iter().map(|(_, m)| m).collect())
     }
 }

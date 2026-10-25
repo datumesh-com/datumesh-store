@@ -18,7 +18,8 @@ const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
     applied_at timestamptz NOT NULL DEFAULT now()
 )";
 /// 0.3.1's receipt insert statement, verbatim.
-const RECEIPT_PUT_0_3_1: &str = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
+const RECEIPT_PUT_0_3_1: &str =
+    "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
                   VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)
                   ON CONFLICT (hash) DO NOTHING";
 
@@ -61,14 +62,16 @@ fn assert_values_are_the_cores(c: &mut Client, all: &[Receipt]) {
 
 /// Receipts of every value type (the slice-lineage vectors' receipts and generated ones).
 fn receipts() -> Vec<Vec<u8>> {
-    let mut out: Vec<Vec<u8>> = vectors("receipt")
-        .iter()
-        .map(input)
-        .filter(|b| Receipt::from_json(b).is_ok())
-        .collect();
+    let mut out: Vec<Vec<u8>> =
+        vectors("receipt").iter().map(input).filter(|b| Receipt::from_json(b).is_ok()).collect();
     let cell = slice_cell("f", &"0".repeat(64), &[("k", sc(Type::Number, "1"))]);
     for (i, v) in ["-1.5", "0", &format!("{}.{}", "1".repeat(60), "2".repeat(60))].iter().enumerate() {
-        out.push(slice_receipt(&cell, v, &format!("2024-01-0{}T00:00:00.000000Z", i + 1), "2024-02-01T00:00:00.000000Z"));
+        out.push(slice_receipt(
+            &cell,
+            v,
+            &format!("2024-01-0{}T00:00:00.000000Z", i + 1),
+            "2024-02-01T00:00:00.000000Z",
+        ));
     }
     out.sort();
     out.dedup();

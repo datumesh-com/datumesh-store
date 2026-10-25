@@ -38,6 +38,11 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0002_computed_versions.sql"),
     },
     Migration { version: 3, name: "0003_slices.sql", sql: include_str!("../migrations/0003_slices.sql") },
+    Migration {
+        version: 4,
+        name: "0004_receipt_values.sql",
+        sql: include_str!("../migrations/0004_receipt_values.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (

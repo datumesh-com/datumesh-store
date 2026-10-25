@@ -25,6 +25,8 @@
 //! on) and at most 1,000 with quote `SLB`, one version each, loaded like the others; then
 //! `slice_members` of a range of 1,000 dates (bounded), of every `SLB` cell (unbounded, up
 //! to 1,000 members), of every `SLA` cell, unbounded and as a range over all their dates;
+//! the same four with `slice_values` and with `slice_changed_after` (0.3.2; half its samples
+//! as of A, unchanged, half as of before the load, changed);
 //! `versions_between` (random cell, random range of its history, random asof); `put_manifest`
 //! of a new manifest (another range, the same members) of 1,000 and of `--slice-cells`
 //! members, and `manifest` of each. The slower ones take fewer samples (stated).
@@ -348,13 +350,30 @@ fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State,
         let mut t = Vec::with_capacity(samples);
         let mut members = Vec::new();
         let mut n = 0;
+        let mut changed = 0;
         for _ in 0..samples {
             let sl = f(rng)?;
             let s = Instant::now();
-            let ms = store.slice_members(&sl, &asof)?;
-            t.push(s.elapsed());
-            n = ms.len();
-            members = ms.into_iter().map(|m| m.version.receipt_hash).collect();
+            if op.starts_with("slice_values") {
+                let vs = store.slice_values(&sl, &asof)?;
+                t.push(s.elapsed());
+                n = vs.len();
+            } else if op.starts_with("slice_changed_after") {
+                // Unchanged since the load (as of A), and changed (as of before the load).
+                let at = if changed % 2 == 0 { asof.clone() } else { instant(T0 - HOUR) };
+                let ch = store.slice_changed_after(&sl, &at)?;
+                t.push(s.elapsed());
+                if ch != (changed % 2 == 1) {
+                    return Err(Fail(1, format!("slice_changed_after as of {at}: {ch}")));
+                }
+                changed += 1;
+                n = store.slice_values(&sl, &asof)?.len();
+            } else {
+                let ms = store.slice_members(&sl, &asof)?;
+                t.push(s.elapsed());
+                n = ms.len();
+                members = ms.into_iter().map(|m| m.version.receipt_hash).collect();
+            }
         }
         row(op, &mut t, &format!("{n} members"));
         Ok(members)
@@ -371,6 +390,26 @@ fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State,
     let mut all = timed("slice_members unbounded", few, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", None)))?;
     timed("slice_members bounded", few, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", Some((0, na as i64 - 1)))))?;
     let _ = nb;
+    // The same shapes for slice_values (0.3.2) and slice_changed_after (half the samples
+    // unchanged after A, half changed; the latter stops at the first match).
+    for op in ["slice_values", "slice_changed_after"] {
+        let many = if op == "slice_values" { few } else { some };
+        timed(
+            &format!("{op} bounded"),
+            some,
+            Box::new(|r: &mut Rng| {
+                let lo = r.below_i64(na as i64 - bounded + 1);
+                fx_slice(fx_rate, "SLA", Some((lo, lo + bounded - 1)))
+            }),
+        )?;
+        timed(&format!("{op} unbounded"), some, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLB", None)))?;
+        timed(&format!("{op} unbounded"), many, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", None)))?;
+        timed(
+            &format!("{op} bounded"),
+            many,
+            Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", Some((0, na as i64 - 1)))),
+        )?;
+    }
 
     // versions_between: a random cell, a random range of its history, a random asof in it.
     let mut t = Vec::with_capacity(o.samples);
