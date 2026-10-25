@@ -233,4 +233,17 @@ fn values_and_changes_over_100000_cells() {
     let start = std::time::Instant::now();
     assert!(s.slice_changed_after(&sl, "2023-12-31T00:00:00.000000Z").unwrap());
     assert!(start.elapsed() < std::time::Duration::from_millis(500), "{:?}", start.elapsed());
+    // A bounded slice of a function whose other cells all changed after A: its own few
+    // candidates decide, not the function's recent receipts (100,000 of them here).
+    let early = "2023-12-31T00:00:00.000000Z";
+    let range = |lo: u32, hi: u32| {
+        slice(&format!(
+            r#"{{"args":{{"k":{{"hi":"{hi}","lo":"{lo}","type":"number"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+        ))
+    };
+    for (sl, want) in [(range(500, 509), true), (range(200_000, 200_010), false), (range(99_990, 100_100), true)] {
+        let start = std::time::Instant::now();
+        assert_eq!(s.slice_changed_after(&sl, early).unwrap(), want);
+        assert!(start.elapsed() < std::time::Duration::from_millis(200), "{:?}", start.elapsed());
+    }
 }
