@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.3.1 (unreleased)
+## 0.3.1 (2026-10-25)
 
 For the formula dialect (spec-0.4.0, slice-as-lineage): the members of a slice as of A,
 version ranges, manifests, and receipts whose inputs cite slices. Additions only
