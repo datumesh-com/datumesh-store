@@ -89,6 +89,35 @@ fn descriptors_the_core_rejects_are_refused_with_its_code() {
     assert_eq!(count(&db, "descriptors"), 0);
 }
 
+/// spec-0.4.0 descriptors: `signature.order` and argument `extent` (formula descriptors
+/// always carry `order`) are stored, canonical, under the core's function hash (0.3.1;
+/// until 0.3.0 the store refused them with `E_SCHEMA`, as a spec-0.3.0 verifier does).
+#[test]
+fn descriptors_with_order_and_extent_are_stored() {
+    let db = TestDb::migrated();
+    let s = db.store();
+    let mut seen = 0;
+    for v in vectors("function") {
+        let bytes = input(&v);
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        if !text.contains("\"order\"") && !text.contains("\"extent\"") {
+            continue;
+        }
+        let id = str_of(&v, "id");
+        let h = s.put_descriptor(&bytes).unwrap();
+        assert_eq!(h, function_hash(&bytes).unwrap(), "{id}");
+        assert_eq!(h, str_of(&v, "sha256"), "{id}");
+        assert_eq!(&*s.descriptor(&h).unwrap(), str_of(&v, "canonical").as_bytes(), "{id}");
+        assert_eq!(s.put_descriptor(&bytes).unwrap(), h, "{id}");
+        seen += 1;
+    }
+    assert!(seen >= 4, "{seen}");
+    // The slice vectors' formula descriptors too.
+    let rc = vector("receipt/slice-weighted-mean");
+    let d = rc.get("recompute").and_then(|r| r.get("descriptor")).unwrap().to_jcs();
+    assert_eq!(s.put_descriptor(&d).unwrap(), function_hash(&d).unwrap());
+}
+
 #[test]
 fn same_hash_with_other_bytes_is_a_conflict() {
     // After verification, a second receipt with a stored hash but other bytes can only be

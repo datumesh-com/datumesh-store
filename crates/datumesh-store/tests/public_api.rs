@@ -94,6 +94,33 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         assert!(has(item), "missing: {item}");
     }
 
+    // 0.3.1: slices, manifests, version ranges, slice-entry lineage.
+    for owner in ["Store", "PgStore"] {
+        for item in [
+            format!("pub fn datumesh_store::{owner}::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>"),
+            format!("pub fn datumesh_store::{owner}::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>"),
+            format!("pub fn datumesh_store::{owner}::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>"),
+            format!("pub fn datumesh_store::{owner}::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>"),
+            format!("pub fn datumesh_store::{owner}::versions_between(&self, &str, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>"),
+        ] {
+            assert!(has(&item), "missing: {item}");
+        }
+        let p = format!("pub fn datumesh_store::{owner}::slice_members(&self, &datumesh_core::");
+        assert!(
+            api.lines().any(|l| l.starts_with(&p)
+                && l.ends_with("Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>")),
+            "missing: {p}"
+        );
+    }
+    for item in [
+        "#[non_exhaustive] pub struct datumesh_store::SliceMember",
+        "pub datumesh_store::SliceMember::version: datumesh_store::Version",
+        "pub datumesh_store::SliceMember::receipt: alloc::vec::Vec<u8>",
+        "pub fn datumesh_store::PgStore::manifest(&self, &str) -> core::option::Option<alloc::borrow::Cow<'_, [u8]>>",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+
     // Sealed: the private supertrait (named only in the listing; no crate can implement it).
     assert!(has("pub trait datumesh_store::Store: datumesh_core::verify::Resolver + datumesh_store::sealed::Sealed"));
 

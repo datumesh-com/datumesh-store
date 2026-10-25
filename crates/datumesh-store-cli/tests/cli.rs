@@ -185,6 +185,8 @@ fn bench_runs_small() {
         "50",
         "--blob-max",
         "65536",
+        "--slice-cells",
+        "200",
     ]));
     for op in [
         "version_asof",
@@ -199,14 +201,21 @@ fn bench_runs_small() {
         "stored_asof_with_receipt",
         "put_computed",
         "cell_dependents",
+        "slice_members",
+        "versions_between",
+        "put_manifest",
+        "manifest",
         "disk",
         "blob",
     ] {
         assert!(out.contains(op), "{op}: {out}");
     }
     assert!(out.contains("p50") && out.contains("p99"), "{out}");
+    // The fx_rate versions, the timed puts, and the slice cells (two functions' worth: one
+    // of --slice-cells cells, one of at most 1,000).
     let n: i64 = db.client().query_one("SELECT count(*) FROM versions", &[]).unwrap().get(0);
-    assert_eq!(n, 200 + 50);
+    assert_eq!(n, 200 + 50 + 200 + 200);
+    assert!(out.contains("200 members"), "{out}");
     // Computed versions: each loaded version's receipt, each dependent, and the timed puts.
     let n: i64 = db.client().query_one("SELECT count(*) FROM computed_versions", &[]).unwrap().get(0);
     assert_eq!(n, 200 + 10 + 50);
@@ -371,4 +380,66 @@ fn import_of_a_0_1_2_export() {
     // The receipts have their asof.
     let missing: i64 = db.client().query_one("SELECT count(*) FROM receipts WHERE asof IS NULL", &[]).unwrap().get(0);
     assert_eq!(missing, 0);
+}
+
+/// Manifests are exported (`{"manifest":"<manifest JSON text>"}` lines, after the receipts)
+/// and a round trip through `import` keeps them, and the slice-entry lineage, which
+/// `put_receipt` records from the receipts; importing again changes nothing.
+#[test]
+fn export_and_import_keep_manifests_and_slice_lineage() {
+    let db = Db::new();
+    ok(&db.run(&["migrate"]));
+    let dir = spec_vectors();
+    let out = ok(&db.run(&["import", dir.to_str().unwrap()]));
+    assert!(out.contains("manifests"), "{out}");
+    let export1 = ok(&db.run(&["export"]));
+    let lines: Vec<&str> = export1.lines().collect();
+    let manifests = lines.iter().filter(|l| l.starts_with(r#"{"manifest":""#)).count();
+    assert!(manifests >= 10, "{manifests}");
+    let first = lines.iter().position(|l| l.starts_with(r#"{"manifest":"#)).unwrap();
+    let last_receipt = lines.iter().rposition(|l| l.starts_with(r#"{"receipt":"#)).unwrap();
+    assert!(last_receipt < first);
+    let counts = |db: &Db| -> Vec<i64> {
+        ["manifests", "manifest_members", "slice_edges", "cells", "cell_args"]
+            .iter()
+            .map(|t| db.client().query_one(&format!("SELECT count(*) FROM {t}"), &[]).unwrap().get(0))
+            .collect()
+    };
+    let want = counts(&db);
+    assert!(want.iter().all(|n| *n > 0), "{want:?}");
+
+    let db2 = Db::new();
+    ok(&db2.run(&["migrate"]));
+    let out = ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+    assert!(out.contains(&format!("{manifests} manifests")), "{out}");
+    assert_eq!(ok(&db2.run(&["export"])), export1);
+    assert_eq!(counts(&db2), want);
+    ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+    assert_eq!(ok(&db2.run(&["export"])), export1);
+    assert_eq!(counts(&db2), want);
+
+    // A manifest line that is not a manifest is refused with the core's code.
+    let o = db2.run_stdin(&["import", "-"], Some(br#"{"manifest":"{\"members\":[]}"}"#));
+    assert_eq!(o.status.code(), Some(1), "{}", text(&o.stdout));
+    assert!(text(&o.stderr).contains("E_SCHEMA"), "{}", text(&o.stderr));
+}
+
+/// An export written by 0.3.0 (tests/fixtures/export-0.3.0.jsonl: the spec-0.3.0 vectors
+/// imported by datumesh-store 0.3.0, with a computed version and a name binding, exported)
+/// imports, and exports the same lines again; its receipts' cells are indexed.
+#[test]
+fn import_of_a_0_3_0_export() {
+    let fixture =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/export-0.3.0.jsonl")).unwrap();
+    let db = Db::new();
+    ok(&db.run(&["migrate"]));
+    let out = ok(&db.run_stdin(&["import", "-"], Some(&fixture)));
+    assert!(out.contains("0 errors") && out.contains("1 computed") && out.contains("1 names"), "{out}");
+    assert_eq!(ok(&db.run(&["export"])), text(&fixture));
+    let unindexed: i64 = db
+        .client()
+        .query_one("SELECT count(*) FROM receipts r WHERE NOT EXISTS (SELECT 1 FROM cells c WHERE c.cell_id = r.cell_id)", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(unindexed, 0);
 }

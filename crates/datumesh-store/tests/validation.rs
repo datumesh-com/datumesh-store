@@ -188,6 +188,20 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
         db_err(s.inputs(&h).unwrap_err());
         db_err(s.namespace("rates.example.org").unwrap_err());
         db_err(s.resolve_name("rates.example.org/fx_rate", r.tx()).unwrap_err());
+        // 0.3.1
+        let entry = format!("slice:{}:{}", "0".repeat(64), "0".repeat(64));
+        let sl = datumesh_core::Slice::from_json(
+            format!(r#"{{"args":{{"base":"*","date":"*","quote":"*"}},"fn":"fx_rate","fn_hash":"{fn_hash}","ns":"rates.example.org"}}"#)
+                .as_bytes(),
+        )
+        .unwrap();
+        db_err(s.slice_members(&sl, r.asof()).unwrap_err());
+        db_err(s.versions_between(&cell, r.tx(), r.tx(), r.asof()).unwrap_err());
+        db_err(s.member_manifests(&h).unwrap_err());
+        db_err(s.slice_entries(&h).unwrap_err());
+        db_err(s.slice_dependents(&entry).unwrap_err());
+        db_err(s.put_manifest(&input(&vector("slice/manifest"))).unwrap_err());
+        assert_eq!(s.manifest(&entry), None);
         assert_eq!(s.descriptor(&fn_hash), None);
         assert_eq!(s.receipt(&h), None);
         assert_eq!(s.evaluate(r.cell(), r.asof()), None);

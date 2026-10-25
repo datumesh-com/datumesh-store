@@ -269,3 +269,131 @@ pub fn put_vector_keys(s: &PgStore, v: &Value) {
         }
     }
 }
+
+// ---- Slices (0.3.1) ----------------------------------------------------------------------
+
+/// The host signing the slice tests' stored receipts.
+pub const SLICE_HOST: &str = "slices.example.org";
+
+/// The slice tests' signing key (a fixed test seed).
+pub fn slice_key() -> SigningKey {
+    SigningKey::from_seed(&[0x5c; 32])
+}
+
+/// The key document of `SLICE_HOST` for `slice_key`, valid from 2000-01-01.
+pub fn slice_keydoc() -> Vec<u8> {
+    let k = slice_key();
+    let public: String = k.public_key().iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        r#"{{"host":"{SLICE_HOST}","keys":[{{"alg":"ed25519","id":"{}","public":"{public}","valid_from":"2000-01-01T00:00:00.000000Z"}}],"proto":"datumesh/1"}}"#,
+        k.key_id()
+    )
+    .into_bytes()
+}
+
+/// A store with the vectors' key documents and that of `SLICE_HOST`.
+pub fn slice_store(db: &TestDb) -> PgStore {
+    let s = db.store();
+    s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
+    s
+}
+
+/// A `stored` descriptor of `SLICE_HOST` with the given arguments (name, type), returning a
+/// dimensionless number; `body` tells functions with the same arguments apart.
+pub fn stored_descriptor(args: &[(&str, Type)], body: &str) -> Vec<u8> {
+    let decls: Vec<String> = args
+        .iter()
+        .map(|(n, t)| match t {
+            Type::Number => format!(r#""{n}":{{"type":"number","unit":"1","valid":false}}"#),
+            t => format!(r#""{n}":{{"type":"{}","valid":false}}"#, t.as_str()),
+        })
+        .collect();
+    let text = format!(
+        r#"{{"code":{{"body":"{body}","lang":"stored"}},"inputs":[],"signature":{{"args":{{{}}},"returns":{{"type":"number","unit":"1"}}}}}}"#,
+        decls.join(",")
+    );
+    jcs(text.as_bytes())
+}
+
+/// The function hash of descriptor bytes.
+pub fn fn_hash_of(desc: &[u8]) -> String {
+    datumesh_core::function_hash(desc).unwrap()
+}
+
+/// A cell of function `fn_name` of `SLICE_HOST` with hash `fn_hash` and the given arguments.
+pub fn slice_cell(fn_name: &str, fn_hash: &str, args: &[(&str, Scalar)]) -> datumesh_core::Cell {
+    let members: Vec<(String, Value)> = args.iter().map(|(n, v)| (n.to_string(), v.to_value())).collect();
+    let v = Value::Object(vec![
+        ("args".into(), Value::Object(members)),
+        ("fn".into(), Value::String(fn_name.into())),
+        ("fn_hash".into(), Value::String(fn_hash.into())),
+        ("ns".into(), Value::String(SLICE_HOST.into())),
+    ]);
+    datumesh_core::Cell::from_json(&v.to_jcs()).unwrap()
+}
+
+/// A scalar from its type and lexical form.
+pub fn sc(t: Type, lexical: &str) -> Scalar {
+    Scalar::from_lexical(t, lexical).unwrap()
+}
+
+/// A signed stored receipt of `cell` (no valid-time arguments) with a number `value`,
+/// recorded at `tx`, as of `asof`, issued at `asof`.
+pub fn slice_receipt(cell: &datumesh_core::Cell, value: &str, tx: &str, asof: &str) -> Vec<u8> {
+    let r = ReceiptBuilder::new()
+        .cell(cell.clone())
+        .value(sc(Type::Number, value))
+        .valid(Default::default())
+        .asof(asof)
+        .tx(tx)
+        .issued(asof)
+        .publisher(SLICE_HOST)
+        .signer_host(SLICE_HOST)
+        .licence("CC0-1.0")
+        .summary("A slice test value.")
+        .sign(&slice_key())
+        .unwrap();
+    receipt_json(&r)
+}
+
+/// Stores a receipt of `cell` (as `slice_receipt`) and records it as the cell's version at
+/// `tx`; returns its hash.
+pub fn put_member(s: &PgStore, cell: &datumesh_core::Cell, value: &str, tx: &str, asof: &str) -> String {
+    let h = s.put_receipt(&slice_receipt(cell, value, tx, asof)).unwrap();
+    s.put_version(&cell.id(), tx, &h).unwrap();
+    h
+}
+
+/// A slice object from its JSON text.
+pub fn slice(text: &str) -> datumesh_core::Slice {
+    datumesh_core::Slice::from_json(text.as_bytes()).unwrap()
+}
+
+/// Stores everything a receipt vector offers: key documents, the recompute descriptor, the
+/// input receipts (slice members included), the manifests and the receipt itself. Returns
+/// the errors of the puts that failed (what the store refused), the receipt's put last.
+pub fn put_vector_world(s: &PgStore, v: &Value) -> Vec<(String, datumesh_store::Error)> {
+    put_vector_keys(s, v);
+    let mut failed = Vec::new();
+    if let Some(rc) = v.get("recompute") {
+        if let Some(d) = rc.get("descriptor") {
+            if let Err(e) = s.put_descriptor(&d.to_jcs()) {
+                failed.push(("descriptor".to_string(), e));
+            }
+        }
+        for (h, r) in rc.get("inputs").and_then(Value::as_object).unwrap_or(&[]) {
+            if let Err(e) = s.put_receipt(r.as_str().unwrap().as_bytes()) {
+                failed.push((format!("input {h}"), e));
+            }
+        }
+        for (entry, m) in rc.get("manifests").and_then(Value::as_object).unwrap_or(&[]) {
+            if let Err(e) = s.put_manifest(m.as_str().unwrap().as_bytes()) {
+                failed.push((format!("manifest {entry}"), e));
+            }
+        }
+    }
+    if let Err(e) = s.put_receipt(&input(v)) {
+        failed.push(("receipt".to_string(), e));
+    }
+    failed
+}

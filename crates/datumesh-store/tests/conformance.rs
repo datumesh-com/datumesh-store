@@ -1,7 +1,8 @@
 //! Conformance: the core's resolver test kit passes for `PgStore` (time-aware, with the
 //! kit's default answer rule `AnswerRule::TxAndAsof`: since 0.3.0 `evaluate` answers as
 //! `stored_asof` does, so a version answers as of A only when its tx and its receipt's asof
-//! are both at or before A); every
+//! are both at or before A; since 0.3.1 with the slice checks, `Kit::slices(true)`: the
+//! store serves manifests); every
 //! receipt vector is stored exactly when it verifies (steps 1-6) against its key documents,
 //! refused with verify's code otherwise, and round-trips through the store.
 //!
@@ -35,6 +36,49 @@ fn load(db: &TestDb, fx: &Fixtures) -> PgStore {
         s.put_version(&v.cell_id, &v.tx, &v.receipt_hash).unwrap();
     }
     s
+}
+
+/// `load`, and the slice fixtures (0.3.1): their key documents, descriptors (formula
+/// descriptors with `signature.order`), receipts (citing receipts and members) and manifests.
+fn load_with_slices(db: &TestDb, fx: &Fixtures) -> PgStore {
+    let s = load(db, fx);
+    let sf = &fx.slices;
+    for (host, doc) in &sf.key_documents {
+        s.put_namespace(host, doc, VALIDATED_AT).unwrap();
+    }
+    for (h, b) in &sf.descriptors {
+        assert_eq!(&s.put_descriptor(b).unwrap(), h);
+    }
+    for (h, b) in &sf.receipts {
+        assert_eq!(&s.put_receipt(b).unwrap(), h);
+    }
+    for (e, b) in &sf.manifests {
+        assert_eq!(&s.put_manifest(b).unwrap(), e);
+    }
+    s
+}
+
+#[test]
+fn testkit_passes_time_aware_with_slices() {
+    // Time-aware, TxAndAsof (the default), and the slice checks: manifests by entry, exactly
+    // as loaded, members from the store, None for every entry not loaded.
+    let db = TestDb::migrated();
+    let kit = Kit::new().time_aware(true).slices(true);
+    assert!(!kit.fixtures().slices.manifests.is_empty());
+    if let Err(report) = kit.run(|fx| load_with_slices(&db, fx)) {
+        panic!("{report}");
+    }
+}
+
+#[test]
+fn testkit_slice_checks_fail_without_the_manifests() {
+    // Loaded as for 0.3.0 (no slice fixtures): the kit passes without the slice checks and
+    // fails with them.
+    let db = TestDb::migrated();
+    let kit = Kit::new().time_aware(true);
+    let s = load(&db, kit.fixtures());
+    assert!(kit.check(&s).is_ok());
+    assert!(Kit::new().time_aware(true).slices(true).check(&s).is_err());
 }
 
 #[test]
