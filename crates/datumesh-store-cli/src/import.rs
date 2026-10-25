@@ -6,13 +6,14 @@
 //! validated at the time of the import; first, since receipts are verified against them),
 //! its receipt, the descriptor and input receipts of its `recompute` object, its blob
 //! content, and, when the recompute descriptor is `stored`, the receipt as the cell's
-//! version at its tx. Importing what is already there changes nothing.
+//! version at its tx; since 0.3.1 also the manifests of its `recompute` object, and a valid
+//! slice vector's manifest. Importing what is already there changes nothing.
 
 use std::io::BufRead;
 use std::path::Path;
 
 use datumesh_core::json::{self, Value};
-use datumesh_core::{Descriptor, Receipt};
+use datumesh_core::{FunctionDescriptor, Receipt};
 use datumesh_store::{Error, PgStore, Resolver, Store};
 
 use crate::Fail;
@@ -26,6 +27,7 @@ struct Counts {
     computed: u64,
     namespaces: u64,
     names: u64,
+    manifests: u64,
     errors: u64,
 }
 
@@ -44,8 +46,8 @@ pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
         }
     }
     println!(
-        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} computed versions, {} namespaces, {} names; {} errors",
-        n.descriptors, n.receipts, n.blobs, n.versions, n.computed, n.namespaces, n.names, n.errors
+        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} computed versions, {} namespaces, {} names, {} manifests; {} errors",
+        n.descriptors, n.receipts, n.blobs, n.versions, n.computed, n.namespaces, n.names, n.manifests, n.errors
     );
     Ok(if n.errors == 0 { 0 } else { 1 })
 }
@@ -104,6 +106,14 @@ fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
                 put(descriptor(store, t.as_bytes(), &mut n.descriptors));
             }
         }
+        // A slice vector whose input is a manifest (an object with `members`, SPEC 11).
+        Some("slice") => {
+            if let Some(t) = str_of(v, "input") {
+                if json::parse(t.as_bytes()).is_ok_and(|x| x.get("members").is_some()) {
+                    put(manifest(store, t.as_bytes(), &mut n.manifests));
+                }
+            }
+        }
         Some("receipt") => {
             let Some(text) = str_of(v, "input") else { return };
             for (host, env) in v.get("keys").and_then(Value::as_object).unwrap_or(&[]) {
@@ -117,12 +127,17 @@ fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
             if let Some(rc) = v.get("recompute") {
                 if let Some(d) = rc.get("descriptor") {
                     let bytes = d.to_jcs();
-                    stored = Descriptor::from_json(&bytes).is_ok_and(|d| d.lang == "stored");
+                    stored = FunctionDescriptor::from_json(&bytes).is_ok_and(|d| d.lang == "stored");
                     put(descriptor(store, &bytes, &mut n.descriptors));
                 }
                 for (_, r) in rc.get("inputs").and_then(Value::as_object).unwrap_or(&[]) {
                     if let Some(t) = r.as_str() {
                         put(receipt(store, t.as_bytes(), &mut n.receipts));
+                    }
+                }
+                for (_, m) in rc.get("manifests").and_then(Value::as_object).unwrap_or(&[]) {
+                    if let Some(t) = m.as_str() {
+                        put(manifest(store, t.as_bytes(), &mut n.manifests));
                     }
                 }
             }
@@ -178,6 +193,12 @@ fn receipt(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> 
     Ok(())
 }
 
+fn manifest(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
+    store.put_manifest(bytes)?;
+    *count += 1;
+    Ok(())
+}
+
 /// put_version, where the same version already present counts as imported.
 fn version(store: &PgStore, cell_id: &str, tx: &str, hash: &str, count: &mut u64) -> Result<(), Error> {
     match store.put_version(cell_id, tx, hash) {
@@ -228,6 +249,10 @@ fn one_line(store: &PgStore, l: &[u8], n: &mut Counts) -> Result<(), String> {
         "receipt" => {
             let t = body.as_str().ok_or("receipt: expected a string")?;
             receipt(store, t.as_bytes(), &mut n.receipts).map_err(e)
+        }
+        "manifest" => {
+            let t = body.as_str().ok_or("manifest: expected a string")?;
+            manifest(store, t.as_bytes(), &mut n.manifests).map_err(e)
         }
         "blob" => {
             let b = body.as_str().and_then(unhex).ok_or("blob: expected hex")?;

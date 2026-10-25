@@ -109,6 +109,7 @@ pub fn datumesh_store::PgStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> cor
 impl datumesh_core::verify::Resolver for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::descriptor(&self, &str) -> core::option::Option<alloc::borrow::Cow<'_, [u8]>>
 pub fn datumesh_store::PgStore::evaluate(&self, &datumesh_core::model::Cell, &str) -> core::option::Option<datumesh_core::model::Scalar>
+pub fn datumesh_store::PgStore::manifest(&self, &str) -> core::option::Option<alloc::borrow::Cow<'_, [u8]>>
 pub fn datumesh_store::PgStore::receipt(&self, &str) -> core::option::Option<alloc::borrow::Cow<'_, [u8]>>
 impl datumesh_store::Store for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
@@ -119,19 +120,25 @@ pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) ->
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
+pub fn datumesh_store::PgStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
+pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub fn datumesh_store::PgStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::version_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::versions(&self, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Version>>
+pub fn datumesh_store::PgStore::versions_between(&self, &str, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub struct datumesh_store::PoolOptions
 impl datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::checkout_timeout(self, core::time::Duration) -> datumesh_store::PoolOptions
@@ -149,6 +156,19 @@ pub fn datumesh_store::PoolOptions::default() -> datumesh_store::PoolOptions
 impl core::fmt::Debug for datumesh_store::PoolOptions
 pub fn datumesh_store::PoolOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for datumesh_store::PoolOptions
+#[non_exhaustive] pub struct datumesh_store::SliceMember
+pub datumesh_store::SliceMember::receipt: alloc::vec::Vec<u8>
+pub datumesh_store::SliceMember::version: datumesh_store::Version
+impl core::clone::Clone for datumesh_store::SliceMember
+pub fn datumesh_store::SliceMember::clone(&self) -> Self
+impl core::cmp::Eq for datumesh_store::SliceMember
+impl core::cmp::PartialEq for datumesh_store::SliceMember
+pub fn datumesh_store::SliceMember::eq(&self, &Self) -> bool
+impl core::fmt::Debug for datumesh_store::SliceMember
+pub fn datumesh_store::SliceMember::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for datumesh_store::SliceMember
+pub fn datumesh_store::SliceMember::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for datumesh_store::SliceMember
 #[non_exhaustive] pub struct datumesh_store::Version
 pub datumesh_store::Version::asof: alloc::string::String
 pub datumesh_store::Version::cell_id: alloc::string::String
@@ -173,19 +193,25 @@ pub fn datumesh_store::Store::computed_asof_with_receipt(&self, &str, &str) -> d
 pub fn datumesh_store::Store::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
+pub fn datumesh_store::Store::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::Store::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
+pub fn datumesh_store::Store::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::Store::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::Store::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::Store::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::Store::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub fn datumesh_store::Store::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::Store::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::Store::version_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::Store::versions(&self, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Version>>
+pub fn datumesh_store::Store::versions_between(&self, &str, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 impl datumesh_store::Store for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
@@ -195,17 +221,23 @@ pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) ->
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
+pub fn datumesh_store::PgStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
+pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub fn datumesh_store::PgStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::version_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::versions(&self, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Version>>
+pub fn datumesh_store::PgStore::versions_between(&self, &str, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub type datumesh_store::Result<T> = core::result::Result<T, datumesh_store::Error>

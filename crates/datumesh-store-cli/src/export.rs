@@ -1,13 +1,17 @@
 //! `export`: everything as JSON lines, in an order `import` can replay: namespaces (the
-//! receipts are verified against them), descriptors, receipts, blobs, versions (per cell in
-//! tx order), computed versions (per cell, by tx and asof; since 0.2.0), name bindings (per
-//! name in tx order). One consistent snapshot (a read-only REPEATABLE READ transaction),
-//! streamed. `import` reads 0.1.x exports too (they have no computed versions).
+//! receipts are verified against them), descriptors, receipts, manifests (by entry; since
+//! 0.3.1), blobs, versions (per cell in tx order), computed versions (per cell, by tx and
+//! asof; since 0.2.0), name bindings (per name in tx order). The slice-entry lineage and the
+//! typed-argument index are not lines of their own: `put_receipt` derives them from the
+//! receipts. One consistent snapshot (a read-only REPEATABLE READ transaction), streamed.
+//! `import` reads 0.1.x, 0.2.x and 0.3.0 exports too (they have no manifests, and 0.1.x no
+//! computed versions).
 //!
 //! ```text
 //! {"namespace":{"host":"…","keydoc":"<key document JSON text>","validated_at":"…"}}
 //! {"descriptor":"<descriptor JSON text>"}
 //! {"receipt":"<receipt JSON text>"}
+//! {"manifest":"<manifest JSON text>"}
 //! {"blob":"<content, lowercase hex>"}
 //! {"version":{"cell_id":"…","receipt_hash":"…","tx":"…"}}
 //! {"computed":{"asof":"…","cell_id":"…","receipt_hash":"…","tx":"…"}}
@@ -65,6 +69,9 @@ pub(crate) fn run(url: &str) -> Result<u8, Fail> {
         line(&mut out, "descriptor", s(text(r.try_get(0)?)?))
     })?;
     each(&mut t, "SELECT bytes FROM receipts ORDER BY hash", |r| line(&mut out, "receipt", s(text(r.try_get(0)?)?)))?;
+    each(&mut t, "SELECT bytes FROM manifests ORDER BY entry", |r| {
+        line(&mut out, "manifest", s(text(r.try_get(0)?)?))
+    })?;
     each(&mut t, "SELECT bytes FROM blobs ORDER BY sha256", |r| {
         let b: Vec<u8> = r.try_get(0)?;
         line(&mut out, "blob", s(to_hex(&b)))

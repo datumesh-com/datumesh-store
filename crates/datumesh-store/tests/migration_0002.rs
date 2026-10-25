@@ -94,12 +94,13 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
     let mut c = db.client();
     at_0_1_2(&mut c);
 
-    // 0.1.2 data: every receipt vector the core accepts, generated versions of one cell
-    // (late-signed and not), and the tricky receipts.
+    // 0.1.2 data: every receipt vector the core accepts and 0.1.2 could store (no slice
+    // entries: spec-0.4.0), generated versions of one cell (late-signed and not), and the
+    // tricky receipts.
     let mut all: Vec<Receipt> = Vec::new();
     for v in vectors("receipt") {
         let b = input(&v);
-        if Receipt::from_json(&b).is_ok() {
+        if Receipt::from_json(&b).is_ok_and(|r| r.inputs().iter().all(|e| !e.starts_with("slice:"))) {
             all.push(put_0_1_2(&mut c, &b));
         }
     }
@@ -120,9 +121,9 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
     let n: i64 = c.query_one("SELECT count(*) FROM receipts", &[]).unwrap().get(0);
     assert!(n >= 20, "{n}");
 
-    // Migrate through a store, as `datumesh-store migrate` does.
+    // Migrate through a store, as `datumesh-store migrate` does (and the migrations after 2).
     let s = db.bare_store();
-    assert_eq!(migrate::apply(&s).unwrap(), [2]);
+    assert_eq!(migrate::apply(&s).unwrap(), [2, 3]);
 
     // Every stored receipt's asof is the core's.
     let rows = c

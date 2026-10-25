@@ -19,7 +19,8 @@ const TRACKING_0_3_0: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrati
     checksum text NOT NULL,
     applied_at timestamptz NOT NULL DEFAULT now()
 )";
-const RECEIPT_PUT_0_3_0: &str = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
+const RECEIPT_PUT_0_3_0: &str =
+    "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
                   VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)
                   ON CONFLICT (hash) DO NOTHING";
 const EDGES_PUT_0_3_0: &str = "INSERT INTO edges (receipt_hash, input_hash, kind)
@@ -63,7 +64,9 @@ fn typed_receipts() -> Vec<Vec<u8>> {
     let key = SigningKey::from_seed(&[11u8; 32]);
     let long = format!("-{}.{}", "9".repeat(60), "1".repeat(60));
     let mut out = Vec::new();
-    for (i, n) in ["0", "-1.5", "10", "0.000001", long.as_str(), "123456789012345678901234567890"].into_iter().enumerate() {
+    for (i, n) in
+        ["0", "-1.5", "10", "0.000001", long.as_str(), "123456789012345678901234567890"].into_iter().enumerate()
+    {
         let cell = Cell::from_json(
             format!(
                 r#"{{"args":{{"b":{{"type":"boolean","value":{}}},"blob":{{"type":"blob","value":"{}:17:text/plain"}},"d":{{"type":"date","value":"2024-02-29"}},"i":{{"type":"instant","value":"0001-01-01T00:00:00.00000{i}Z"}},"n":{{"type":"number","value":"{n}"}},"s":{{"type":"string","value":"Grüße \"{i}\" \\ 😀"}}}},"fn":"typed","fn_hash":"{}","ns":"example.org"}}"#,
@@ -123,7 +126,10 @@ fn assert_index_is_the_cores(c: &mut Client, all: &[Receipt]) {
             (row.get(0), row.get(1), row.get(2), row.get(3), row.get(4));
         let r = all.iter().find(|r| r.cell().id() == id).unwrap_or_else(|| panic!("{id}: no receipt"));
         let cell = r.cell();
-        assert_eq!((fn_hash.as_str(), ns.as_str(), f.as_str()), (cell.fn_hash.as_str(), cell.ns.as_str(), cell.fn_name.as_str()));
+        assert_eq!(
+            (fn_hash.as_str(), ns.as_str(), f.as_str()),
+            (cell.fn_hash.as_str(), cell.ns.as_str(), cell.fn_name.as_str())
+        );
         assert_eq!(nargs as usize, cell.args.len(), "{id}");
         let args = c
             .query(

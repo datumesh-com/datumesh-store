@@ -21,6 +21,13 @@
 //! `cell_dependents` of the cell with the dependents; `resolve_binding` and `resolve_name`
 //! (random name, random asof) over `NAMES` names with `BINDINGS` bindings each, alternating
 //! between the two functions (bound once, untimed, when not bound yet).
+//! Slices (0.3.1): `--slice-cells` cells of `fx_rate` with quote `SLA` (dates from 2000-01-01
+//! on) and at most 1,000 with quote `SLB`, one version each, loaded like the others; then
+//! `slice_members` of a range of 1,000 dates (bounded), of every `SLB` cell (unbounded, up
+//! to 1,000 members), of every `SLA` cell, unbounded and as a range over all their dates;
+//! `versions_between` (random cell, random range of its history, random asof); `put_manifest`
+//! of a new manifest (another range, the same members) of 1,000 and of `--slice-cells`
+//! members, and `manifest` of each. The slower ones take fewer samples (stated).
 //! Then disk use per table and `put_blob` / `blob` for sizes from 1 KiB to `--blob-max`.
 //!
 //! `bench --wait` polls until a fresh connection answers a `version_asof`, for timing a
@@ -29,7 +36,7 @@
 use std::time::{Duration, Instant};
 
 use datumesh_core::json::{self, Value};
-use datumesh_core::{Cell, Receipt, ReceiptBuilder, Scalar, SigningKey, Type};
+use datumesh_core::{Cell, Manifest, Receipt, ReceiptBuilder, Scalar, SigningKey, Slice, Type};
 use datumesh_store::{pg_unstable, PgStore, Resolver, Store};
 
 use crate::{connect, Fail};
@@ -61,6 +68,7 @@ pub(crate) struct Options {
     samples: usize,
     threads: usize,
     blob_max: usize,
+    slice_cells: usize,
     skip_load: bool,
     wait: bool,
 }
@@ -74,6 +82,7 @@ impl Options {
             samples: 10_000,
             threads: 6,
             blob_max: 64 << 20,
+            slice_cells: 100_000,
             skip_load: false,
             wait: false,
         };
@@ -89,6 +98,7 @@ impl Options {
                 "--samples" => o.samples = num(a)?.max(1),
                 "--threads" => o.threads = num(a)?.max(1),
                 "--blob-max" => o.blob_max = num(a)?,
+                "--slice-cells" => o.slice_cells = num(a)?.max(1),
                 "--skip-load" => o.skip_load = true,
                 "--wait" => o.wait = true,
                 other => return Err(format!("unknown bench option {other:?}")),
@@ -126,7 +136,17 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
             },
             crate::options()?.max_size(o.threads),
         )?;
-        load(&loader, o, per_cell, &fx_rate, &convert, &rates, &calc)?
+        let state = load(&loader, o, per_cell, &fx_rate, &convert, &rates, &calc)?;
+        let start = Instant::now();
+        let a = load_slice_cells(&loader, o.threads, &fx_rate, &rates, "SLA", o.slice_cells)?;
+        let b = load_slice_cells(&loader, o.threads, &fx_rate, &rates, "SLB", o.slice_cells.min(1000))?;
+        println!(
+            "load: {} + {} slice cells (quotes SLA, SLB), a version each, in {:.1} s",
+            a,
+            b,
+            start.elapsed().as_secs_f64()
+        );
+        state
     };
     if state.cells.is_empty() {
         return Err(Fail(1, "nothing loaded".into()));
@@ -279,9 +299,163 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         row(op, &mut t, &format!("{found} found; {NAMES} names x {BINDINGS} bindings"));
     }
 
+    slices(&measure, url, o, &fx_rate, &state, &mut rng)?;
+
     disk(url)?;
     blobs(&measure, o.blob_max, &mut rng)?;
     Ok(0)
+}
+
+/// The slice of fx_rate cells with quote `quote`, dates in `[lo..hi]` (days), or all of them.
+fn fx_slice(fx_rate: &str, quote: &str, range: Option<(i64, i64)>) -> Result<Slice, Fail> {
+    let date = match range {
+        Some((lo, hi)) => format!(r#"{{"hi":"{}","lo":"{}","type":"date"}}"#, date(hi), date(lo)),
+        None => r#""*""#.to_string(),
+    };
+    Ok(Slice::from_json(
+        format!(
+            r#"{{"args":{{"base":{{"type":"string","value":"EUR"}},"date":{date},"quote":{{"type":"string","value":"{quote}"}}}},"fn":"fx_rate","fn_hash":"{fx_rate}","ns":"rates.example.org"}}"#
+        )
+        .as_bytes(),
+    )?)
+}
+
+/// Makes the slice of one sample.
+type SliceOf<'a> = Box<dyn FnMut(&mut Rng) -> Result<Slice, Fail> + 'a>;
+
+/// The slice benchmarks (see the module docs).
+fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State, rng: &mut Rng) -> Result<(), Fail> {
+    let mut c = connect(url)?;
+    let count = |c: &mut postgres::Client, quote: &str| -> Result<usize, Fail> {
+        let n: i64 = c
+            .query_one(
+                "SELECT count(*) FROM cell_args WHERE fn_hash = $1 AND name = 'quote' AND value = $2",
+                &[&fx_rate, &quote],
+            )?
+            .get(0);
+        Ok(usize::try_from(n).unwrap_or(0))
+    };
+    let (na, nb) = (count(&mut c, "SLA")?, count(&mut c, "SLB")?);
+    if na == 0 {
+        println!("slices: no slice cells loaded");
+        return Ok(());
+    }
+    let asof = instant(T0 + HOUR);
+    let few = o.samples.min(10);
+    let some = o.samples.min(200);
+    let bounded = na.min(1000) as i64;
+    let mut timed = |op: &str, samples: usize, mut f: SliceOf<'_>| -> Result<Vec<String>, Fail> {
+        let mut t = Vec::with_capacity(samples);
+        let mut members = Vec::new();
+        let mut n = 0;
+        for _ in 0..samples {
+            let sl = f(rng)?;
+            let s = Instant::now();
+            let ms = store.slice_members(&sl, &asof)?;
+            t.push(s.elapsed());
+            n = ms.len();
+            members = ms.into_iter().map(|m| m.version.receipt_hash).collect();
+        }
+        row(op, &mut t, &format!("{n} members"));
+        Ok(members)
+    };
+    let mut first = timed(
+        "slice_members bounded",
+        some,
+        Box::new(|r: &mut Rng| {
+            let lo = r.below_i64(na as i64 - bounded + 1);
+            fx_slice(fx_rate, "SLA", Some((lo, lo + bounded - 1)))
+        }),
+    )?;
+    timed("slice_members unbounded", some, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLB", None)))?;
+    let mut all = timed("slice_members unbounded", few, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", None)))?;
+    timed("slice_members bounded", few, Box::new(|_: &mut Rng| fx_slice(fx_rate, "SLA", Some((0, na as i64 - 1)))))?;
+    let _ = nb;
+
+    // versions_between: a random cell, a random range of its history, a random asof in it.
+    let mut t = Vec::with_capacity(o.samples);
+    let mut found = 0;
+    for _ in 0..o.samples {
+        let cell = &state.cells[rng.below(state.cells.len())];
+        let span = cell.last - cell.first + HOUR;
+        let from = cell.first + rng.below_i64(span);
+        let to = from + rng.below_i64(span);
+        let at = from + rng.below_i64(to - from + HOUR);
+        let (from, to, at) = (instant(from), instant(to), instant(at));
+        let s = Instant::now();
+        let r = store.versions_between(&cell.id, &from, &to, &at);
+        t.push(s.elapsed());
+        found += r?.len();
+    }
+    row("versions_between", &mut t, &format!("{:.1} versions on average", found as f64 / o.samples.max(1) as f64));
+
+    // put_manifest: a new manifest each time (another range beyond the data, the same
+    // members), then manifest of each.
+    first.sort();
+    all.sort();
+    let mut k = 0i64;
+    for (members, samples) in [(first, some), (all, few)] {
+        let n = members.len();
+        let mut entries = Vec::with_capacity(samples);
+        let mut t = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            k += 1;
+            let m = Manifest::new(fx_slice(fx_rate, "SLA", Some((0, na as i64 + k)))?, members.clone())?;
+            let bytes = m.canonical();
+            let s = Instant::now();
+            let e = store.put_manifest(&bytes)?;
+            t.push(s.elapsed());
+            entries.push(e);
+        }
+        row("put_manifest", &mut t, &format!("{n} members, one transaction each"));
+        let mut t = Vec::with_capacity(o.samples);
+        for _ in 0..o.samples.min(samples * 20) {
+            let e = &entries[rng.below(entries.len())];
+            let s = Instant::now();
+            let got = store.manifest(e);
+            t.push(s.elapsed());
+            if got.is_none() {
+                return Err(Fail(1, format!("manifest {e} not found")));
+            }
+        }
+        row("manifest", &mut t, &format!("{n} members"));
+    }
+    Ok(())
+}
+
+/// Loads `n` fx_rate cells with quote `quote` (dates from 2000-01-01 on), one version each
+/// at T0, from `threads` threads; returns `n`.
+fn load_slice_cells(
+    store: &PgStore,
+    threads: usize,
+    fx_rate: &str,
+    key: &SigningKey,
+    quote: &str,
+    n: usize,
+) -> Result<usize, Fail> {
+    let results: Vec<Result<(), Fail>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                scope.spawn(move || -> Result<(), Fail> {
+                    let tx = instant(T0);
+                    for i in (t..n).step_by(threads) {
+                        let bytes = fx_receipt_quote(fx_rate, quote, i as i64, &tx, &tx, &format!("{i}"), key)?;
+                        let h = store.put_receipt(&bytes)?;
+                        store.put_version(&Receipt::from_json(&bytes)?.cell().id(), &tx, &h)?;
+                    }
+                    Ok(())
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(Fail(1, "a loader thread panicked".into()))))
+            .collect()
+    });
+    for r in results {
+        r?;
+    }
+    Ok(n)
 }
 
 fn key(seed: &str) -> SigningKey {
@@ -320,12 +494,23 @@ impl State {
         )? {
             let (id, first, last, bytes): (String, String, String, Vec<u8>) = (r.get(0), r.get(1), r.get(2), r.get(3));
             let receipt = Receipt::from_json(&bytes)?;
+            // The slice cells (quotes SLA, SLB) are not the benchmark's fx_rate cells.
+            if receipt.cell().args.get("quote").and_then(|a| a.scalar()).map(|s| s.lexical()) != Some("USD") {
+                continue;
+            }
             let date = receipt.cell().args.get("date").and_then(|a| a.scalar()).map(|s| s.lexical().to_string());
             let day = date.as_deref().map(day_of).unwrap_or(0);
             cells.push(CellInfo { id, day, first: micros(&first), last: micros(&last) });
         }
         cells.sort_by(|a, b| a.id.cmp(&b.id));
-        let hashes = c.query("SELECT receipt_hash FROM versions", &[])?.iter().map(|r| r.get(0)).collect();
+        let hashes = c
+            .query(
+                "SELECT receipt_hash FROM versions WHERE cell_id = ANY($1)",
+                &[&cells.iter().map(|c| c.id.clone()).collect::<Vec<String>>()],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect();
         let most_depended = c
             .query_opt("SELECT input_hash, count(*) FROM edges GROUP BY input_hash ORDER BY 2 DESC LIMIT 1", &[])?
             .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as usize));
@@ -458,10 +643,23 @@ fn load(
 
 /// A receipt of fx_rate(EUR, USD, date) with the given value at tx, as of asof.
 fn fx_receipt(fx_rate: &str, day: i64, tx: &str, asof: &str, value: &str, key: &SigningKey) -> Result<Vec<u8>, Fail> {
+    fx_receipt_quote(fx_rate, "USD", day, tx, asof, value, key)
+}
+
+/// A receipt of fx_rate(EUR, quote, date) with the given value at tx, as of asof.
+fn fx_receipt_quote(
+    fx_rate: &str,
+    quote: &str,
+    day: i64,
+    tx: &str,
+    asof: &str,
+    value: &str,
+    key: &SigningKey,
+) -> Result<Vec<u8>, Fail> {
     let d = date(day);
     let cell = Cell::from_json(
         format!(
-            r#"{{"args":{{"base":{{"type":"string","value":"EUR"}},"date":{{"type":"date","value":"{d}"}},"quote":{{"type":"string","value":"USD"}}}},"fn":"fx_rate","fn_hash":"{fx_rate}","ns":"rates.example.org"}}"#
+            r#"{{"args":{{"base":{{"type":"string","value":"EUR"}},"date":{{"type":"date","value":"{d}"}},"quote":{{"type":"string","value":"{quote}"}}}},"fn":"fx_rate","fn_hash":"{fx_rate}","ns":"rates.example.org"}}"#
         )
         .as_bytes(),
     )?;
@@ -476,7 +674,7 @@ fn fx_receipt(fx_rate: &str, day: i64, tx: &str, asof: &str, value: &str, key: &
         .publisher("rates.example.org")
         .signer_host("rates.example.org")
         .licence("CC-BY-4.0")
-        .summary(format!("1 EUR was worth {value} USD on {d}."))
+        .summary(format!("1 EUR was worth {value} {quote} on {d}."))
         .sign(key)?;
     Ok(receipt_json(&r))
 }

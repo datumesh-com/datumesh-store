@@ -15,7 +15,8 @@
 //!
 //! What is stored, and how:
 //!
-//! * Descriptors are checked by the core (`Descriptor::from_json`) and stored in canonical
+//! * Descriptors are checked by the core (`FunctionDescriptor::from_json`: since 0.3.1,
+//!   spec-0.4.0's, with `signature.order` and argument `extent`) and stored in canonical
 //!   form (JCS) under their hash. Receipts are verified (`datumesh_core::verify`, SPEC 10.1
 //!   steps 1-6) against the key document stored for their signer host, so nothing
 //!   unverified enters the store, and are stored canonical under their hash. Storing the
@@ -35,8 +36,16 @@
 //! * Answering as of A: a receipt answers as of A only when its `tx` and its `asof` are
 //!   both at or before A ([`Store::stored_asof`], and the [`Resolver`]'s `evaluate` of a
 //!   stored function; [`Store::version_asof`] looks at `tx` only).
-//! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not;
-//!   [`Store::cell_dependents`] lifts it to cells.
+//! * Lineage: `put_receipt` records an edge to each of the receipt's `inputs`, held or not:
+//!   receipt hashes ([`Store::inputs`], [`Store::dependents`]) and, since 0.3.1, slice
+//!   entries ([`Store::slice_entries`], [`Store::slice_dependents`]);
+//!   [`Store::cell_dependents`] lifts both to cells.
+//! * Slices (0.3.1, SPEC 15.13): every stored receipt's cell is indexed by its typed
+//!   arguments, so that [`Store::slice_members`] finds the members of a slice as of A with
+//!   a range scan, in key order; [`Store::versions_between`] gives a version slice.
+//!   Manifests ([`Store::put_manifest`], served by [`Resolver::manifest`]) are kept by
+//!   entry and found from each member ([`Store::member_manifests`]). A receipt citing a
+//!   slice can be stored before its manifest, and a manifest before its members.
 //! * Namespaces: a host's key document (checked as SPEC 9.2 requires), with when it was
 //!   validated. Store it before the host's receipts. Replacing it later (a key revoked or
 //!   dropped) does not touch receipts already stored: they verified when they were stored,
@@ -67,6 +76,7 @@
 use std::borrow::Cow;
 
 pub use datumesh_core::Resolver;
+use datumesh_core::Slice;
 
 mod error;
 pub mod migrate;
@@ -95,6 +105,18 @@ pub struct Version {
     pub receipt_hash: String,
     /// The receipt's `asof` (an instant; never earlier than `tx`). Since 0.2.0.
     pub asof: String,
+}
+
+/// A member of a slice ([`Store::slice_members`], [`Store::versions_between`]): a stored
+/// version and the bytes of its receipt (as [`receipt`](Resolver::receipt) returns them).
+/// Since 0.3.1.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SliceMember {
+    /// The version answering (its cell, tx, receipt hash and asof).
+    pub version: Version,
+    /// The receipt's bytes, canonical JSON.
+    pub receipt: Vec<u8>,
 }
 
 /// A name binding: from transaction time `tx` on, a fully qualified function name means the
@@ -145,13 +167,15 @@ pub struct Namespace {
 /// ```compile_fail
 /// use std::borrow::Cow;
 /// use datumesh_core::{Cell, Scalar};
-/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, Store, Version};
+/// use datumesh_core::Slice;
+/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, SliceMember, Store, Version};
 ///
 /// struct Wrapper(PgStore);
 /// impl Resolver for Wrapper {
 ///     fn descriptor(&self, h: &str) -> Option<Cow<'_, [u8]>> { self.0.descriptor(h) }
 ///     fn receipt(&self, h: &str) -> Option<Cow<'_, [u8]>> { self.0.receipt(h) }
 ///     fn evaluate(&self, c: &Cell, a: &str) -> Option<Scalar> { self.0.evaluate(c, a) }
+///     fn manifest(&self, e: &str) -> Option<Cow<'_, [u8]>> { self.0.manifest(e) }
 /// }
 /// impl Store for Wrapper {
 ///     fn put_descriptor(&self, b: &[u8]) -> Result<String> { self.0.put_descriptor(b) }
@@ -173,6 +197,12 @@ pub struct Namespace {
 ///     fn computed_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.computed_asof(c, a) }
 ///     fn stored_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.stored_asof(c, a) }
 ///     fn cell_dependents(&self, c: &str) -> Result<Vec<String>> { self.0.cell_dependents(c) }
+///     fn put_manifest(&self, b: &[u8]) -> Result<String> { self.0.put_manifest(b) }
+///     fn member_manifests(&self, r: &str) -> Result<Vec<String>> { self.0.member_manifests(r) }
+///     fn slice_entries(&self, r: &str) -> Result<Vec<String>> { self.0.slice_entries(r) }
+///     fn slice_dependents(&self, e: &str) -> Result<Vec<String>> { self.0.slice_dependents(e) }
+///     fn slice_members(&self, s: &Slice, a: &str) -> Result<Vec<SliceMember>> { self.0.slice_members(s, a) }
+///     fn versions_between(&self, c: &str, f: &str, t: &str, a: &str) -> Result<Vec<SliceMember>> { self.0.versions_between(c, f, t, a) }
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
@@ -181,7 +211,11 @@ pub trait Store: Resolver + sealed::Sealed {
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String>;
     /// Stores a receipt that verifies (SPEC 10.1 steps 1-6) against the key document stored
     /// for its signer host with [`put_namespace`](Store::put_namespace), in canonical form,
-    /// with an edge to each of its inputs; returns its hash. A receipt that does not verify
+    /// with an edge to each of its inputs; returns its hash. An input that is a slice entry
+    /// (`slice:<slice id>:<members hash>`, since 0.3.1) is recorded as such
+    /// ([`slice_entries`](Store::slice_entries)); its manifest need not be stored, before or
+    /// after (it is needed only to recompute, SPEC 10.1 step 7.5). The receipt's cell is
+    /// indexed by its typed arguments ([`slice_members`](Store::slice_members)). A receipt that does not verify
     /// is refused with `verify`'s code (no key document for the host: `E_KEY_UNAVAILABLE`).
     /// Idempotent: bytes whose canonical form is the stored copy return its hash without
     /// checking the signature again (it verified when stored), even if the key has since
@@ -202,9 +236,13 @@ pub trait Store: Resolver + sealed::Sealed {
     fn versions(&self, cell_id: &str, from: &str, to: &str) -> Result<Vec<Version>>;
     /// The cell's latest version.
     fn latest(&self, cell_id: &str) -> Result<Option<Version>>;
-    /// The stored receipts that list `receipt_hash` among their inputs, by hash.
+    /// The stored receipts that list `receipt_hash` among their inputs, by hash. Only as
+    /// an input of its own: a receipt read as a member of a slice is found through its
+    /// manifests ([`member_manifests`](Store::member_manifests), then
+    /// [`slice_dependents`](Store::slice_dependents)).
     fn dependents(&self, receipt_hash: &str) -> Result<Vec<String>>;
-    /// The inputs of a stored receipt, by hash (whether or not they are stored).
+    /// The inputs of a stored receipt that are receipt hashes (whether or not they are
+    /// stored). Its slice entries are [`slice_entries`](Store::slice_entries).
     fn inputs(&self, receipt_hash: &str) -> Result<Vec<String>>;
     /// Records a host's key document, checked as a 200 response for that host would be
     /// (SPEC 9.2, 9.3), validated at `validated_at`. Re-validation replaces the document; a
@@ -246,9 +284,52 @@ pub trait Store: Resolver + sealed::Sealed {
     /// meaning.) Since 0.2.0.
     fn stored_asof(&self, cell_id: &str, asof: &str) -> Result<Option<Version>>;
     /// The cells that read `cell_id`: the cell ids of the stored receipts that list, among
-    /// their inputs, any stored receipt of `cell_id` (lineage: edges joined to receipts).
+    /// their inputs, any stored receipt of `cell_id` (lineage: edges joined to receipts),
+    /// or (since 0.3.1) a slice entry whose stored manifest lists one as a member.
     /// Ascending, each once. Since 0.2.0.
     fn cell_dependents(&self, cell_id: &str) -> Result<Vec<String>>;
+
+    /// Stores a manifest (SPEC 15.13), `{"members": [...], "slice": {...}}`: parsed strictly
+    /// and checked by the core (`Manifest::from_json`: structure, members, their order and
+    /// limit, the slice object), kept in canonical form under its entry
+    /// `slice:<slice id>:<members hash>`, which it returns, and recorded for each member
+    /// ([`member_manifests`](Store::member_manifests)). The members need not be stored.
+    /// Idempotent; insert-only (the entry is a hash of the content, so a stored entry
+    /// always has these bytes). Served by [`manifest`](Resolver::manifest). Since 0.3.1.
+    fn put_manifest(&self, bytes: &[u8]) -> Result<String>;
+    /// The entries of the stored manifests that list `receipt_hash` among their members,
+    /// ascending: from a member, the slices it was read in (then
+    /// [`slice_dependents`](Store::slice_dependents)). Since 0.3.1.
+    fn member_manifests(&self, receipt_hash: &str) -> Result<Vec<String>>;
+    /// The slice entries among the inputs of a stored receipt, ascending. Since 0.3.1.
+    fn slice_entries(&self, receipt_hash: &str) -> Result<Vec<String>>;
+    /// The stored receipts whose inputs list the slice entry `entry`, by hash, ascending.
+    /// An entry is `slice:` and two 64-digit hashes (`E_CANON_HEX` otherwise). Since 0.3.1.
+    fn slice_dependents(&self, entry: &str) -> Result<Vec<String>>;
+    /// The members of `slice` as of `asof` (SPEC 15.13), with the stored version of each
+    /// that answers as of `asof` and its receipt's bytes.
+    ///
+    /// For a slice of cells: the cells of the slice's function (its `fn_hash`, `ns` and
+    /// `fn`, with the same argument names) whose bound arguments are the same typed scalar,
+    /// whose ranged arguments are of the range's type and within it (`lo <= v <= hi`,
+    /// inclusive, in the type's order: numbers as exact decimals, dates and instants
+    /// chronologically, strings by code point; `lo` after `hi` is empty), any value for an
+    /// open argument, and that have a stored version answering as of `asof`: as
+    /// [`stored_asof`](Store::stored_asof), the latest version with `tx <= asof` whose
+    /// receipt's `asof <= asof` (so a late-signed version is not a member's answer before
+    /// its asof, and a correction replaces a member's version from its asof on). Computed
+    /// versions are not members. In key order: by the open and ranged arguments in
+    /// ascending name order, each in its type's order (`false` before `true`; blobs as
+    /// text); the cell id last, for two cells whose key arguments are of different types.
+    ///
+    /// For a version slice `{"cell", "from", "to"}`: [`versions_between`](Store::versions_between)
+    /// of its cell. Empty when nothing matches. Since 0.3.1.
+    fn slice_members(&self, slice: &Slice, asof: &str) -> Result<Vec<SliceMember>>;
+    /// The stored versions of `cell_id` with `from <= tx <= to` that answer as of `asof`
+    /// (`tx <= asof` and the receipt's `asof <= asof`), ascending by tx, each with its
+    /// receipt's bytes: SPEC 15.13's version slice. Empty when `from` is after `to`. Since
+    /// 0.3.1.
+    fn versions_between(&self, cell_id: &str, from: &str, to: &str, asof: &str) -> Result<Vec<SliceMember>>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

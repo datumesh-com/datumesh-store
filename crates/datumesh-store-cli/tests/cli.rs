@@ -92,6 +92,40 @@ fn spec_vectors() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/vectors")
 }
 
+/// A directory of the specification vectors `<group>/<file>` for which `keep` holds.
+///
+/// spec-0.4.0's slice-lineage receipt vectors (`receipt/slice-*`) offer other key
+/// documents for rates.example.org, calc.example.net and calendars.example.org than the
+/// earlier vectors. A store keeps one key document per host (the last validated), and an
+/// export carries only that one, so an export of a store holding receipts verified under a
+/// replaced document cannot be imported again (`E_KEY_UNKNOWN`). The round-trip tests use
+/// sets whose key documents agree.
+fn vector_set(name: &str, keep: fn(&str, &str) -> bool) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vectors-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for group in std::fs::read_dir(spec_vectors()).unwrap() {
+        let group = group.unwrap().path();
+        if !group.is_dir() {
+            continue;
+        }
+        let g = group.file_name().unwrap().to_str().unwrap().to_string();
+        for f in std::fs::read_dir(&group).unwrap() {
+            let f = f.unwrap().path();
+            let file = f.file_name().unwrap().to_str().unwrap().to_string();
+            if keep(&g, &file) {
+                std::fs::create_dir_all(dir.join(&g)).unwrap();
+                std::fs::copy(&f, dir.join(&g).join(&file)).unwrap();
+            }
+        }
+    }
+    dir
+}
+
+/// Every vector but the slice-lineage receipt vectors: the key documents of spec-0.3.0.
+fn vectors_without_slices() -> PathBuf {
+    vector_set("no-slices", |g, f| !(g == "receipt" && f.starts_with("slice-")))
+}
+
 #[test]
 fn migrate_from_empty_rerun_and_check() {
     let db = Db::new();
@@ -123,7 +157,7 @@ fn check_on_an_empty_database_reports_everything_missing() {
 fn import_vectors_export_and_round_trip() {
     let db = Db::new();
     ok(&db.run(&["migrate"]));
-    let dir = spec_vectors();
+    let dir = vectors_without_slices();
     let out = ok(&db.run(&["import", dir.to_str().unwrap()]));
     assert!(out.contains("receipts"), "{out}");
     let export1 = ok(&db.run(&["export"]));
@@ -323,7 +357,7 @@ fn every_command_works_over_tls_with_the_ca() {
 fn export_and_import_keep_computed_versions() {
     let db = Db::new();
     ok(&db.run(&["migrate"]));
-    let dir = spec_vectors();
+    let dir = vectors_without_slices();
     ok(&db.run(&["import", dir.to_str().unwrap()]));
     // Every stored receipt as a computed version of its cell (one per key), in raw SQL.
     let n = db
@@ -389,7 +423,8 @@ fn import_of_a_0_1_2_export() {
 fn export_and_import_keep_manifests_and_slice_lineage() {
     let db = Db::new();
     ok(&db.run(&["migrate"]));
-    let dir = spec_vectors();
+    // The slice-lineage receipt vectors (their key documents agree) and the manifests.
+    let dir = vector_set("slices", |g, f| (g == "receipt" && f.starts_with("slice-")) || g == "slice");
     let out = ok(&db.run(&["import", dir.to_str().unwrap()]));
     assert!(out.contains("manifests"), "{out}");
     let export1 = ok(&db.run(&["export"]));
@@ -438,7 +473,10 @@ fn import_of_a_0_3_0_export() {
     assert_eq!(ok(&db.run(&["export"])), text(&fixture));
     let unindexed: i64 = db
         .client()
-        .query_one("SELECT count(*) FROM receipts r WHERE NOT EXISTS (SELECT 1 FROM cells c WHERE c.cell_id = r.cell_id)", &[])
+        .query_one(
+            "SELECT count(*) FROM receipts r WHERE NOT EXISTS (SELECT 1 FROM cells c WHERE c.cell_id = r.cell_id)",
+            &[],
+        )
         .unwrap()
         .get(0);
     assert_eq!(unindexed, 0);

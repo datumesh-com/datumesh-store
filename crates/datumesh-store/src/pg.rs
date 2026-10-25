@@ -6,10 +6,12 @@ use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::sql::Q;
-use crate::{Binding, Namespace, Store, Version};
-use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
+use crate::{Binding, Namespace, SliceMember, Store, Version};
+use datumesh_core::json::Value;
+use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_input_entry, check_instant};
 use datumesh_core::{
-    json, keys_from_response, sha256_hex, verify, Cell, Descriptor, ErrorCode, Keys, Receipt, Resolver, Scalar,
+    json, keys_from_response, sha256_hex, verify, Cell, ErrorCode, FunctionDescriptor, Keys, Manifest, Receipt,
+    Resolver, Scalar, Slice,
 };
 
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
@@ -35,6 +37,16 @@ fn is_hash(s: &str) -> bool {
 
 fn is_instant(s: &str) -> bool {
     check_instant(s, "$").is_ok()
+}
+
+/// A slice entry, `slice:<slice id>:<members hash>` (`E_CANON_HEX` otherwise, as SPEC 10.1
+/// step 3 says of a malformed `inputs` entry).
+fn check_entry(entry: &str, path: &str) -> Result<()> {
+    check_input_entry(entry, path)?;
+    if !entry.starts_with("slice:") {
+        return Err(Error::Invalid(datumesh_core::Error::new(ErrorCode::CanonHex, path, "not a slice entry")));
+    }
+    Ok(())
 }
 
 impl PgStore {
@@ -144,6 +156,11 @@ fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
     })
 }
 
+/// A member from a row of (tx, receipt_hash, asof, bytes, ...).
+fn member_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
+    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
+}
+
 fn get_bytes(c: &mut Conn, q: Q, key: &str) -> Result<Option<Vec<u8>>> {
     let st = c.stmt(q)?;
     let row = c.client.query_opt(&st, &[&key]).db()?;
@@ -174,6 +191,15 @@ impl Resolver for PgStore {
         self.resolve("receipt", |c| get_bytes(c, Q::ReceiptGet, hash)).map(Cow::Owned)
     }
 
+    /// The stored manifest of slice entry `entry` ([`Store::put_manifest`]), its canonical
+    /// form; `None` when there is none, or `entry` is not an entry (since 0.3.1).
+    fn manifest(&self, entry: &str) -> Option<Cow<'_, [u8]>> {
+        if check_entry(entry, "$").is_err() {
+            return None;
+        }
+        self.resolve("manifest", |c| get_bytes(c, Q::ManifestGet, entry)).map(Cow::Owned)
+    }
+
     /// `Some` only for a `stored` function (descriptor `code.lang` is `stored`, and the store
     /// has the descriptor): the value of the receipt of the version that answers as of
     /// `asof`, [`stored_asof`](Store::stored_asof)'s: the latest version (by tx) with `tx <=
@@ -187,7 +213,7 @@ impl Resolver for PgStore {
         }
         self.resolve("evaluate", |c| {
             let Some(desc) = get_bytes(c, Q::DescriptorGet, &cell.fn_hash)? else { return Ok(None) };
-            match Descriptor::from_json(&desc) {
+            match FunctionDescriptor::from_json(&desc) {
                 Ok(d) if d.lang == "stored" => {}
                 Ok(_) => return Ok(None),
                 Err(e) => {
@@ -211,7 +237,8 @@ impl Resolver for PgStore {
 
 impl Store for PgStore {
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
-        let d = Descriptor::from_json(bytes)?;
+        // spec-0.4.0's descriptor: `signature.order` and argument `extent` allowed.
+        let d = FunctionDescriptor::from_json(bytes)?;
         let hash = d.hash();
         let canonical = d.canonical();
         self.run("put_descriptor", |c| {
@@ -231,12 +258,15 @@ impl Store for PgStore {
         let hash = r.hash().to_string();
         let cell_id = r.cell().id();
         let host = r.signer_host().to_string();
-        let inputs: Vec<String> = r.inputs().to_vec();
+        // Receipt hashes are edges; slice entries (spec-0.4.0) slice edges.
+        let (entries, inputs): (Vec<String>, Vec<String>) =
+            r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
         self.run("put_receipt", |c| {
             let ns = c.stmt(Q::NamespaceGet)?;
             let put = c.stmt(Q::ReceiptPut)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let edges = c.stmt(Q::EdgesPut)?;
+            let slice_edges = c.stmt(Q::SliceEdgesPut)?;
             let mut t = c.client.transaction().db()?;
             // Idempotent: the very receipt already stored verified when it was stored, and
             // the stored copy is unchanged, so it is not checked again (even if its key has
@@ -272,6 +302,9 @@ impl Store for PgStore {
             }
             if !inputs.is_empty() {
                 t.execute(&edges, &[&hash, &inputs]).db()?;
+            }
+            if !entries.is_empty() {
+                t.execute(&slice_edges, &[&hash, &entries]).db()?;
             }
             t.commit().db()?;
             Ok(())
@@ -512,6 +545,74 @@ impl Store for PgStore {
             .map(|(v, b)| (v, Cow::Owned(b))))
     }
 
+    fn put_manifest(&self, bytes: &[u8]) -> Result<String> {
+        let m = Manifest::from_json(bytes)?;
+        let entry = m.entry();
+        let canonical = m.canonical();
+        let members = m.members();
+        let n = i32::try_from(members.len()).unwrap_or(i32::MAX);
+        self.run("put_manifest", |c| {
+            let put = c.stmt(Q::ManifestPut)?;
+            let put_members = c.stmt(Q::ManifestMembersPut)?;
+            let mut t = c.client.transaction().db()?;
+            // The entry hashes the content: a stored entry has these very bytes. A concurrent
+            // insert of it waits for the other; if that one committed, nothing is inserted
+            // here, members included (it inserted them).
+            let inserted = t
+                .execute(&put, &[&entry, &m.slice().id(), &m.members_hash(), &m.slice().fn_hash(), &n, &canonical])
+                .db()?;
+            if inserted == 1 && !members.is_empty() {
+                t.execute(&put_members, &[&entry, &members]).db()?;
+            }
+            t.commit().db()?;
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", entry = %entry, members = n, "put_manifest");
+        Ok(entry)
+    }
+
+    fn member_manifests(&self, receipt_hash: &str) -> Result<Vec<String>> {
+        check_hex(receipt_hash, 64, "receipt_hash")?;
+        self.run("member_manifests", |c| get_strings(c, Q::MemberManifests, receipt_hash))
+    }
+
+    fn slice_entries(&self, receipt_hash: &str) -> Result<Vec<String>> {
+        check_hex(receipt_hash, 64, "receipt_hash")?;
+        self.run("slice_entries", |c| get_strings(c, Q::SliceEntries, receipt_hash))
+    }
+
+    fn slice_dependents(&self, entry: &str) -> Result<Vec<String>> {
+        check_entry(entry, "entry")?;
+        self.run("slice_dependents", |c| get_strings(c, Q::SliceDependents, entry))
+    }
+
+    fn slice_members(&self, slice: &Slice, asof: &str) -> Result<Vec<SliceMember>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if slice.is_version_slice() {
+            let (Some(cell), Some(from), Some(to)) =
+                (v.get("cell"), v.get("from").and_then(Value::as_str), v.get("to").and_then(Value::as_str))
+            else {
+                return Err(Error::Invalid(datumesh_core::Error::new(ErrorCode::Schema, "$", "not a version slice")));
+            };
+            return self.versions_between(&sha256_hex(&cell.to_jcs()), from, to, asof);
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_members", |c| pattern.members(c, asof))
+    }
+
+    fn versions_between(&self, cell_id: &str, from: &str, to: &str, asof: &str) -> Result<Vec<SliceMember>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(from, "from")?;
+        check_instant(to, "to")?;
+        check_instant(asof, "asof")?;
+        self.run("versions_between", |c| {
+            let st = c.stmt(Q::VersionsBetween)?;
+            let rows = c.client.query(&st, &[&cell_id, &from, &to, &asof]).db()?;
+            rows.iter().map(|r| member_row(r, cell_id)).collect()
+        })
+    }
+
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {
         check_function_name(fn_name, "fn_name")?;
         check_instant(asof, "asof")?;
@@ -533,5 +634,225 @@ impl Store for PgStore {
                 None => None,
             })
         })
+    }
+}
+
+/// How a slice of cells constrains one argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Open,
+    Value,
+    Range,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Open => "open",
+            Kind::Value => "value",
+            Kind::Range => "range",
+        }
+    }
+}
+
+/// One argument of a slice of cells: its name, how it is constrained, and for a bound one
+/// its type and lexical form (`lo` = `hi`), for a ranged one the range's type and ends.
+struct Constraint {
+    name: String,
+    kind: Kind,
+    ty: String,
+    lo: String,
+    hi: String,
+}
+
+/// A slice of cells (SPEC 4.4) as the member query takes it.
+struct Pattern {
+    fn_hash: String,
+    ns: String,
+    fn_name: String,
+    args: Vec<Constraint>,
+}
+
+fn malformed(what: &str) -> Error {
+    Error::Invalid(datumesh_core::Error::new(ErrorCode::Schema, "$", format!("not a slice object: {what}")))
+}
+
+impl Pattern {
+    /// From the JSON form of a checked slice object of cells (`Slice::to_value`).
+    fn of(v: &Value) -> Result<Pattern> {
+        let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string).ok_or_else(|| malformed(k));
+        let mut args = Vec::new();
+        for (name, a) in v.get("args").and_then(Value::as_object).ok_or_else(|| malformed("args"))? {
+            let text = |k: &str| match a.get(k) {
+                Some(Value::String(x)) => Ok(x.clone()),
+                Some(Value::Bool(b)) => Ok(b.to_string()),
+                _ => Err(malformed(k)),
+            };
+            let c = match a {
+                Value::String(x) if x == "*" => Constraint {
+                    name: name.clone(),
+                    kind: Kind::Open,
+                    ty: String::new(),
+                    lo: String::new(),
+                    hi: String::new(),
+                },
+                Value::Object(m) if m.iter().any(|(k, _)| k == "lo") => Constraint {
+                    name: name.clone(),
+                    kind: Kind::Range,
+                    ty: text("type")?,
+                    lo: text("lo")?,
+                    hi: text("hi")?,
+                },
+                _ => {
+                    let value = text("value")?;
+                    Constraint {
+                        name: name.clone(),
+                        kind: Kind::Value,
+                        ty: text("type")?,
+                        lo: value.clone(),
+                        hi: value,
+                    }
+                }
+            };
+            args.push(c);
+        }
+        args.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(Pattern { fn_hash: s("fn_hash")?, ns: s("ns")?, fn_name: s("fn")?, args })
+    }
+
+    /// The members as of `asof`, in key order.
+    fn members(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceMember>> {
+        let col = |f: fn(&Constraint) -> &str| -> Vec<String> { self.args.iter().map(|a| f(a).to_string()).collect() };
+        let names = col(|a| a.name.as_str());
+        let kinds = col(|a| a.kind.as_str());
+        let types = col(|a| a.ty.as_str());
+        let los = col(|a| a.lo.as_str());
+        let his = col(|a| a.hi.as_str());
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        // The candidates: the bound or ranged argument holding the fewest cells (probed when
+        // there are several), else every cell of the function.
+        let constrained: Vec<&Constraint> = self.args.iter().filter(|a| a.kind != Kind::Open).collect();
+        let drive = match constrained.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            several => {
+                let mut best: Option<(i64, &Constraint)> = None;
+                for a in several {
+                    let q = if a.ty == "number" { Q::SliceProbeNum } else { Q::SliceProbeText };
+                    let st = c.stmt(q)?;
+                    let n: i64 = c
+                        .client
+                        .query_one(&st, &[&self.fn_hash, &a.name, &a.ty, &a.lo, &a.hi])
+                        .db()?
+                        .try_get(0)
+                        .db()?;
+                    if best.is_none_or(|(m, _)| n < m) {
+                        best = Some((n, a));
+                    }
+                }
+                best.map(|(_, a)| a)
+            }
+        };
+        let (q, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::SliceMembersAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::SliceMembersNum } else { Q::SliceMembersText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        let st = c.stmt(q)?;
+        let rows = c
+            .client
+            .query(
+                &st,
+                &[
+                    &self.fn_hash,
+                    &self.ns,
+                    &self.fn_name,
+                    &nargs,
+                    &asof,
+                    &names,
+                    &kinds,
+                    &types,
+                    &los,
+                    &his,
+                    &keys,
+                    &d_name,
+                    &d_ty,
+                    &d_lo,
+                    &d_hi,
+                ],
+            )
+            .db()?;
+        let mut out: Vec<(Vec<String>, SliceMember)> = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let cell_id: String = r.try_get(4).db()?;
+            let key: Vec<String> = r.try_get(5).db()?;
+            out.push((key, member_row(r, &cell_id)?));
+        }
+        out.sort_by(|(a, ma), (b, mb)| cmp_keys(a, b).then_with(|| ma.version.cell_id.cmp(&mb.version.cell_id)));
+        Ok(out.into_iter().map(|(_, m)| m).collect())
+    }
+}
+
+/// Key tuples of `type:value` items, compared item by item in each type's order (SPEC
+/// 15.13): numbers numerically, everything else by its lexical form as bytes (dates and
+/// instants are fixed width, so chronologically; strings by code point; `false` before
+/// `true`; blobs as text). Items of different types (cells of one function hash whose
+/// receipts disagree on an argument's type) by type name.
+fn cmp_keys(a: &[String], b: &[String]) -> std::cmp::Ordering {
+    for (x, y) in a.iter().zip(b) {
+        let (tx, vx) = x.split_once(':').unwrap_or(("", x));
+        let (ty, vy) = y.split_once(':').unwrap_or(("", y));
+        let o = tx.cmp(ty).then_with(|| if tx == "number" { cmp_decimal(vx, vy) } else { vx.cmp(vy) });
+        if o.is_ne() {
+            return o;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+/// Two numbers in canonical form (SPEC 3.1) compared as decimals.
+pub(crate) fn cmp_decimal(a: &str, b: &str) -> std::cmp::Ordering {
+    let (na, ma) = a.strip_prefix('-').map_or((false, a), |m| (true, m));
+    let (nb, mb) = b.strip_prefix('-').map_or((false, b), |m| (true, m));
+    let magnitude = || {
+        let (ia, fa) = ma.split_once('.').unwrap_or((ma, ""));
+        let (ib, fb) = mb.split_once('.').unwrap_or((mb, ""));
+        // No leading zeros: the longer integer part is the greater; no trailing zeros: the
+        // fractions compare as text.
+        ia.len().cmp(&ib.len()).then_with(|| ia.cmp(ib)).then_with(|| fa.cmp(fb))
+    };
+    match (na, nb) {
+        (false, true) => std::cmp::Ordering::Greater,
+        (true, false) => std::cmp::Ordering::Less,
+        (false, false) => magnitude(),
+        (true, true) => magnitude().reverse(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cmp_decimal;
+    use std::cmp::Ordering::{Equal, Greater, Less};
+
+    #[test]
+    fn decimals_compare_numerically() {
+        for (a, b, o) in [
+            ("9", "10", Less),
+            ("-1.5", "-1", Less),
+            ("-1", "-1.5", Greater),
+            ("0", "-0.001", Greater),
+            ("0.05", "0.5", Less),
+            ("0.5", "0.51", Less),
+            ("10.5", "9.75", Greater),
+            ("-10", "-9", Less),
+            ("123", "123", Equal),
+            ("-0.1", "0", Less),
+            ("1", "0.999999", Greater),
+        ] {
+            assert_eq!(cmp_decimal(a, b), o, "{a} {b}");
+        }
     }
 }

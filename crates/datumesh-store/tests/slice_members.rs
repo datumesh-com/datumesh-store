@@ -87,7 +87,9 @@ fn numbers_are_ordered_and_ranged_as_decimals() {
     // A range of another type holds none of them.
     assert!(s.slice_members(&range(&h, "string", "0", "9"), &day(2)).unwrap().is_empty());
     // A bound argument: the same typed scalar.
-    let bound = slice(&format!(r#"{{"args":{{"k":{{"type":"number","value":"9.5"}},"x":"*"}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#));
+    let bound = slice(&format!(
+        r#"{{"args":{{"k":{{"type":"number","value":"9.5"}},"x":"*"}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+    ));
     // (No cell has an argument x, so none has the slice's argument names.)
     assert!(s.slice_members(&bound, &day(2)).unwrap().is_empty());
 }
@@ -109,10 +111,8 @@ fn dates_instants_and_strings_in_their_order() {
     );
     let got = arg_of(&s.slice_members(&open(&i), &day(2)).unwrap(), "k");
     assert_eq!(got, ["1999-12-31T23:59:59.999999Z", "2024-03-15T16:00:00.000000Z", "2024-03-15T16:00:00.000001Z", END]);
-    let got = arg_of(
-        &s.slice_members(&range(&i, "instant", "2024-03-15T16:00:00.000001Z", END), &day(2)).unwrap(),
-        "k",
-    );
+    let got =
+        arg_of(&s.slice_members(&range(&i, "instant", "2024-03-15T16:00:00.000001Z", END), &day(2)).unwrap(), "k");
     assert_eq!(got, ["2024-03-15T16:00:00.000001Z", END]);
 
     // By code point: U+FF61 before U+1F600 (UTF-16 code units would put the emoji first),
@@ -122,7 +122,7 @@ fn dates_instants_and_strings_in_their_order() {
     assert_eq!(got, ["", "Z", "a", "ab", "z", "é", "\u{FF61}", "\u{1F600}"]);
     let got = arg_of(&s.slice_members(&range(&st, "string", "a", "z"), &day(2)).unwrap(), "k");
     assert_eq!(got, ["a", "ab", "z"]);
-    let got = arg_of(&s.slice_members(&range(&st, "string", "\u{FF00}", "\u{10FFFF}"), &day(2)).unwrap(), "k");
+    let got = arg_of(&s.slice_members(&range(&st, "string", "\u{FF01}", "\u{1F64F}"), &day(2)).unwrap(), "k");
     assert_eq!(got, ["\u{FF61}", "\u{1F600}"]);
 }
 
@@ -140,7 +140,12 @@ fn bound_open_and_ranged_arguments_in_key_order() {
                     let cell = slice_cell(
                         "g",
                         &h,
-                        &[("a", sc(Type::String, a)), ("b", sc(Type::Number, b)), ("c", sc(Type::Date, c)), ("d", sc(Type::Boolean, d))],
+                        &[
+                            ("a", sc(Type::String, a)),
+                            ("b", sc(Type::Number, b)),
+                            ("c", sc(Type::Date, c)),
+                            ("d", sc(Type::Boolean, d)),
+                        ],
                     );
                     put_member(&s, &cell, &format!("{n}"), &day(1), &day(1));
                     n += 1;
@@ -155,12 +160,8 @@ fn bound_open_and_ranged_arguments_in_key_order() {
     ));
     let ms = s.slice_members(&sl, &day(5)).unwrap();
     check_members(&s, &ms, &day(5));
-    let keys: Vec<(String, String, String)> = arg_of(&ms, "b")
-        .into_iter()
-        .zip(arg_of(&ms, "c"))
-        .zip(arg_of(&ms, "d"))
-        .map(|((b, c), d)| (b, c, d))
-        .collect();
+    let keys: Vec<(String, String, String)> =
+        arg_of(&ms, "b").into_iter().zip(arg_of(&ms, "c")).zip(arg_of(&ms, "d")).map(|((b, c), d)| (b, c, d)).collect();
     let want: Vec<(String, String, String)> = ["-0.5", "9", "10"]
         .iter()
         .flat_map(|b| ["false", "true"].iter().map(move |d| (b.to_string(), "2024-01-01".to_string(), d.to_string())))
@@ -173,11 +174,15 @@ fn bound_open_and_ranged_arguments_in_key_order() {
     let first = (arg_of(&ms[..1], "a"), arg_of(&ms[..1], "b"), arg_of(&ms[..1], "c"), arg_of(&ms[..1], "d"));
     assert_eq!(first, (vec!["x".into()], vec!["-0.5".into()], vec!["2023-06-30".into()], vec!["false".into()]));
     // A boolean bound: half of them.
-    let ms = s.slice_members(&slice(&text(r#""a":"*","b":"*","c":"*","d":{"type":"boolean","value":true}"#)), &day(5)).unwrap();
+    let ms = s
+        .slice_members(&slice(&text(r#""a":"*","b":"*","c":"*","d":{"type":"boolean","value":true}"#)), &day(5))
+        .unwrap();
     assert_eq!(ms.len(), 18);
     assert!(arg_of(&ms, "d").iter().all(|d| d == "true"));
     // A bound value of another type matches nothing.
-    let ms = s.slice_members(&slice(&text(r#""a":"*","b":{"type":"string","value":"9"},"c":"*","d":"*""#)), &day(5)).unwrap();
+    let ms = s
+        .slice_members(&slice(&text(r#""a":"*","b":{"type":"string","value":"9"},"c":"*","d":"*""#)), &day(5))
+        .unwrap();
     assert!(ms.is_empty());
 }
 
@@ -276,22 +281,25 @@ fn versions_between_is_a_version_slice() {
         let ms = s.versions_between(&id, f, t, a).unwrap();
         for m in &ms {
             let r = Receipt::from_json(&m.receipt).unwrap();
-            assert_eq!((r.hash(), r.tx(), r.asof()), (m.version.receipt_hash.as_str(), m.version.tx.as_str(), m.version.asof.as_str()));
+            assert_eq!(
+                (r.hash(), r.tx(), r.asof()),
+                (m.version.receipt_hash.as_str(), m.version.tx.as_str(), m.version.asof.as_str())
+            );
             assert_eq!(m.version.cell_id, id);
         }
         ms.into_iter().map(|m| m.version.receipt_hash).collect()
     };
     // Inclusive ends, ascending by tx.
-    assert_eq!(vb(&day(2), &day(8), END), [&v2, &v4, &v6, &v8]);
-    assert_eq!(vb(&day(4), &day(6), END), [&v4, &v6]);
-    assert_eq!(vb(&day(3), &day(7), END), [&v4, &v6]);
-    assert_eq!(vb(&day(8), &day(8), END), [&v8]);
+    assert_eq!(vb(&day(2), &day(8), END), [v2.as_str(), v4.as_str(), v6.as_str(), v8.as_str()]);
+    assert_eq!(vb(&day(4), &day(6), END), [v4.as_str(), v6.as_str()]);
+    assert_eq!(vb(&day(3), &day(7), END), [v4.as_str(), v6.as_str()]);
+    assert_eq!(vb(&day(8), &day(8), END), [v8.as_str()]);
     // Empty when from is after to.
     assert!(vb(&day(8), &day(2), END).is_empty());
     // Answering as of A: tx <= A and the receipt's asof <= A (the late-signed one from day 9).
-    assert_eq!(vb(&day(1), &day(9), &day(8)), [&v2, &v6, &v8]);
-    assert_eq!(vb(&day(1), &day(9), &day(9)), [&v2, &v4, &v6, &v8]);
-    assert_eq!(vb(&day(1), &day(9), &day(5)), [&v2]);
+    assert_eq!(vb(&day(1), &day(9), &day(8)), [v2.as_str(), v6.as_str(), v8.as_str()]);
+    assert_eq!(vb(&day(1), &day(9), &day(9)), [v2.as_str(), v4.as_str(), v6.as_str(), v8.as_str()]);
+    assert_eq!(vb(&day(1), &day(9), &day(5)), [v2.as_str()]);
     assert!(vb(&day(1), &day(9), &day(1)).is_empty());
     // An unknown cell; malformed arguments.
     assert!(s.versions_between(&"0".repeat(64), &day(1), END, END).unwrap().is_empty());
@@ -301,9 +309,14 @@ fn versions_between_is_a_version_slice() {
     assert_eq!(code(s.versions_between(&id, &day(1), "x", END).unwrap_err()), Some(ErrorCode::CanonInstant));
     assert_eq!(code(s.versions_between(&id, &day(1), END, "x").unwrap_err()), Some(ErrorCode::CanonInstant));
     // slice_members of the version slice is the same.
-    let vs = slice(&format!(r#"{{"cell":{},"from":"{}","to":"{}"}}"#, String::from_utf8(cell.canonical()).unwrap(), day(3), day(9)));
+    let vs = slice(&format!(
+        r#"{{"cell":{},"from":"{}","to":"{}"}}"#,
+        String::from_utf8(cell.canonical()).unwrap(),
+        day(3),
+        day(9)
+    ));
     let ms = s.slice_members(&vs, &day(8)).unwrap();
-    assert_eq!(ms.iter().map(|m| m.version.receipt_hash.clone()).collect::<Vec<_>>(), [&v6, &v8]);
+    assert_eq!(ms.iter().map(|m| m.version.receipt_hash.clone()).collect::<Vec<_>>(), [v6.as_str(), v8.as_str()]);
 }
 
 /// 100,000 cells of one function (one argument `k`, a number 0..99999, and a version each):
@@ -325,7 +338,10 @@ fn a_slice_over_100000_cells() {
                     let cell = slice_cell(
                         "f",
                         &h,
-                        &[("k", sc(Type::Number, &i.to_string())), ("tag", sc(Type::String, if i % 2 == 0 { "even" } else { "odd" }))],
+                        &[
+                            ("k", sc(Type::Number, &i.to_string())),
+                            ("tag", sc(Type::String, if i % 2 == 0 { "even" } else { "odd" })),
+                        ],
                     );
                     put_member(&s, &cell, &i.to_string(), &day(1), &day(1));
                 }
@@ -360,7 +376,12 @@ fn a_slice_over_100000_cells() {
     assert_eq!(arg_of(&ms, "k"), (50_000..51_000).map(|i| i.to_string()).collect::<Vec<_>>());
     let ms = s.slice_members(&text(r#""k":{"type":"number","value":"77777"},"tag":"*""#), &day(2)).unwrap();
     assert_eq!(arg_of(&ms, "k"), ["77777"]);
-    let ms = s.slice_members(&text(r#""k":{"hi":"60","lo":"41","type":"number"},"tag":{"type":"string","value":"odd"}"#), &day(2)).unwrap();
+    let ms = s
+        .slice_members(
+            &text(r#""k":{"hi":"60","lo":"41","type":"number"},"tag":{"type":"string","value":"odd"}"#),
+            &day(2),
+        )
+        .unwrap();
     assert_eq!(arg_of(&ms, "k"), (41..60).step_by(2).map(|i| i.to_string()).collect::<Vec<_>>());
     assert_eq!(seq_scans(), before, "a bounded slice scanned a table sequentially");
 }

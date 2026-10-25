@@ -27,7 +27,7 @@ commands:
                      (\"-\" or nothing: JSON lines on stdin)
   export             write everything as JSON lines to stdout
   bench [--cells N] [--versions N] [--dependents N] [--samples N] [--threads N]
-        [--blob-max BYTES] [--skip-load]
+        [--blob-max BYTES] [--slice-cells N] [--skip-load]
                      load and time the store (see README)
   bench --wait       wait until the database answers a version_asof; print the time
 

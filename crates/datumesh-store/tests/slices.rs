@@ -57,18 +57,15 @@ fn with_value<'a>(store: &'a PgStore, v: &Value) -> WithValue<'a> {
     WithValue {
         store,
         value: rc.and_then(|r| r.get("value")).map(|x| Scalar::from_json(&x.to_jcs()).unwrap()),
-        lineage: rc
-            .and_then(|r| r.get("lineage"))
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()),
+        lineage: match rc.and_then(|r| r.get("lineage")) {
+            Some(Value::Array(a)) => Some(a.iter().filter_map(Value::as_str).map(String::from).collect()),
+            _ => None,
+        },
     }
 }
 
 fn slice_vectors(group: &str) -> Vec<Value> {
-    vectors(group)
-        .into_iter()
-        .filter(|v| str_of(v, "kind") == "receipt" && str_of(v, "id").contains("slice"))
-        .collect()
+    vectors(group).into_iter().filter(|v| str_of(v, "kind") == "receipt" && str_of(v, "id").contains("slice")).collect()
 }
 
 fn entries(r: &Receipt) -> Vec<String> {
@@ -97,7 +94,9 @@ fn slice_lineage_vectors_verify_through_the_store() {
         assert_eq!(&*back, jcs(&bytes).as_slice(), "{id}");
         assert_eq!(Receipt::from_json(&back).unwrap(), r, "{id}");
 
-        let out = verify(&bytes, &keys(v), Some(&with_value(&s, v)), None);
+        // Through the store when the vector recomputes; a signed-only vector without it.
+        let resolver = with_value(&s, v);
+        let out = verify(&bytes, &keys(v), v.get("recompute").map(|_| &resolver as &dyn Resolver), None);
         let level = match str_of(v, "level") {
             "recomputed" => Level::Recomputed,
             _ => Level::Signed,
@@ -151,13 +150,13 @@ fn slice_entries_are_recorded_and_receipt_edges_unchanged() {
     assert_eq!(h, r.hash());
     assert_eq!(s.slice_entries(&h).unwrap(), entries(&r));
     for e in entries(&r) {
-        assert_eq!(s.slice_dependents(&e).unwrap(), [h.clone()]);
+        assert_eq!(s.slice_dependents(&e).unwrap(), std::slice::from_ref(&h));
         assert_eq!(s.manifest(&e), None);
     }
     // The receipt-hash edges are as before: receipt hashes only.
     assert_eq!(s.inputs(&h).unwrap(), hashes(&r));
     for i in hashes(&r) {
-        assert_eq!(s.dependents(&i).unwrap(), [h.clone()]);
+        assert_eq!(s.dependents(&i).unwrap(), std::slice::from_ref(&h));
     }
     // Then everything else; again idempotent.
     assert!(put_vector_world(&s, &v).is_empty());
@@ -166,6 +165,7 @@ fn slice_entries_are_recorded_and_receipt_edges_unchanged() {
 
     // A receipt without slice entries has none; unknown and malformed arguments.
     let stored = vector("receipt/stored-number");
+    put_vector_keys(&s, &stored);
     let hs = s.put_receipt(&input(&stored)).unwrap();
     assert!(s.slice_entries(&hs).unwrap().is_empty());
     assert!(s.slice_entries(&"0".repeat(64)).unwrap().is_empty());
