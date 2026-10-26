@@ -9,11 +9,12 @@
 //!   version that could answer differently after A: a version with `tx > A` or a receipt
 //!   `asof > A` (its answering start is after A). One indexed query.
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, ReceiptBuilder, Scalar, Type};
-use datumesh_store::{PgStore, SliceValue, Store};
+use datumesh_store::{SliceValue, Store};
 
 fn day(d: u32) -> String {
     format!("2024-01-{d:02}T00:00:00.000000Z")
@@ -23,7 +24,7 @@ const END: &str = "9999-12-31T23:59:59.999999Z";
 
 /// `slice_values` agrees with `slice_members` at `asof`: same versions in the same order,
 /// and each value is the receipt's.
-fn agree(s: &PgStore, sl: &datumesh_core::Slice, asof: &str) -> Vec<SliceValue> {
+fn agree(s: &TStore, sl: &datumesh_core::Slice, asof: &str) -> Vec<SliceValue> {
     let ms = s.slice_members(sl, asof).unwrap();
     let vs = s.slice_values(sl, asof).unwrap();
     assert_eq!(ms.len(), vs.len());
@@ -59,9 +60,8 @@ fn open(h: &str) -> datumesh_core::Slice {
     slice(&format!(r#"{{"args":{{"k":"*"}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#))
 }
 
-#[test]
-fn values_of_every_type_in_slice_members_order() {
-    let db = TestDb::migrated();
+fn values_of_every_type_in_slice_members_order(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let blob = format!("{}:17:text/plain", "a".repeat(64));
@@ -94,9 +94,8 @@ fn values_of_every_type_in_slice_members_order() {
     assert_eq!(agree(&s, &ranged, &day(2)).len(), 4);
 }
 
-#[test]
-fn values_answer_as_slice_members_does() {
-    let db = TestDb::migrated();
+fn values_answer_as_slice_members_does(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let cell = |k: &str| slice_cell("f", &h, &[("k", sc(Type::Number, k))]);
@@ -131,9 +130,8 @@ fn vals_of(vs: &[SliceValue]) -> Vec<String> {
     vs.iter().map(|v| v.value.lexical().to_string()).collect()
 }
 
-#[test]
-fn changed_after_sees_later_versions_of_matching_cells_only() {
-    let db = TestDb::migrated();
+fn changed_after_sees_later_versions_of_matching_cells_only(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let args = [("a", Type::String), ("k", Type::Number)];
     let h = s.put_descriptor(&stored_descriptor(&args, "g")).unwrap();
@@ -185,10 +183,9 @@ fn changed_after_sees_later_versions_of_matching_cells_only() {
 
 /// 100,000 cells: `slice_values` agrees with `slice_members`; `slice_changed_after` scans no
 /// table sequentially and needs no member (an index of receipts by function and asof).
-#[test]
-fn values_and_changes_over_100000_cells() {
-    let db = TestDb::migrated();
-    let s = std::sync::Arc::new(db.store_with(datumesh_store::PoolOptions::new().max_size(8)));
+fn values_and_changes_over_100000_cells(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.loader_store(8);
     s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "big")).unwrap();
     const N: usize = 100_000;
@@ -206,21 +203,22 @@ fn values_and_changes_over_100000_cells() {
     for t in threads {
         t.join().unwrap();
     }
-    db.client().batch_execute("ANALYZE").unwrap();
+    db.analyze();
     let sl = open(&h);
     let vs = agree(&s, &sl, &day(2));
     assert_eq!(vs.len(), N);
     assert!(vs.iter().enumerate().all(|(i, v)| v.value.lexical() == i.to_string()));
-    let seq_scans = || -> i64 {
+    // PostgreSQL's sequential-scan counters (SQLite has none: its plans are checked in the
+    // crate's unit tests, `sqlite::tests::bounded_slices_use_indexes`).
+    let seq_scans = || -> Option<i64> {
+        if !db.is_pg() {
+            return None;
+        }
         std::thread::sleep(std::time::Duration::from_millis(2500));
-        db.client()
-            .query_one(
-                "SELECT coalesce(sum(seq_scan), 0)::bigint FROM pg_stat_user_tables
-                  WHERE relname IN ('cells', 'cell_args', 'receipts', 'versions')",
-                &[],
-            )
-            .unwrap()
-            .get(0)
+        Some(db.int(
+            "SELECT coalesce(sum(seq_scan), 0)::bigint FROM pg_stat_user_tables
+              WHERE relname IN ('cells', 'cell_args', 'receipts', 'versions')",
+        ))
     };
     // Unchanged after A (the expensive answer, every member looked at if it were a scan).
     let before = seq_scans();
@@ -247,3 +245,10 @@ fn values_and_changes_over_100000_cells() {
         assert!(start.elapsed() < std::time::Duration::from_millis(200), "{:?}", start.elapsed());
     }
 }
+
+backends!(
+    values_of_every_type_in_slice_members_order,
+    values_answer_as_slice_members_does,
+    changed_after_sees_later_versions_of_matching_cells_only,
+    values_and_changes_over_100000_cells,
+);

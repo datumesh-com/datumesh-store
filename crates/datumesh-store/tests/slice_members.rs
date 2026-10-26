@@ -11,11 +11,12 @@
 //! * `versions_between(cell, from, to, A)`: the stored versions with `tx` in `[from, to]`
 //!   answering as of A, ascending by tx, with their receipts' bytes (a version slice).
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver, Type};
-use datumesh_store::{PgStore, SliceMember, Store};
+use datumesh_store::{SliceMember, Store};
 
 fn day(d: u32) -> String {
     format!("2024-01-{d:02}T00:00:00.000000Z")
@@ -34,7 +35,7 @@ fn arg_of(ms: &[SliceMember], name: &str) -> Vec<String> {
 }
 
 /// Each member's version, receipt and cell agree with what the store holds.
-fn check_members(s: &PgStore, ms: &[SliceMember], asof: &str) {
+fn check_members(s: &TStore, ms: &[SliceMember], asof: &str) {
     for m in ms {
         let r = Receipt::from_json(&m.receipt).unwrap();
         assert_eq!(r.hash(), m.version.receipt_hash);
@@ -48,7 +49,7 @@ fn check_members(s: &PgStore, ms: &[SliceMember], asof: &str) {
 
 /// A function of `SLICE_HOST` with one argument `k` of type `t`, and a cell of it per value
 /// (each with one version at day 1).
-fn one_arg(s: &PgStore, t: Type, values: &[&str]) -> String {
+fn one_arg(s: &TStore, t: Type, values: &[&str]) -> String {
     let h = s.put_descriptor(&stored_descriptor(&[("k", t)], t.as_str())).unwrap();
     for (i, v) in values.iter().enumerate() {
         put_member(s, &slice_cell("f", &h, &[("k", sc(t, v))]), &format!("{i}"), &day(1), &day(1));
@@ -66,9 +67,8 @@ fn range(h: &str, t: &str, lo: &str, hi: &str) -> datumesh_core::Slice {
     ))
 }
 
-#[test]
-fn numbers_are_ordered_and_ranged_as_decimals() {
-    let db = TestDb::migrated();
+fn numbers_are_ordered_and_ranged_as_decimals(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = one_arg(&s, Type::Number, &["10", "9", "-1", "-1.5", "0", "0.001", "9.5", "100", "-10", "10.5", "1"]);
     let all = s.slice_members(&open(&h), &day(2)).unwrap();
@@ -94,9 +94,91 @@ fn numbers_are_ordered_and_ranged_as_decimals() {
     assert!(s.slice_members(&bound, &day(2)).unwrap().is_empty());
 }
 
-#[test]
-fn dates_instants_and_strings_in_their_order() {
-    let db = TestDb::migrated();
+/// Exact decimals at their hardest (SQLite has no `numeric`: its index keeps a sortable
+/// text encoding): magnitudes by length (`9` < `10`), negatives reversed (`-1.5` < `-1`),
+/// prefixes of fractions (`0.1` < `0.109` < `0.11`, and reversed when negative), zero, and
+/// 128-character numbers at both ends and near zero. Inserted shuffled; read back in order;
+/// ranges with such bounds.
+fn decimals_order_and_range_exactly_at_the_edges(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = slice_store(&db);
+    let sorted: Vec<String> = vec![
+        format!("-{}", "9".repeat(127)),
+        "-100".into(),
+        "-10".into(),
+        "-9".into(),
+        "-1.5".into(),
+        "-1.25".into(),
+        "-1.11".into(),
+        "-1.1".into(),
+        "-1".into(),
+        "-0.1".into(),
+        "-0.099".into(),
+        format!("-0.{}1", "0".repeat(124)),
+        "0".into(),
+        format!("0.{}1", "0".repeat(125)),
+        "0.099".into(),
+        "0.1".into(),
+        "0.109".into(),
+        "0.11".into(),
+        "1".into(),
+        "1.1".into(),
+        "1.109".into(),
+        "1.11".into(),
+        "9".into(),
+        "9.5".into(),
+        "10".into(),
+        "99.999".into(),
+        "100".into(),
+        format!("{}.{}", "1".repeat(64), "1".repeat(63)),
+        format!("{}.{}2", "1".repeat(64), "1".repeat(62)),
+        format!("1{}", "0".repeat(127)),
+        "9".repeat(128),
+    ];
+    for v in &sorted {
+        assert!(v.len() <= 128, "{v}");
+    }
+    // A fixed shuffle.
+    let mut shuffled: Vec<&str> = sorted.iter().map(String::as_str).collect();
+    let n = shuffled.len();
+    for i in 0..n {
+        shuffled.swap(i, (i * 17 + 5) % n);
+    }
+    let h = one_arg(&s, Type::Number, &shuffled);
+    let all = s.slice_members(&open(&h), &day(2)).unwrap();
+    assert_eq!(arg_of(&all, "k"), sorted);
+    let vals = s.slice_values(&open(&h), &day(2)).unwrap();
+    assert_eq!(vals.iter().map(|v| v.cell.args["k"].scalar().unwrap().lexical().to_string()).collect::<Vec<_>>(), sorted);
+    let at = |lo: &str, hi: &str| arg_of(&s.slice_members(&range(&h, "number", lo, hi), &day(2)).unwrap(), "k");
+    let idx = |a: usize, z: usize| sorted[a..=z].to_vec();
+    assert_eq!(at("-1.5", "-1"), idx(4, 8));
+    assert_eq!(at("0.1", "0.11"), idx(15, 17));
+    assert_eq!(at("1.1", "1.11"), idx(19, 21));
+    assert_eq!(at("9", "10"), idx(22, 24));
+    assert_eq!(at("-0.1", "0.1"), idx(9, 15));
+    assert_eq!(at(&sorted[0], "-100"), idx(0, 1));
+    assert_eq!(at(&sorted[27], &sorted[30]), idx(27, 30));
+    assert_eq!(at(&sorted[0], &sorted[30]), sorted);
+    assert_eq!(at(&sorted[11], &sorted[13]), idx(11, 13));
+    // Bounds between stored values.
+    assert_eq!(at("-1.2", "-1.05"), idx(6, 7));
+    assert_eq!(at("0.1001", "0.1099"), Vec::<String>::new());
+    assert_eq!(at("0.1001", "0.1091"), idx(16, 16));
+    assert_eq!(at("10", "9"), Vec::<String>::new());
+    // A bound value matches exactly its canonical form.
+    let bound = |v: &str| {
+        slice(&format!(
+            r#"{{"args":{{"k":{{"type":"number","value":"{v}"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+        ))
+    };
+    for v in [&sorted[0], &sorted[11], &sorted[13], &sorted[30], &"0.109".to_string()] {
+        assert_eq!(arg_of(&s.slice_members(&bound(v), &day(2)).unwrap(), "k"), [v.clone()]);
+    }
+    assert!(s.slice_members(&bound("0.12"), &day(2)).unwrap().is_empty());
+}
+
+fn dates_instants_and_strings_in_their_order(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let d = one_arg(&s, Type::Date, &["2024-02-29", "0001-01-01", "9999-12-31", "2023-12-31", "2024-01-01"]);
     let got = arg_of(&s.slice_members(&open(&d), &day(2)).unwrap(), "k");
@@ -126,9 +208,8 @@ fn dates_instants_and_strings_in_their_order() {
     assert_eq!(got, ["\u{FF61}", "\u{1F600}"]);
 }
 
-#[test]
-fn bound_open_and_ranged_arguments_in_key_order() {
-    let db = TestDb::migrated();
+fn bound_open_and_ranged_arguments_in_key_order(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let args = [("a", Type::String), ("b", Type::Number), ("c", Type::Date), ("d", Type::Boolean)];
     let h = s.put_descriptor(&stored_descriptor(&args, "g")).unwrap();
@@ -186,9 +267,8 @@ fn bound_open_and_ranged_arguments_in_key_order() {
     assert!(ms.is_empty());
 }
 
-#[test]
-fn only_cells_of_the_slices_function_and_arguments() {
-    let db = TestDb::migrated();
+fn only_cells_of_the_slices_function_and_arguments(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let other = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "other")).unwrap();
@@ -216,9 +296,8 @@ fn only_cells_of_the_slices_function_and_arguments() {
     assert_eq!(arg_of(&s.slice_members(&open(&h), &day(2)).unwrap(), "k"), ["1"]);
 }
 
-#[test]
-fn members_answer_as_of_the_asof() {
-    let db = TestDb::migrated();
+fn members_answer_as_of_the_asof(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let cell = |k: &str| slice_cell("f", &h, &[("k", sc(Type::Number, k))]);
@@ -247,9 +326,8 @@ fn members_answer_as_of_the_asof() {
     assert_eq!(at(END), [p("1", &a2), p("2", &b1), p("3", &c1)]);
 }
 
-#[test]
-fn empty_slices_and_malformed_arguments() {
-    let db = TestDb::migrated();
+fn empty_slices_and_malformed_arguments(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     // No cells of the function at all.
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
@@ -265,9 +343,8 @@ fn empty_slices_and_malformed_arguments() {
     }
 }
 
-#[test]
-fn versions_between_is_a_version_slice() {
-    let db = TestDb::migrated();
+fn versions_between_is_a_version_slice(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let cell = slice_cell("f", &h, &[("k", sc(Type::Number, "1"))]);
@@ -323,10 +400,9 @@ fn versions_between_is_a_version_slice() {
 /// the unbounded slice has all of them in numeric order; a range of 1,000 is a range scan of
 /// the typed-argument index (checked with the server's statistics: no sequential scan of the
 /// index tables), as is a bound argument.
-#[test]
-fn a_slice_over_100000_cells() {
-    let db = TestDb::migrated();
-    let s = std::sync::Arc::new(db.store_with(datumesh_store::PoolOptions::new().max_size(8)));
+fn a_slice_over_100000_cells(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.loader_store(8);
     s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number), ("tag", Type::String)], "big")).unwrap();
     const N: usize = 100_000;
@@ -351,7 +427,7 @@ fn a_slice_over_100000_cells() {
     for t in threads {
         t.join().unwrap();
     }
-    db.client().batch_execute("ANALYZE").unwrap();
+    db.analyze();
     let text = |args: &str| slice(&format!(r#"{{"args":{{{args}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#));
 
     let all = s.slice_members(&text(r#""k":"*","tag":"*""#), &day(2)).unwrap();
@@ -359,17 +435,19 @@ fn a_slice_over_100000_cells() {
     let keys = arg_of(&all, "k");
     assert!(keys.iter().enumerate().all(|(i, k)| *k == i.to_string()), "not in numeric order");
 
-    let seq_scans = || -> i64 {
+    // PostgreSQL: the tables' sequential-scan counters do not move. (SQLite keeps no such
+    // counters; its query plans for bounded slices are checked to use indexes instead, in
+    // the crate's unit tests: `sqlite::tests::bounded_slices_use_indexes`.)
+    let seq_scans = || -> Option<i64> {
+        if !db.is_pg() {
+            return None;
+        }
         // The server's statistics reach the view once the store's backend is idle (PG 15+
         // flushes them within about a second).
         std::thread::sleep(std::time::Duration::from_millis(2500));
-        db.client()
-            .query_one(
-                "SELECT coalesce(sum(seq_scan), 0)::bigint FROM pg_stat_user_tables WHERE relname IN ('cells', 'cell_args')",
-                &[],
-            )
-            .unwrap()
-            .get(0)
+        Some(db.int(
+            "SELECT coalesce(sum(seq_scan), 0)::bigint FROM pg_stat_user_tables WHERE relname IN ('cells', 'cell_args')",
+        ))
     };
     let before = seq_scans();
     let ms = s.slice_members(&text(r#""k":{"hi":"50999","lo":"50000","type":"number"},"tag":"*""#), &day(2)).unwrap();
@@ -385,3 +463,15 @@ fn a_slice_over_100000_cells() {
     assert_eq!(arg_of(&ms, "k"), (41..60).step_by(2).map(|i| i.to_string()).collect::<Vec<_>>());
     assert_eq!(seq_scans(), before, "a bounded slice scanned a table sequentially");
 }
+
+backends!(
+    numbers_are_ordered_and_ranged_as_decimals,
+    decimals_order_and_range_exactly_at_the_edges,
+    dates_instants_and_strings_in_their_order,
+    bound_open_and_ranged_arguments_in_key_order,
+    only_cells_of_the_slices_function_and_arguments,
+    members_answer_as_of_the_asof,
+    empty_slices_and_malformed_arguments,
+    versions_between_is_a_version_slice,
+    a_slice_over_100000_cells,
+);

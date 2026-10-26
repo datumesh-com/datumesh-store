@@ -10,6 +10,7 @@
 //! * `cell_dependents`: the cells of stored receipts that read any receipt of a cell.
 //! * `Version::asof` is the receipt's asof, for every method returning a `Version`.
 
+#[macro_use]
 mod common;
 
 use std::sync::{Arc, Barrier};
@@ -17,7 +18,7 @@ use std::thread;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::{Error, PgStore, PoolOptions, Store, Version};
+use datumesh_store::{Error, Store, Version};
 
 /// Midnight of a day of March 2024.
 fn day(d: u32) -> String {
@@ -30,7 +31,7 @@ fn usd_cell() -> String {
 }
 
 /// Stores a stored-number receipt with `value` at `tx`, as of `asof`; returns its hash.
-fn put(s: &PgStore, value: &str, tx: &str, asof: &str) -> String {
+fn put(s: &TStore, value: &str, tx: &str, asof: &str) -> String {
     s.put_receipt(&stored_number_with(value, tx, asof)).unwrap()
 }
 
@@ -38,9 +39,8 @@ fn hash_of(v: Option<Version>) -> Option<String> {
     v.map(|v| v.receipt_hash)
 }
 
-#[test]
-fn put_computed_is_idempotent_and_takes_any_order() {
-    let db = TestDb::migrated();
+fn put_computed_is_idempotent_and_takes_any_order(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let h5 = put(&s, "1.5", &day(5), &day(5));
@@ -63,9 +63,8 @@ fn put_computed_is_idempotent_and_takes_any_order() {
     assert_eq!(count(&db, "computed_versions"), 3);
 }
 
-#[test]
-fn another_receipt_at_an_existing_key_is_a_conflict() {
-    let db = TestDb::migrated();
+fn another_receipt_at_an_existing_key_is_a_conflict(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let a = put(&s, "1.3", &day(3), &day(3));
@@ -83,9 +82,8 @@ fn another_receipt_at_an_existing_key_is_a_conflict() {
     s.put_computed(&cell, &day(3), &a).unwrap();
 }
 
-#[test]
-fn receipts_at_one_tx_with_different_asof_are_both_kept() {
-    let db = TestDb::migrated();
+fn receipts_at_one_tx_with_different_asof_are_both_kept(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let v = put(&s, "1.3", &day(3), &day(3));
@@ -93,19 +91,16 @@ fn receipts_at_one_tx_with_different_asof_are_both_kept() {
     s.put_computed(&cell, &day(3), &late).unwrap();
     s.put_computed(&cell, &day(3), &v).unwrap();
     assert_eq!(count(&db, "computed_versions"), 2);
-    let rows = db
-        .client()
-        .query("SELECT tx, asof, receipt_hash FROM computed_versions ORDER BY asof", &[])
-        .unwrap()
-        .iter()
-        .map(|r| (r.get::<_, String>(0), r.get::<_, String>(1), r.get::<_, String>(2)))
-        .collect::<Vec<_>>();
+    let rows: Vec<(String, String, String)> = db
+        .texts("SELECT tx, asof, receipt_hash FROM computed_versions ORDER BY asof")
+        .into_iter()
+        .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
+        .collect();
     assert_eq!(rows, [(day(3), day(3), v), (day(3), day(10), late)]);
 }
 
-#[test]
-fn put_computed_checks_receipt_cell_and_tx() {
-    let db = TestDb::migrated();
+fn put_computed_checks_receipt_cell_and_tx(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let bytes = input(&v);
@@ -142,9 +137,8 @@ fn put_computed_checks_receipt_cell_and_tx() {
 
 /// Malformed arguments are refused with the core's codes, without a query: the store here
 /// is on an empty database (no schema), where any query would be a database error.
-#[test]
-fn malformed_arguments_are_the_cores_codes_without_a_query() {
-    let db = TestDb::empty();
+fn malformed_arguments_are_the_cores_codes_without_a_query(b: Backend) {
+    let db = TestDb::empty(b);
     let s = db.bare_store();
     let cell = usd_cell();
     let h = "a".repeat(64);
@@ -168,51 +162,39 @@ fn malformed_arguments_are_the_cores_codes_without_a_query() {
     assert!(matches!(s.cell_dependents(&cell), Err(Error::Database(_))));
 }
 
-fn sql_fails(db: &TestDb, sql: &str) {
-    let e = db.client().batch_execute(sql).expect_err(sql);
-    let msg = e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string());
-    assert!(msg.contains("append-only"), "{sql}: {msg}");
-}
-
-#[test]
-fn update_delete_truncate_fail_in_the_database_and_raw_inserts_take_any_order() {
-    let db = TestDb::migrated();
+/// UPDATE and DELETE fail in the database (and TRUNCATE on PostgreSQL, which SQLite does not
+/// have); raw inserts take any order; the reference to receipts holds for raw inserts too
+/// (on SQLite whether or not the connection enforces foreign keys).
+fn update_delete_truncate_fail_in_the_database_and_raw_inserts_take_any_order(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let h5 = put(&s, "1.5", &day(5), &day(5));
     let h1 = put(&s, "1.1", &day(1), &day(1));
     s.put_computed(&cell, &day(5), &h5).unwrap();
-    sql_fails(&db, "UPDATE computed_versions SET tx = tx");
-    sql_fails(&db, &format!("UPDATE computed_versions SET receipt_hash = '{h1}'"));
-    sql_fails(&db, "DELETE FROM computed_versions");
-    sql_fails(&db, "TRUNCATE computed_versions");
-    sql_fails(&db, "TRUNCATE computed_versions CASCADE");
-    assert!(db.client().batch_execute("TRUNCATE receipts CASCADE").is_err());
+    db.refused("UPDATE computed_versions SET tx = tx");
+    db.refused(&format!("UPDATE computed_versions SET receipt_hash = '{h1}'"));
+    db.refused("DELETE FROM computed_versions");
+    if db.is_pg() {
+        db.refused("TRUNCATE computed_versions");
+        db.refused("TRUNCATE computed_versions CASCADE");
+        assert!(db.exec("TRUNCATE receipts CASCADE").is_err());
+    } else {
+        db.refused("DELETE FROM receipts");
+        assert!(db.exec("INSERT OR REPLACE INTO computed_versions SELECT * FROM computed_versions").is_err());
+    }
     assert_eq!(count(&db, "computed_versions"), 1);
     // No tx-order trigger: an older row inserted after a newer one in raw SQL is fine.
-    db.client()
-        .execute(
-            "INSERT INTO computed_versions (cell_id, tx, tx_at, asof, asof_at, receipt_hash)
-             VALUES ($1, $2, $2::text::timestamptz, $2, $2::text::timestamptz, $3)",
-            &[&cell, &day(1), &h1],
-        )
-        .unwrap();
+    db.raw_computed(&cell, &day(1), &day(1), &h1).unwrap();
     assert_eq!(hash_of(s.computed_asof(&cell, &day(2)).unwrap()), Some(h1));
     // The foreign key: no row for a receipt the store does not have.
-    assert!(db
-        .client()
-        .execute(
-            "INSERT INTO computed_versions (cell_id, tx, tx_at, asof, asof_at, receipt_hash)
-             VALUES ($1, $2, $2::text::timestamptz, $2, $2::text::timestamptz, $3)",
-            &[&cell, &day(9), &"0".repeat(64)],
-        )
-        .is_err());
+    assert!(db.raw_computed(&cell, &day(9), &day(9), &"0".repeat(64)).is_err());
+    assert_eq!(count(&db, "computed_versions"), 2);
 }
 
-#[test]
-fn concurrent_writers_of_one_row_and_of_one_key() {
-    let db = TestDb::migrated();
-    let s = Arc::new(db.store_with(PoolOptions::new().max_size(8)));
+fn concurrent_writers_of_one_row_and_of_one_key(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.store_sized(8);
     let cell = usd_cell();
     const N: usize = 8;
     for round in 0..5u32 {
@@ -261,9 +243,8 @@ fn concurrent_writers_of_one_row_and_of_one_key() {
     assert_eq!(count(&db, "computed_versions"), 10);
 }
 
-#[test]
-fn computed_asof_before_between_and_exactly_at() {
-    let db = TestDb::migrated();
+fn computed_asof_before_between_and_exactly_at(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let h2 = put(&s, "1.2", &day(2), &day(2));
@@ -284,9 +265,8 @@ fn computed_asof_before_between_and_exactly_at() {
 
 /// v at tx 3 as of 3, and v' at tx 3 as of 10 (late-signed): at 5, v; at 12, v'. Between
 /// equal asof, the greatest tx answers.
-#[test]
-fn computed_asof_late_signed_and_ties() {
-    let db = TestDb::migrated();
+fn computed_asof_late_signed_and_ties(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let v = put(&s, "1.3", &day(3), &day(3));
@@ -314,9 +294,8 @@ fn computed_asof_late_signed_and_ties() {
 }
 
 /// Historical backfill: a newer version first, an older one computed afterwards.
-#[test]
-fn computed_asof_after_historical_backfill() {
-    let db = TestDb::migrated();
+fn computed_asof_after_historical_backfill(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let new = put(&s, "1.2", &day(20), &day(20));
@@ -333,9 +312,8 @@ fn computed_asof_after_historical_backfill() {
 /// The vectors' stored-number receipt: tx 2024-03-15T16:00, asof 2024-03-16T09:00. As of
 /// 2024-03-16T00:00 it is not yet an answer (its asof is later), though `version_asof`,
 /// which looks at tx only, returns it.
-#[test]
-fn stored_asof_needs_both_times() {
-    let db = TestDb::migrated();
+fn stored_asof_needs_both_times(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let bytes = input(&v);
@@ -366,9 +344,8 @@ fn stored_asof_needs_both_times() {
 
 /// A late-signed second version (tx 5, as of 9) after v1 (tx 3, as of 3): between 5 and 9,
 /// v1 still answers (version_asof says v2).
-#[test]
-fn stored_asof_with_a_late_signed_second_version() {
-    let db = TestDb::migrated();
+fn stored_asof_with_a_late_signed_second_version(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let v1 = put(&s, "1.3", &day(3), &day(3));
@@ -390,9 +367,8 @@ fn stored_asof_with_a_late_signed_second_version() {
 }
 
 /// The receipt bytes come with the answer in one call.
-#[test]
-fn answers_with_their_receipts() {
-    let db = TestDb::migrated();
+fn answers_with_their_receipts(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let v1 = put(&s, "1.3", &day(3), &day(3));
@@ -416,9 +392,8 @@ fn answers_with_their_receipts() {
 /// of its `recompute` object): computed-with-lineage reads stored-number; the spec-0.3.0
 /// cross-rate vectors read stored-number and a EUR/GBP receipt; computed-two-inputs reads
 /// stored-number and stored-number-second.
-#[test]
-fn cell_dependents_from_the_vectors() {
-    let db = TestDb::migrated();
+fn cell_dependents_from_the_vectors(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let ids = [
         "receipt/stored-number",
@@ -485,9 +460,8 @@ fn cell_dependents_from_the_vectors() {
 }
 
 /// An input the store does not hold has no cell: it makes no dependent.
-#[test]
-fn cell_dependents_ignore_inputs_the_store_does_not_hold() {
-    let db = TestDb::migrated();
+fn cell_dependents_ignore_inputs_the_store_does_not_hold(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let two = vector("receipt/computed-two-inputs");
     s.put_receipt(&input(&two)).unwrap();
@@ -499,9 +473,8 @@ fn cell_dependents_ignore_inputs_the_store_does_not_hold() {
 }
 
 /// Any receipt of the cell counts, not only its stored versions or its latest one.
-#[test]
-fn cell_dependents_through_any_receipt_of_the_cell() {
-    let db = TestDb::migrated();
+fn cell_dependents_through_any_receipt_of_the_cell(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let cell = usd_cell();
     let lineage_cell = Receipt::from_json(&input(&vector("receipt/computed-with-lineage"))).unwrap().cell().id();
@@ -514,3 +487,22 @@ fn cell_dependents_through_any_receipt_of_the_cell() {
     assert_eq!(s.cell_dependents(&cell).unwrap(), std::slice::from_ref(&lineage_cell));
     assert!(s.cell_dependents(&lineage_cell).unwrap().is_empty());
 }
+
+backends!(
+    put_computed_is_idempotent_and_takes_any_order,
+    another_receipt_at_an_existing_key_is_a_conflict,
+    receipts_at_one_tx_with_different_asof_are_both_kept,
+    put_computed_checks_receipt_cell_and_tx,
+    malformed_arguments_are_the_cores_codes_without_a_query,
+    update_delete_truncate_fail_in_the_database_and_raw_inserts_take_any_order,
+    concurrent_writers_of_one_row_and_of_one_key,
+    computed_asof_before_between_and_exactly_at,
+    computed_asof_late_signed_and_ties,
+    computed_asof_after_historical_backfill,
+    stored_asof_needs_both_times,
+    stored_asof_with_a_late_signed_second_version,
+    answers_with_their_receipts,
+    cell_dependents_from_the_vectors,
+    cell_dependents_ignore_inputs_the_store_does_not_hold,
+    cell_dependents_through_any_receipt_of_the_cell,
+);

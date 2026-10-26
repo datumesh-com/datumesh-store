@@ -9,15 +9,15 @@
 //!   things are `Ok(None)` / `Ok(empty)`; a database failure is `Err`. The Resolver methods
 //!   answer all three with `None`. Nothing panics.
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver};
 use datumesh_store::{Error, Store};
 
-#[test]
-fn put_version_checks_receipt_cell_and_tx() {
-    let db = TestDb::migrated();
+fn put_version_checks_receipt_cell_and_tx(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let bytes = input(&v);
@@ -47,9 +47,8 @@ fn put_version_checks_receipt_cell_and_tx() {
     assert_eq!(s.latest(&cell).unwrap().unwrap().receipt_hash, h);
 }
 
-#[test]
-fn put_namespace_parses_the_key_document() {
-    let db = TestDb::migrated();
+fn put_namespace_parses_the_key_document(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let v = vector("receipt/stored-number");
     let doc = key_doc(&v, "rates.example.org");
@@ -89,11 +88,10 @@ fn put_namespace_parses_the_key_document() {
     assert_eq!(s.namespace("calc.example.net").unwrap(), None);
 }
 
-#[test]
-fn reads_with_malformed_arguments_are_invalid() {
+fn reads_with_malformed_arguments_are_invalid(b: Backend) {
     // Store reads refuse a malformed argument with the core's code, without a query;
     // Resolver lookups answer None.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let bytes = input(&v);
@@ -134,30 +132,84 @@ fn reads_with_malformed_arguments_are_invalid() {
     assert!(s.version_asof(&cell, r.tx()).unwrap().is_some());
 }
 
-/// A store whose connections all fail from some point on: every Store read is an Err,
-/// every Resolver method None, nothing panics.
-#[test]
-fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
+/// The way a test database becomes unavailable to a store, and comes back.
+enum Outage {
+    /// PostgreSQL: the store's connector fails from `down` on, and the open connections
+    /// are killed.
+    Pg(std::sync::Arc<std::sync::atomic::AtomicBool>),
+    /// SQLite: another connection holds the file in exclusive locking mode (in WAL mode,
+    /// every other connection's reads and writes are then SQLITE_BUSY); `None` until down.
+    Lite(Option<rusqlite::Connection>),
+}
+
+/// A store of `db` that an `Outage` can take down: on PostgreSQL connections from a
+/// connector that can be made to fail; on SQLite a busy timeout of 200 ms.
+fn outage_store(db: &TestDb) -> (TStore, Outage) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    match db.backend {
+        Backend::Pg => {
+            let down = Arc::new(AtomicBool::new(false));
+            let (config, flag) = (db.pg().config.clone(), down.clone());
+            let s = datumesh_store::pg_unstable::with_connector(
+                move || {
+                    if flag.load(Ordering::SeqCst) {
+                        "host=127.0.0.1 port=1 user=x connect_timeout=1"
+                            .parse::<datumesh_store::pg_unstable::postgres::Config>()
+                            .unwrap()
+                            .connect(datumesh_store::pg_unstable::postgres::NoTls)
+                    } else {
+                        config.connect(datumesh_store::pg_unstable::postgres::NoTls)
+                    }
+                },
+                datumesh_store::PoolOptions::new().max_size(2),
+            )
+            .unwrap();
+            (TStore(Arc::new(s)), Outage::Pg(down))
+        }
+        Backend::Sqlite => {
+            let options = datumesh_store::SqliteOptions::new()
+                .max_size(2)
+                .busy_timeout(std::time::Duration::from_millis(200));
+            (TStore(Arc::new(db.lite().store_with(options))), Outage::Lite(None))
+        }
+    }
+}
 
-    let db = TestDb::migrated();
-    let down = Arc::new(AtomicBool::new(false));
-    let (config, flag) = (db.config.clone(), down.clone());
-    let s = datumesh_store::pg_unstable::with_connector(
-        move || {
-            if flag.load(Ordering::SeqCst) {
-                "host=127.0.0.1 port=1 user=x connect_timeout=1"
-                    .parse::<datumesh_store::pg_unstable::postgres::Config>()
-                    .unwrap()
-                    .connect(datumesh_store::pg_unstable::postgres::NoTls)
-            } else {
-                config.connect(datumesh_store::pg_unstable::postgres::NoTls)
+impl Outage {
+    fn down(&mut self, db: &TestDb) {
+        match self {
+            Outage::Pg(flag) => {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                db.exec(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
+                )
+                .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
-        },
-        datumesh_store::PoolOptions::new().max_size(2),
-    )
-    .unwrap();
+            Outage::Lite(held) => {
+                let c = db.lite().conn();
+                c.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; SELECT count(*) FROM versions;")
+                    .unwrap();
+                *held = Some(c);
+            }
+        }
+    }
+
+    fn up(&mut self) {
+        match self {
+            Outage::Pg(flag) => flag.store(false, std::sync::atomic::Ordering::SeqCst),
+            Outage::Lite(held) => drop(held.take()),
+        }
+    }
+}
+
+/// A store whose database becomes unavailable from some point on (PostgreSQL: no connection
+/// succeeds; SQLite: the file is locked by another connection): every Store read is an
+/// Err, every Resolver method None, nothing panics; then it comes back.
+fn a_database_outage_is_err_from_store_reads_and_none_from_resolver(b: Backend) {
+    let db = TestDb::migrated(b);
+    let (s, mut outage) = outage_store(&db);
     put_vector_keys(&s, &vector("receipt/stored-number"));
     let fn_hash = s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let v = vector("receipt/stored-number");
@@ -168,15 +220,7 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
     s.put_version(&cell, r.tx(), &h).unwrap();
     assert!(s.latest(&cell).unwrap().is_some());
 
-    // The outage: no new connection succeeds, and the open ones are killed.
-    down.store(true, Ordering::SeqCst);
-    db.client()
-        .execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()",
-            &[],
-        )
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    outage.down(&db);
     // Twice: the first use may meet a killed connection, the second a failing connector.
     for _ in 0..2 {
         let db_err = |e: Error| assert!(matches!(e, Error::Database(_) | Error::PoolTimeout), "{e:?}");
@@ -213,21 +257,19 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver() {
     let out = datumesh_core::verify(&bytes, &keys(&v), Some(&s as &dyn Resolver), None);
     assert_eq!(out.code, Some(ErrorCode::FnUnavailable));
     // Back up: answers again.
-    down.store(false, Ordering::SeqCst);
+    outage.up();
     assert!(s.latest(&cell).unwrap().is_some());
 }
 
-#[test]
-fn a_renamed_table_is_a_database_error_with_the_servers_message() {
-    let db = TestDb::migrated();
+fn a_renamed_table_is_a_database_error_with_the_servers_message(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
-    db.client()
-        .batch_execute(
-            "ALTER TABLE receipts RENAME TO receipts_gone; ALTER TABLE descriptors RENAME TO descriptors_gone; \
-             ALTER TABLE edges RENAME TO edges_gone",
-        )
-        .unwrap();
+    db.exec(
+        "ALTER TABLE receipts RENAME TO receipts_gone; ALTER TABLE descriptors RENAME TO descriptors_gone; \
+         ALTER TABLE edges RENAME TO edges_gone",
+    )
+    .unwrap();
     // Fresh connections, so no statement prepared against the old tables is reused.
     let s = db.bare_store();
     assert_eq!(s.receipt(&h), None);
@@ -240,40 +282,70 @@ fn a_renamed_table_is_a_database_error_with_the_servers_message() {
     assert!(matches!(e, Error::Database(_)), "{e:?}");
 }
 
-/// `Error::Database` carries a `DatabaseError`: the SQLSTATE, the server's message, and the
-/// underlying error as its source (type erased).
-#[test]
-fn a_database_error_has_the_sqlstate_the_servers_message_and_a_source() {
+/// `Error::Database` carries a `DatabaseError`: the SQLSTATE (PostgreSQL) or the result
+/// code's name (SQLite), the database's message, and the underlying error as its source
+/// (type erased).
+fn a_database_error_has_the_sqlstate_the_servers_message_and_a_source(b: Backend) {
     // An empty database: the store connects (it prepares nothing up front), and the first
     // read meets a missing table.
-    let db = TestDb::empty();
+    let db = TestDb::empty(b);
     let s = db.bare_store();
     let cell = "0".repeat(64);
     let e = s.latest(&cell).unwrap_err();
     let Error::Database(d) = &e else { panic!("{e:?}") };
-    assert_eq!(d.code(), Some("42P01"));
-    assert_eq!(d.message(), "relation \"versions\" does not exist");
+    let (code, message) = match b {
+        Backend::Pg => ("42P01", "relation \"versions\" does not exist"),
+        Backend::Sqlite => ("SQLITE_ERROR", "no such table: versions"),
+    };
+    assert_eq!(d.code(), Some(code));
+    assert_eq!(d.message(), message);
     let source = std::error::Error::source(d).expect("the driver's error");
     assert!(!source.to_string().is_empty());
-    // Display as in 0.1.0: the server's message and the SQLSTATE.
-    assert_eq!(d.to_string(), "relation \"versions\" does not exist (42P01)");
-    assert_eq!(e.to_string(), "database: relation \"versions\" does not exist (42P01)");
+    // Display as in 0.1.0: the message and the code.
+    assert_eq!(d.to_string(), format!("{message} ({code})"));
+    assert_eq!(e.to_string(), format!("database: {message} ({code})"));
     assert!(std::error::Error::source(&e).is_some());
-    // The core's code is for Error::Invalid only.
+    // Not an Invalid: no core code.
     assert_eq!(e.code(), None);
 
-    // Another SQLSTATE: a table without the columns the statement names is 42703.
-    db.client().batch_execute("CREATE TABLE versions (cell_id text)").unwrap();
+    // A column that does not exist.
+    db.exec("CREATE TABLE versions (cell_id text)").unwrap();
     let s = db.bare_store();
     let Error::Database(d) = s.latest(&cell).unwrap_err() else { panic!() };
-    assert_eq!(d.code(), Some("42703"), "{d}");
-    assert!(d.message().contains("does not exist"), "{d}");
+    match b {
+        Backend::Pg => {
+            assert_eq!(d.code(), Some("42703"), "{d}");
+            assert!(d.message().contains("does not exist"), "{d}");
+        }
+        Backend::Sqlite => {
+            assert_eq!(d.code(), Some("SQLITE_ERROR"), "{d}");
+            assert!(d.message().contains("no such column"), "{d}");
+        }
+    }
 
-    // A failure that is not the server's (nothing listens): no SQLSTATE, the driver's text.
-    let e = datumesh_store::PgStore::connect("postgres://x@127.0.0.1:1/x?connect_timeout=1").unwrap_err();
+    // A failure that is not the database's: the driver's description, no code.
+    let e = match b {
+        Backend::Pg => datumesh_store::PgStore::connect("postgres://x@127.0.0.1:1/x?connect_timeout=1").map(|_| ()),
+        Backend::Sqlite => datumesh_store::SqliteStore::open(db.lite().dir.join("no/such/dir/x.db")).map(|_| ()),
+    }
+    .unwrap_err();
     let Error::Database(d) = &e else { panic!("{e:?}") };
-    assert_eq!(d.code(), None);
     assert!(!d.message().is_empty());
     assert!(std::error::Error::source(d).is_some());
-    assert_eq!(e.to_string(), format!("database: {}", d.message()));
+    match b {
+        Backend::Pg => {
+            assert_eq!(d.code(), None);
+            assert_eq!(e.to_string(), format!("database: {}", d.message()));
+        }
+        Backend::Sqlite => assert_eq!(d.code(), Some("SQLITE_CANTOPEN"), "{d}"),
+    }
 }
+
+backends!(
+    put_version_checks_receipt_cell_and_tx,
+    put_namespace_parses_the_key_document,
+    reads_with_malformed_arguments_are_invalid,
+    a_database_outage_is_err_from_store_reads_and_none_from_resolver,
+    a_renamed_table_is_a_database_error_with_the_servers_message,
+    a_database_error_has_the_sqlstate_the_servers_message_and_a_source,
+);

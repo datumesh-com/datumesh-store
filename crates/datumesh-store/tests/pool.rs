@@ -13,7 +13,7 @@ use datumesh_store::{pg_unstable, PoolOptions, Store};
 
 #[test]
 fn connections_killed_by_the_server_are_replaced() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let s = db.connector_store_with(PoolOptions::new().max_size(2));
     put_vector_keys(&s, &vector("receipt/stored-number"));
     let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
@@ -41,7 +41,7 @@ fn connections_killed_by_the_server_are_replaced() {
 
 #[test]
 fn the_pool_is_bounded_and_shared_across_threads() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let s = Arc::new(db.connector_store_with(PoolOptions::new().max_size(3).checkout_timeout(Duration::from_secs(10))));
     put_vector_keys(&s, &vector("receipt/stored-number"));
     let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
@@ -83,7 +83,7 @@ fn checkout_times_out_when_the_server_refuses_connections() {
 
 #[test]
 fn the_pool_is_the_same_through_connect_with() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let s = Arc::new(db.store_with(PoolOptions::new().max_size(2).checkout_timeout(Duration::from_secs(10))));
     let h = s.put_receipt(&input(&vector("receipt/stored-number"))).unwrap();
     let handles: Vec<_> = (0..6)

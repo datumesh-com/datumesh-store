@@ -1,8 +1,9 @@
 //! Append-only history: `versions` and `name_bindings` refuse UPDATE, DELETE and TRUNCATE in
-//! the database itself, `put_version` / `bind_name` refuse a tx not later than the latest
+//! the database itself (both backends; SQLite also a replacing insert), `put_version` / `bind_name` refuse a tx not later than the latest
 //! with a typed error, and the tx order holds under concurrent writers, both through the
 //! API and for raw SQL inserts racing each other.
 
+#[macro_use]
 mod common;
 
 use std::sync::{Arc, Barrier};
@@ -18,7 +19,7 @@ const TX2: &str = "2024-03-18T10:00:00.000000Z";
 
 /// A store holding the fx_rate descriptor, two versions of the EUR/USD cell and a name with
 /// two bindings. Returns the store, the cell id and the two receipt hashes.
-fn seeded(db: &TestDb) -> (datumesh_store::PgStore, String, String, String) {
+fn seeded(db: &TestDb) -> (TStore, String, String, String) {
     let s = db.store();
     let fn_hash = s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let r1 = stored_number_at("1.0892", TX1);
@@ -32,58 +33,64 @@ fn seeded(db: &TestDb) -> (datumesh_store::PgStore, String, String, String) {
     (s, cell, h1, h2)
 }
 
-/// The server's message of a database error.
-fn db_message(e: &datumesh_store::pg_unstable::postgres::Error) -> String {
-    e.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| e.to_string())
-}
-
-fn sql_fails(db: &TestDb, sql: &str) -> String {
-    let mut c = db.client();
-    let e = c.batch_execute(sql).expect_err(sql);
-    let msg = db_message(&e);
-    assert!(msg.contains("append-only"), "{sql}: {msg}");
-    msg
-}
-
-#[test]
-fn update_delete_truncate_fail_in_the_database() {
-    let db = TestDb::migrated();
-    let (_s, _cell, _h1, h2) = seeded(&db);
+/// UPDATE and DELETE fail in the database (and TRUNCATE on PostgreSQL; SQLite has no
+/// TRUNCATE, its `DELETE FROM` without WHERE is the same statement as any DELETE and fires
+/// the triggers). SQLite also refuses `INSERT OR REPLACE` / `REPLACE` of an existing row,
+/// which would otherwise delete it without a DELETE trigger firing.
+fn update_delete_truncate_fail_in_the_database(b: Backend) {
+    let db = TestDb::migrated(b);
+    let (_s, cell, h1, h2) = seeded(&db);
     for table in ["versions", "name_bindings"] {
-        sql_fails(&db, &format!("UPDATE {table} SET tx = tx"));
-        sql_fails(&db, &format!("DELETE FROM {table}"));
-        sql_fails(&db, &format!("TRUNCATE {table}"));
-        sql_fails(&db, &format!("TRUNCATE {table} CASCADE"));
+        db.refused(&format!("UPDATE {table} SET tx = tx"));
+        db.refused(&format!("DELETE FROM {table}"));
+        db.refused(&format!("DELETE FROM {table} WHERE tx = '{TX1}'"));
+        if db.is_pg() {
+            db.refused(&format!("TRUNCATE {table}"));
+            db.refused(&format!("TRUNCATE {table} CASCADE"));
+        }
     }
-    sql_fails(&db, &format!("UPDATE versions SET receipt_hash = '{h2}'"));
-    // Truncating the tables they reference cannot remove history either.
-    let mut c = db.client();
-    assert!(c.batch_execute("TRUNCATE receipts CASCADE").is_err());
-    assert!(c.batch_execute("TRUNCATE descriptors CASCADE").is_err());
+    db.refused(&format!("UPDATE versions SET receipt_hash = '{h2}'"));
+    if db.is_pg() {
+        // Truncating the tables they reference cannot remove history either.
+        assert!(db.exec("TRUNCATE receipts CASCADE").is_err());
+        assert!(db.exec("TRUNCATE descriptors CASCADE").is_err());
+    } else {
+        // Nor deleting them (foreign keys are enforced only on connections that ask, so
+        // the tables they reference refuse deletes themselves).
+        db.refused("DELETE FROM receipts");
+        db.refused("DELETE FROM descriptors");
+        db.refused("UPDATE receipts SET bytes = bytes");
+        // A replacing insert of an existing row would delete it first.
+        for sql in [
+            format!("INSERT OR REPLACE INTO versions (cell_id, tx, receipt_hash) VALUES ('{cell}', '{TX1}', '{h1}')"),
+            format!("REPLACE INTO versions (cell_id, tx, receipt_hash) VALUES ('{cell}', '{TX2}', '{h2}')"),
+            "INSERT OR REPLACE INTO name_bindings SELECT * FROM name_bindings".to_string(),
+            "INSERT OR REPLACE INTO receipts SELECT * FROM receipts".to_string(),
+            "INSERT OR REPLACE INTO descriptors SELECT * FROM descriptors".to_string(),
+        ] {
+            let msg = db.exec(&sql).expect_err(&sql);
+            assert!(msg.contains("append-only") || msg.contains("not later"), "{sql}: {msg}");
+        }
+    }
     // Nothing changed.
-    let n: i64 = c.query_one("SELECT count(*) FROM versions", &[]).unwrap().get(0);
-    assert_eq!(n, 2);
-    let n: i64 = c.query_one("SELECT count(*) FROM name_bindings", &[]).unwrap().get(0);
-    assert_eq!(n, 1);
+    assert_eq!(db.count("versions"), 2);
+    assert_eq!(db.count("name_bindings"), 1);
+    assert_eq!(db.texts("SELECT receipt_hash FROM versions ORDER BY tx"), [[h1], [h2]]);
 }
 
-#[test]
-fn raw_inserts_out_of_order_fail_in_the_database() {
-    let db = TestDb::migrated();
+fn raw_inserts_out_of_order_fail_in_the_database(b: Backend) {
+    let db = TestDb::migrated(b);
     let (_s, cell, h1, _h2) = seeded(&db);
-    let mut c = db.client();
-    let e = c
-        .execute(
-            "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash) VALUES ($1, $2, $2::text::timestamptz, $3)",
-            &[&cell, &"2024-03-17T00:00:00.000000Z", &h1],
-        )
-        .unwrap_err();
-    assert!(db_message(&e).contains("not later"), "{e:?}");
+    let e = db.raw_version(&cell, "2024-03-17T00:00:00.000000Z", &h1).unwrap_err();
+    assert!(e.contains("not later"), "{e}");
+    // Equal to the latest is not later either.
+    let e = db.raw_version(&cell, TX2, &h1).unwrap_err();
+    assert!(e.contains("not later"), "{e}");
+    assert_eq!(db.count("versions"), 2);
 }
 
-#[test]
-fn put_version_not_later_is_a_typed_error() {
-    let db = TestDb::migrated();
+fn put_version_not_later_is_a_typed_error(b: Backend) {
+    let db = TestDb::migrated(b);
     let (s, cell, h1, h2) = seeded(&db);
     // Equal to the latest, and earlier than it.
     for (tx, h) in [(TX2, &h2), (TX1, &h1)] {
@@ -106,9 +113,8 @@ fn put_version_not_later_is_a_typed_error() {
     assert_eq!(s.latest(&cell).unwrap().unwrap().tx, "2024-03-19T10:00:00.000000Z");
 }
 
-#[test]
-fn bind_name_not_later_is_a_typed_error() {
-    let db = TestDb::migrated();
+fn bind_name_not_later_is_a_typed_error(b: Backend) {
+    let db = TestDb::migrated(b);
     let (s, _cell, _h1, _h2) = seeded(&db);
     let fn_hash = datumesh_core::function_hash(&fx_rate_descriptor()).unwrap();
     for tx in [TX1, "2024-01-01T00:00:00.000000Z"] {
@@ -117,13 +123,59 @@ fn bind_name_not_later_is_a_typed_error() {
     s.bind_name("rates.example.org/fx_rate", &fn_hash, TX2).unwrap();
 }
 
-/// Two raw transactions racing: the second insert waits for the first to commit (the
-/// trigger takes a per-cell lock), then sees its row. Out of order it fails; in order it
-/// succeeds. Without the lock both would see an empty history and both would commit.
-#[test]
-fn concurrent_raw_inserts_are_serialised_per_cell() {
+/// A raw connection holding a transaction open after one insert: `commit` ends it.
+enum Open {
+    Pg(datumesh_store::pg_unstable::postgres::Client),
+    Lite(rusqlite::Connection),
+}
+
+impl Open {
+    /// Begins a transaction (SQLite: `BEGIN IMMEDIATE`, the write lock) and runs `insert`.
+    fn begin(db: &TestDb, insert: &str) -> Open {
+        if db.is_pg() {
+            let mut c = db.pg().client();
+            c.batch_execute(&format!("BEGIN; {insert}")).unwrap();
+            Open::Pg(c)
+        } else {
+            let c = db.lite().conn();
+            c.execute_batch(&format!("BEGIN IMMEDIATE; {insert}")).unwrap();
+            Open::Lite(c)
+        }
+    }
+
+    fn commit(self) {
+        match self {
+            Open::Pg(mut c) => c.batch_execute("COMMIT").unwrap(),
+            Open::Lite(c) => c.execute_batch("COMMIT").unwrap(),
+        }
+    }
+}
+
+/// Runs `sql` on a new raw connection, in a thread: its result (the database's message).
+fn racing(db: &TestDb, sql: String) -> thread::JoinHandle<Result<(), String>> {
+    if db.is_pg() {
+        let config = db.pg().config.clone();
+        thread::spawn(move || {
+            let mut c = config.connect(datumesh_store::pg_unstable::postgres::NoTls).unwrap();
+            c.batch_execute(&format!("BEGIN; {sql}; COMMIT")).map_err(|e| pg_message(&e))
+        })
+    } else {
+        let path = db.lite().path.clone();
+        thread::spawn(move || {
+            let c = rusqlite::Connection::open(path).unwrap();
+            c.busy_timeout(Duration::from_secs(30)).unwrap();
+            c.execute_batch(&sql).map_err(|e| e.to_string())
+        })
+    }
+}
+
+/// Two raw transactions racing: the second insert waits for the first to commit
+/// (PostgreSQL: the trigger takes a per-cell lock; SQLite: one writer at a time, and the
+/// waiting insert then reads the committed row), then sees its row. Out of order it fails;
+/// in order it succeeds. Without the wait both would see an empty history and both commit.
+fn concurrent_raw_inserts_are_serialised_per_cell(b: Backend) {
     for (first, second, second_ok) in [(TX2, TX1, false), (TX1, TX2, true)] {
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.store();
         let r1 = stored_number_at("1.0892", TX1);
         let r2 = stored_number_at("1.0893", TX2);
@@ -131,55 +183,41 @@ fn concurrent_raw_inserts_are_serialised_per_cell() {
         let h2 = s.put_receipt(&r2).unwrap();
         let cell = Receipt::from_json(&r1).unwrap().cell().id();
         let hash_of = |tx: &str| if tx == TX1 { h1.clone() } else { h2.clone() };
-        let insert =
-            "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash) VALUES ($1, $2, $2::text::timestamptz, $3)";
-
-        let mut a = db.client();
-        let mut ta = a.transaction().unwrap();
-        ta.execute(insert, &[&cell, &first, &hash_of(first)]).unwrap();
-
-        let config = db.config.clone();
-        let (cell2, h_second) = (cell.clone(), hash_of(second));
-        let second_s = second.to_string();
-        let b = thread::spawn(move || {
-            let mut b = config.connect(datumesh_store::pg_unstable::postgres::NoTls).unwrap();
-            let mut tb = b.transaction().unwrap();
-            let r = tb.execute(insert, &[&cell2, &second_s, &h_second]);
-            let ok = r.is_ok();
-            if ok {
-                tb.commit().unwrap();
-            }
-            (ok, r.err().map(|e| db_message(&e)))
-        });
+        let insert = |tx: &str| {
+            let cols = db.pick("cell_id, tx, tx_at, receipt_hash", "cell_id, tx, receipt_hash");
+            let at = if db.is_pg() { format!("'{tx}'::timestamptz, ") } else { String::new() };
+            format!("INSERT INTO versions ({cols}) VALUES ('{cell}', '{tx}', {at}'{}')", hash_of(tx))
+        };
+        let a = Open::begin(&db, &insert(first));
+        let racer = racing(&db, insert(second));
         thread::sleep(Duration::from_millis(500));
-        assert!(!b.is_finished(), "the second insert did not wait for the first transaction");
-        ta.commit().unwrap();
-        let (ok, err) = b.join().unwrap();
-        assert_eq!(ok, second_ok, "{first} then {second}: {err:?}");
+        assert!(!racer.is_finished(), "the second insert did not wait for the first transaction");
+        a.commit();
+        let r = racer.join().unwrap();
+        assert_eq!(r.is_ok(), second_ok, "{first} then {second}: {r:?}");
+        if let Err(e) = r {
+            assert!(e.contains("not later"), "{e}");
+        }
         let n = s.versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap().len();
         assert_eq!(n, if second_ok { 2 } else { 1 });
     }
 }
 
-#[test]
-fn concurrent_raw_name_bindings_are_serialised_per_name() {
-    let db = TestDb::migrated();
+fn concurrent_raw_name_bindings_are_serialised_per_name(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let fn_hash = s.put_descriptor(&fx_rate_descriptor()).unwrap();
-    let insert = "INSERT INTO name_bindings (fn_name, tx, tx_at, fn_hash) VALUES ($1, $2, $2::text::timestamptz, $3)";
-    let mut a = db.client();
-    let mut ta = a.transaction().unwrap();
-    ta.execute(insert, &[&"rates.example.org/fx_rate", &TX2, &fn_hash]).unwrap();
-    let config = db.config.clone();
-    let h = fn_hash.clone();
-    let b = thread::spawn(move || {
-        let mut b = config.connect(datumesh_store::pg_unstable::postgres::NoTls).unwrap();
-        b.execute(insert, &[&"rates.example.org/fx_rate", &TX1, &h]).map_err(|e| db_message(&e))
-    });
+    let insert = |tx: &str| {
+        let cols = db.pick("fn_name, tx, tx_at, fn_hash", "fn_name, tx, fn_hash");
+        let at = if db.is_pg() { format!("'{tx}'::timestamptz, ") } else { String::new() };
+        format!("INSERT INTO name_bindings ({cols}) VALUES ('rates.example.org/fx_rate', '{tx}', {at}'{fn_hash}')")
+    };
+    let a = Open::begin(&db, &insert(TX2));
+    let racer = racing(&db, insert(TX1));
     thread::sleep(Duration::from_millis(500));
-    assert!(!b.is_finished());
-    ta.commit().unwrap();
-    let r = b.join().unwrap();
+    assert!(!racer.is_finished());
+    a.commit();
+    let r = racer.join().unwrap();
     assert!(r.unwrap_err().contains("not later"));
 }
 
@@ -187,10 +225,9 @@ fn concurrent_raw_name_bindings_are_serialised_per_name() {
 /// sequence of tx values interleaved with the others'. Every success is later than every
 /// version committed before it, so the history read back is strictly increasing and holds
 /// exactly the successes; every failure is NotLater.
-#[test]
-fn concurrent_put_version_keeps_tx_order() {
-    let db = TestDb::migrated();
-    let s = Arc::new(db.store_with(datumesh_store::PoolOptions::new().max_size(16)));
+fn concurrent_put_version_keeps_tx_order(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.store_sized(16);
     let threads = 8;
     let per_thread = 25;
     // Receipts for minute offsets 0..threads*per_thread on 2024-03-15.
@@ -234,3 +271,13 @@ fn concurrent_put_version_keeps_tx_order() {
     assert!(history.windows(2).all(|w| w[0] < w[1]));
     assert!(!history.is_empty());
 }
+
+backends!(
+    update_delete_truncate_fail_in_the_database,
+    raw_inserts_out_of_order_fail_in_the_database,
+    put_version_not_later_is_a_typed_error,
+    bind_name_not_later_is_a_typed_error,
+    concurrent_raw_inserts_are_serialised_per_cell,
+    concurrent_raw_name_bindings_are_serialised_per_name,
+    concurrent_put_version_keeps_tx_order,
+);

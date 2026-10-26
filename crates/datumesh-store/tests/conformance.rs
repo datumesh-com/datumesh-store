@@ -1,4 +1,4 @@
-//! Conformance: the core's resolver test kit passes for `PgStore` (time-aware, with the
+//! Conformance: the core's resolver test kit passes for both stores, `PgStore` and `SqliteStore` (time-aware, with the
 //! kit's default answer rule `AnswerRule::TxAndAsof`: since 0.3.0 `evaluate` answers as
 //! `stored_asof` does, so a version answers as of A only when its tx and its receipt's asof
 //! are both at or before A; since 0.3.1 with the slice checks, `Kit::slices(true)`: the
@@ -13,14 +13,15 @@
 //! JCS of the input: byte for byte the input when the input is canonical, and always text that
 //! `Receipt::from_json` accepts and that hashes to `hash`.
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::testkit::{AnswerRule, Fixtures, Kit};
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::{PgStore, Store};
+use datumesh_store::Store;
 
-fn load(db: &TestDb, fx: &Fixtures) -> PgStore {
+fn load(db: &TestDb, fx: &Fixtures) -> TStore {
     let s = db.bare_store();
     // Key documents first: receipts are verified against them.
     for (host, doc) in &fx.key_documents {
@@ -40,7 +41,7 @@ fn load(db: &TestDb, fx: &Fixtures) -> PgStore {
 
 /// `load`, and the slice fixtures (0.3.1): their key documents, descriptors (formula
 /// descriptors with `signature.order`), receipts (citing receipts and members) and manifests.
-fn load_with_slices(db: &TestDb, fx: &Fixtures) -> PgStore {
+fn load_with_slices(db: &TestDb, fx: &Fixtures) -> TStore {
     let s = load(db, fx);
     let sf = &fx.slices;
     for (host, doc) in &sf.key_documents {
@@ -58,11 +59,10 @@ fn load_with_slices(db: &TestDb, fx: &Fixtures) -> PgStore {
     s
 }
 
-#[test]
-fn testkit_passes_time_aware_with_slices() {
+fn testkit_passes_time_aware_with_slices(b: Backend) {
     // Time-aware, TxAndAsof (the default), and the slice checks: manifests by entry, exactly
     // as loaded, members from the store, None for every entry not loaded.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let kit = Kit::new().time_aware(true).slices(true);
     assert!(!kit.fixtures().slices.manifests.is_empty());
     if let Err(report) = kit.run(|fx| load_with_slices(&db, fx)) {
@@ -70,43 +70,39 @@ fn testkit_passes_time_aware_with_slices() {
     }
 }
 
-#[test]
-fn testkit_slice_checks_fail_without_the_manifests() {
+fn testkit_slice_checks_fail_without_the_manifests(b: Backend) {
     // Loaded as for 0.3.0 (no slice fixtures): the kit passes without the slice checks and
     // fails with them.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let kit = Kit::new().time_aware(true);
     let s = load(&db, kit.fixtures());
     assert!(kit.check(&s).is_ok());
     assert!(Kit::new().time_aware(true).slices(true).check(&s).is_err());
 }
 
-#[test]
-fn testkit_passes_time_aware() {
+fn testkit_passes_time_aware(b: Backend) {
     // The kit's default answer rule, TxAndAsof (datumesh-core 0.3.3).
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     if let Err(report) = Kit::new().time_aware(true).run(|fx| load(&db, fx)) {
         panic!("{report}");
     }
 }
 
-#[test]
-fn testkit_passes_with_tx_and_asof_and_fails_with_tx_only() {
+fn testkit_passes_with_tx_and_asof_and_fails_with_tx_only(b: Backend) {
     // Named explicitly: the store answers with both times. Under the old tx-only rule the
     // kit expects the EUR/CHF cell's first version from its tx on, before its receipt's
     // asof, which the store does not answer: that rule fails.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     if let Err(report) = Kit::new().time_aware(true).answer_rule(AnswerRule::TxAndAsof).run(|fx| load(&db, fx)) {
         panic!("{report}");
     }
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     assert!(Kit::new().time_aware(true).answer_rule(AnswerRule::TxOnly).run(|fx| load(&db, fx)).is_err());
 }
 
-#[test]
-fn testkit_passes_through_connect_url() {
-    // The same, with PgStore::connect and a pool of one connection.
-    let db = TestDb::migrated();
+fn testkit_passes_through_connect_url(b: Backend) {
+    // The same, with TStore::connect and a pool of one connection.
+    let db = TestDb::migrated(b);
     let kit = Kit::new().time_aware(true);
     {
         let s = db.bare_store();
@@ -124,14 +120,13 @@ fn testkit_passes_through_connect_url() {
             s.put_version(&v.cell_id, &v.tx, &v.receipt_hash).unwrap();
         }
     }
-    let s = PgStore::connect(&db.url()).unwrap();
+    let s = db.open_again();
     if let Err(report) = kit.check(&s) {
         panic!("{report}");
     }
 }
 
-#[test]
-fn every_receipt_vector_is_stored_exactly_when_it_verifies() {
+fn every_receipt_vector_is_stored_exactly_when_it_verifies(b: Backend) {
     let mut groups = vectors("receipt");
     groups.extend(vectors("invalid").into_iter().filter(|v| str_of(v, "kind") == "receipt"));
     let (mut stored, mut refused) = (0, 0);
@@ -140,7 +135,7 @@ fn every_receipt_vector_is_stored_exactly_when_it_verifies() {
         let bytes = input(&v);
         // A database of its own, with this vector's key documents (those a 200 response
         // offers and that satisfy SPEC 9.2).
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.bare_store();
         let mut rejected_doc = false;
         for (host, env) in v.get("keys").and_then(|k| k.as_object()).unwrap_or(&[]) {
@@ -187,8 +182,7 @@ fn every_receipt_vector_is_stored_exactly_when_it_verifies() {
     assert!(refused >= 25, "{refused}");
 }
 
-#[test]
-fn stored_vectors_recompute_through_the_store() {
+fn stored_vectors_recompute_through_the_store(b: Backend) {
     // Load the descriptor, receipt and version of every vector whose recompute object names
     // a stored function and whose receipt verifies: verify through the store reaches
     // recomputed (blob content given for blob values).
@@ -200,7 +194,7 @@ fn stored_vectors_recompute_through_the_store() {
             continue;
         }
         let id = str_of(&v, "id");
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.bare_store();
         put_vector_keys(&s, &v);
         s.put_descriptor(&desc.to_jcs()).unwrap();
@@ -220,3 +214,13 @@ fn stored_vectors_recompute_through_the_store() {
     }
     assert!(seen >= 2, "{seen}");
 }
+
+backends!(
+    testkit_passes_time_aware_with_slices,
+    testkit_slice_checks_fail_without_the_manifests,
+    testkit_passes_time_aware,
+    testkit_passes_with_tx_and_asof_and_fails_with_tx_only,
+    testkit_passes_through_connect_url,
+    every_receipt_vector_is_stored_exactly_when_it_verifies,
+    stored_vectors_recompute_through_the_store,
+);

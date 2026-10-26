@@ -2,19 +2,15 @@
 //! same hash. Input the core rejects is refused with the core's error code, and nothing is
 //! stored.
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::{function_hash, sha256_hex, ErrorCode, Receipt, Resolver};
 use datumesh_store::{Error, Store};
 
-fn count(db: &TestDb, table: &str) -> i64 {
-    db.client().query_one(&format!("SELECT count(*) FROM {table}"), &[]).unwrap().get(0)
-}
-
-#[test]
-fn same_descriptor_receipt_blob_twice_is_stored_once() {
-    let db = TestDb::migrated();
+fn same_descriptor_receipt_blob_twice_is_stored_once(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let desc = str_of(&vector("function/computed-convert"), "input").as_bytes().to_vec();
     let d1 = s.put_descriptor(&desc).unwrap();
@@ -45,13 +41,12 @@ fn same_descriptor_receipt_blob_twice_is_stored_once() {
     assert_eq!(s.blob(&b1).unwrap().as_deref(), Some(content.as_slice()));
     let empty = s.put_blob(b"").unwrap();
     assert_eq!(s.blob(&empty).unwrap().as_deref(), Some(&b""[..]));
-    let len: i64 = db.client().query_one("SELECT length FROM blobs WHERE sha256 = $1", &[&b1]).unwrap().get(0);
+    let len = db.int(&format!("SELECT length FROM blobs WHERE sha256 = '{b1}'"));
     assert_eq!(len, content.len() as i64);
 }
 
-#[test]
-fn receipts_the_core_rejects_are_refused_with_its_code() {
-    let db = TestDb::migrated();
+fn receipts_the_core_rejects_are_refused_with_its_code(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let mut seen = 0;
     for v in vectors("invalid").into_iter().filter(|v| str_of(v, "kind") == "receipt") {
@@ -73,9 +68,8 @@ fn receipts_the_core_rejects_are_refused_with_its_code() {
     assert_eq!(e.code().map(ErrorCode::as_str), Some("E_PARSE_JSON"), "{e}");
 }
 
-#[test]
-fn descriptors_the_core_rejects_are_refused_with_its_code() {
-    let db = TestDb::migrated();
+fn descriptors_the_core_rejects_are_refused_with_its_code(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let mut seen = 0;
     for v in vectors("invalid").into_iter().filter(|v| str_of(v, "kind") == "function") {
@@ -92,9 +86,8 @@ fn descriptors_the_core_rejects_are_refused_with_its_code() {
 /// spec-0.4.0 descriptors: `signature.order` and argument `extent` (formula descriptors
 /// always carry `order`) are stored, canonical, under the core's function hash (0.3.1;
 /// until 0.3.0 the store refused them with `E_SCHEMA`, as a spec-0.3.0 verifier does).
-#[test]
-fn descriptors_with_order_and_extent_are_stored() {
-    let db = TestDb::migrated();
+fn descriptors_with_order_and_extent_are_stored(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let mut seen = 0;
     for v in vectors("function") {
@@ -118,14 +111,13 @@ fn descriptors_with_order_and_extent_are_stored() {
     assert_eq!(s.put_descriptor(&d).unwrap(), function_hash(&d).unwrap());
 }
 
-#[test]
-fn same_hash_with_other_bytes_is_a_conflict() {
+fn same_hash_with_other_bytes_is_a_conflict(b: Backend) {
     // After verification, a second receipt with a stored hash but other bytes can only be
     // another valid signature by the same key (the hash covers computed_by, so a rotated key
     // gives another hash; Ed25519 as RFC 8032 signs deterministically, so this needs a
     // randomised signer). Such bytes are planted here with SQL; the store keeps them and
     // reports the conflict.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let good = input(&v);
@@ -142,16 +134,18 @@ fn same_hash_with_other_bytes_is_a_conflict() {
     }
     let planted = planted_v.to_jcs();
     assert_ne!(planted, jcs(&good));
-    db.client()
-        .execute(
-            "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, fn_hash, publisher)
-             VALUES ($1, $2, $3, $4, $4::text::timestamptz, $5, $6)",
-            &[&r.hash(), &planted, &r.cell().id(), &r.tx(), &r.cell().fn_hash, &r.publisher()],
-        )
-        .unwrap();
+    db.plant_receipt(r.hash(), &planted, &r);
     match s.put_receipt(&good) {
         Err(Error::Conflict { hash }) => assert_eq!(hash, r.hash()),
         x => panic!("{x:?}"),
     }
     assert_eq!(&*s.receipt(r.hash()).unwrap(), planted.as_slice());
 }
+
+backends!(
+    same_descriptor_receipt_blob_twice_is_stored_once,
+    receipts_the_core_rejects_are_refused_with_its_code,
+    descriptors_the_core_rejects_are_refused_with_its_code,
+    descriptors_with_order_and_extent_are_stored,
+    same_hash_with_other_bytes_is_a_conflict,
+);

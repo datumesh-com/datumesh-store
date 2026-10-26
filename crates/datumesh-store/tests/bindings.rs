@@ -5,6 +5,7 @@
 //! start; malformed arguments are the core's codes, without a query. `resolve_name` agrees
 //! with it everywhere. `Store` stays object-safe: all of it through `&dyn Store`.
 
+#[macro_use]
 mod common;
 
 use common::*;
@@ -30,11 +31,10 @@ fn pair(b: Option<Binding>) -> Option<(String, String)> {
     b.map(|b| (b.fn_hash, b.tx))
 }
 
-#[test]
-fn before_at_between_and_after_bindings() {
-    let db = TestDb::migrated();
+fn before_at_between_and_after_bindings(b: Backend) {
+    let db = TestDb::migrated(b);
     // As the engine holds it: shared, behind a trait object.
-    let pg: std::sync::Arc<dyn Store + Send + Sync> = std::sync::Arc::new(db.store());
+    let pg: std::sync::Arc<dyn Store + Send + Sync> = db.store().0;
     let s: &dyn Store = &*pg;
     let a = s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let b = s.put_descriptor(&descriptor_b()).unwrap();
@@ -73,9 +73,8 @@ fn before_at_between_and_after_bindings() {
     assert_eq!(s.resolve_binding("rates.example.org/other", T4).unwrap(), None);
 }
 
-#[test]
-fn a_binding_is_a_value() {
-    let db = TestDb::migrated();
+fn a_binding_is_a_value(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let a = s.put_descriptor(&fx_rate_descriptor()).unwrap();
     s.bind_name(NAME, &a, T1).unwrap();
@@ -89,10 +88,9 @@ fn a_binding_is_a_value() {
     assert!(format!("{got:?}").contains(T1));
 }
 
-#[test]
-fn malformed_arguments_are_the_cores_codes_without_a_query() {
+fn malformed_arguments_are_the_cores_codes_without_a_query(b: Backend) {
     // An empty database: a query would fail with Error::Database.
-    let db = TestDb::empty();
+    let db = TestDb::empty(b);
     let s = db.bare_store();
     let code = |r: datumesh_store::Result<Option<Binding>>| r.unwrap_err().code();
     for bad in ["", "fx_rate", "rates.example.org/", "Rates.example.org/fx_rate", "rates.example.org/fx-rate"] {
@@ -104,3 +102,9 @@ fn malformed_arguments_are_the_cores_codes_without_a_query() {
     // Well-formed arguments do reach the (empty) database.
     assert!(matches!(s.resolve_binding(NAME, T1), Err(datumesh_store::Error::Database(_))));
 }
+
+backends!(
+    before_at_between_and_after_bindings,
+    a_binding_is_a_value,
+    malformed_arguments_are_the_cores_codes_without_a_query,
+);

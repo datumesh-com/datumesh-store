@@ -90,7 +90,7 @@ fn tricky_receipts() -> Vec<Vec<u8>> {
 
 #[test]
 fn migration_2_backfills_asof_from_the_stored_bytes() {
-    let db = TestDb::empty();
+    let db = PgDb::empty();
     let mut c = db.client();
     at_0_1_2(&mut c);
 
@@ -148,7 +148,7 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
     }
 
     // The schema is what the migrations make; re-running is a no-op.
-    let scratch = TestDb::empty();
+    let scratch = PgDb::empty();
     let diff = migrate::check(&s, &scratch.bare_store()).unwrap();
     assert!(diff.is_empty(), "{diff:#?}");
     let before = migrate::catalog(&s).unwrap();
@@ -170,7 +170,7 @@ fn migration_2_backfills_asof_from_the_stored_bytes() {
 /// the receipt's asof: a trigger derives it from the bytes.
 #[test]
 fn receipts_inserted_without_asof_get_it_from_their_bytes() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let mut c = db.client();
     for b in tricky_receipts().into_iter().chain([stored_number_with(
         "1.5",

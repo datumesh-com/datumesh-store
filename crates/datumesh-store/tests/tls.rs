@@ -43,7 +43,7 @@ fn unique(prefix: &str) -> String {
 
 /// Whether the server's sessions with this application name use TLS, as the server sees
 /// them (`pg_stat_ssl`); None when there is no such session.
-fn sessions_use_tls(db: &TestDb, app: &str) -> Option<bool> {
+fn sessions_use_tls(db: &PgDb, app: &str) -> Option<bool> {
     db.client()
         .query_one(
             "SELECT bool_and(s.ssl) FROM pg_stat_ssl s JOIN pg_stat_activity a USING (pid) WHERE a.application_name = $1",
@@ -76,7 +76,7 @@ fn database_message(e: &Error) -> String {
 #[test]
 fn require_with_the_ca_connects_verifies_and_stores() {
     let Some((admin, ca)) = tls_server() else { return };
-    let db = TestDb::empty_on(&admin);
+    let db = PgDb::empty_on(&admin);
     let app = unique("dm_tls_require");
     let url = with_param(&db.url(), &format!("sslmode=require&application_name={app}"));
     let options = PoolOptions::new().tls_root_certificates_pem(&ca).unwrap();
@@ -106,7 +106,7 @@ fn require_with_the_ca_connects_verifies_and_stores() {
 #[test]
 fn require_without_the_ca_fails_on_the_certificate() {
     let Some((admin, _)) = tls_server() else { return };
-    let db = TestDb::empty_on(&admin);
+    let db = PgDb::empty_on(&admin);
     let url = with_param(&db.url(), "sslmode=require");
     for e in [
         PgStore::connect(&url).unwrap_err(),
@@ -126,7 +126,7 @@ fn require_without_the_ca_fails_on_the_certificate() {
 #[test]
 fn a_wrong_host_name_fails() {
     let Some((admin, ca)) = tls_server() else { return };
-    let db = TestDb::empty_on(&admin);
+    let db = PgDb::empty_on(&admin);
     // The same server by IP address: the certificate names hosts only.
     let config: Config = db.url().parse().unwrap();
     let host = match &config.get_hosts()[0] {
@@ -154,7 +154,7 @@ fn a_wrong_host_name_fails() {
 #[test]
 fn disable_connects_in_plain_text() {
     let Some((admin, _)) = tls_server() else { return };
-    let db = TestDb::empty_on(&admin);
+    let db = PgDb::empty_on(&admin);
     let app = unique("dm_tls_disable");
     // No CA given: with sslmode=disable no certificate is looked at.
     let s = PgStore::connect(&with_param(&db.url(), &format!("sslmode=disable&application_name={app}"))).unwrap();
@@ -170,7 +170,7 @@ fn disable_connects_in_plain_text() {
 /// `sslmode=prefer` connects in plain text there.
 #[test]
 fn prefer_connects_in_plain_text_to_a_server_without_tls() {
-    let db = TestDb::empty();
+    let db = PgDb::empty();
     let ssl: String = db.client().query_one("SHOW ssl", &[]).unwrap().get(0);
     if ssl != "off" {
         eprintln!("skipped: DATABASE_URL's server has ssl = {ssl}");

@@ -157,7 +157,7 @@ fn assert_index_is_the_cores(c: &mut Client, all: &[Receipt]) {
 
 #[test]
 fn migration_3_backfills_the_typed_argument_index() {
-    let db = TestDb::empty();
+    let db = PgDb::empty();
     let mut c = db.client();
     at_0_3_0(&mut c);
 
@@ -194,7 +194,7 @@ fn migration_3_backfills_the_typed_argument_index() {
     assert_index_is_the_cores(&mut c, &all);
 
     // The schema is what the migrations make; re-running is a no-op.
-    let scratch = TestDb::empty();
+    let scratch = PgDb::empty();
     let diff = migrate::check(&s, &scratch.bare_store()).unwrap();
     assert!(diff.is_empty(), "{diff:#?}");
     let before = migrate::catalog(&s).unwrap();
@@ -228,7 +228,7 @@ fn migration_3_backfills_the_typed_argument_index() {
 /// receipts' cells indexed: a trigger derives the rows from the bytes, once per cell.
 #[test]
 fn receipts_inserted_by_a_0_3_0_writer_are_indexed() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let mut c = db.client();
     let mut all = Vec::new();
     for b in typed_receipts() {

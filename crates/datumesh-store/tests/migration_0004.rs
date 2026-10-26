@@ -80,7 +80,7 @@ fn receipts() -> Vec<Vec<u8>> {
 
 #[test]
 fn migration_4_backfills_receipt_values() {
-    let db = TestDb::empty();
+    let db = PgDb::empty();
     let mut c = db.client();
     at_0_3_1(&mut c);
     let mut all: Vec<Receipt> = Vec::new();
@@ -97,7 +97,7 @@ fn migration_4_backfills_receipt_values() {
     assert_eq!(migrate::apply(&s).unwrap(), [4]);
     assert_values_are_the_cores(&mut c, &all);
 
-    let scratch = TestDb::empty();
+    let scratch = PgDb::empty();
     let diff = migrate::check(&s, &scratch.bare_store()).unwrap();
     assert!(diff.is_empty(), "{diff:#?}");
     let before = migrate::catalog(&s).unwrap();
@@ -108,7 +108,7 @@ fn migration_4_backfills_receipt_values() {
 
 #[test]
 fn receipts_inserted_by_a_0_3_1_writer_get_their_values() {
-    let db = TestDb::migrated();
+    let db = PgDb::migrated();
     let mut c = db.client();
     let mut all: Vec<Receipt> = Vec::new();
     for b in receipts() {

@@ -4,6 +4,7 @@
 //! entry; each member receipt's manifests are found from the member (`member_manifests`).
 //! A manifest does not need its members stored (members are fetched by hash, like inputs).
 
+#[macro_use]
 mod common;
 
 use std::sync::{Arc, Barrier};
@@ -11,11 +12,10 @@ use std::thread;
 
 use common::*;
 use datumesh_core::{ErrorCode, Manifest, Resolver};
-use datumesh_store::{PoolOptions, Store};
+use datumesh_store::Store;
 
-#[test]
-fn manifest_vectors_are_stored_under_their_entry() {
-    let db = TestDb::migrated();
+fn manifest_vectors_are_stored_under_their_entry(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let mut seen = 0;
     for v in vectors("slice").into_iter().filter(|v| str_of(v, "input").contains("\"members\"")) {
@@ -43,9 +43,8 @@ fn manifest_vectors_are_stored_under_their_entry() {
     assert_eq!(count(&db, "manifests"), seen);
 }
 
-#[test]
-fn malformed_manifests_are_invalid_with_the_cores_codes() {
-    let db = TestDb::migrated();
+fn malformed_manifests_are_invalid_with_the_cores_codes(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let mut cases: Vec<(String, Vec<u8>)> = vectors("invalid")
         .into_iter()
@@ -84,9 +83,8 @@ fn malformed_manifests_are_invalid_with_the_cores_codes() {
     }
 }
 
-#[test]
-fn more_members_than_the_limit_are_refused() {
-    let db = TestDb::migrated();
+fn more_members_than_the_limit_are_refused(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let sl = r#"{"args":{"k":"*"},"fn":"f","fn_hash":"0000000000000000000000000000000000000000000000000000000000000000","ns":"example.org"}"#;
     let members: Vec<String> = (0..1_048_577u64).map(|i| format!("\"{i:064x}\"")).collect();
@@ -95,9 +93,8 @@ fn more_members_than_the_limit_are_refused() {
     assert_eq!(count(&db, "manifests"), 0);
 }
 
-#[test]
-fn manifest_lookups_of_unknown_or_malformed_entries_are_none() {
-    let db = TestDb::migrated();
+fn manifest_lookups_of_unknown_or_malformed_entries_are_none(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let entry = s.put_manifest(&input(&vector("slice/manifest"))).unwrap();
     assert!(s.manifest(&entry).is_some());
@@ -121,31 +118,31 @@ fn manifest_lookups_of_unknown_or_malformed_entries_are_none() {
     assert!(s.member_manifests(&h).unwrap().is_empty());
 }
 
-#[test]
-fn manifests_are_insert_only_in_the_database() {
-    let db = TestDb::migrated();
+fn manifests_are_insert_only_in_the_database(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     s.put_manifest(&input(&vector("slice/manifest"))).unwrap();
-    let mut c = db.client();
     for sql in [
         "UPDATE manifests SET bytes = bytes",
         "DELETE FROM manifests",
-        "TRUNCATE manifests CASCADE",
         "UPDATE manifest_members SET member_hash = member_hash",
         "DELETE FROM manifest_members",
-        "TRUNCATE manifest_members",
     ] {
-        let e = c.batch_execute(sql).expect_err(sql);
-        let msg = e.as_db_error().map(|d| d.message().to_string()).unwrap_or_default();
-        assert!(msg.contains("append-only"), "{sql}: {msg}");
+        db.refused(sql);
+    }
+    if db.is_pg() {
+        db.refused("TRUNCATE manifests CASCADE");
+        db.refused("TRUNCATE manifest_members");
+    } else {
+        db.refused("INSERT OR REPLACE INTO manifests SELECT * FROM manifests");
+        db.refused("INSERT OR REPLACE INTO manifest_members SELECT * FROM manifest_members");
     }
     assert_eq!(count(&db, "manifests"), 1);
 }
 
-#[test]
-fn concurrent_puts_of_one_manifest_store_it_once() {
-    let db = TestDb::migrated();
-    let s = Arc::new(db.bare_store_with(PoolOptions::new().max_size(8)));
+fn concurrent_puts_of_one_manifest_store_it_once(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.bare_store_sized(8);
     let sl = datumesh_core::Slice::from_json(
         br#"{"args":{"k":"*"},"fn":"f","fn_hash":"0000000000000000000000000000000000000000000000000000000000000000","ns":"example.org"}"#,
     )
@@ -156,10 +153,10 @@ fn concurrent_puts_of_one_manifest_store_it_once() {
     let barrier = Arc::new(Barrier::new(8));
     let handles: Vec<_> = (0..8)
         .map(|i| {
-            let (s, bytes, barrier, url) = (s.clone(), bytes.clone(), barrier.clone(), db.url());
+            let (s, bytes, barrier) = (s.clone(), bytes.clone(), barrier.clone());
+            // Half the threads through stores of their own (pools of their own).
+            let own = (i % 2 == 1).then(|| db.open_again());
             thread::spawn(move || {
-                // Half of the writers through their own store.
-                let own = (i % 2 == 1).then(|| datumesh_store::PgStore::connect(&url).unwrap());
                 barrier.wait();
                 match &own {
                     Some(o) => o.put_manifest(&bytes),
@@ -175,3 +172,12 @@ fn concurrent_puts_of_one_manifest_store_it_once() {
     assert_eq!(count(&db, "manifest_members"), 10_000);
     assert_eq!(&*s.manifest(&m.entry()).unwrap(), bytes.as_slice());
 }
+
+backends!(
+    manifest_vectors_are_stored_under_their_entry,
+    malformed_manifests_are_invalid_with_the_cores_codes,
+    more_members_than_the_limit_are_refused,
+    manifest_lookups_of_unknown_or_malformed_entries_are_none,
+    manifests_are_insert_only_in_the_database,
+    concurrent_puts_of_one_manifest_store_it_once,
+);

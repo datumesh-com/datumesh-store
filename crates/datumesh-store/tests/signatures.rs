@@ -2,6 +2,7 @@
 //! key document stored for the receipt's signer host, and refuses anything that does not
 //! verify with `verify`'s code. Nothing unverified enters the store.
 
+#[macro_use]
 mod common;
 
 use common::*;
@@ -9,7 +10,7 @@ use datumesh_core::{ErrorCode, Receipt, Resolver};
 use datumesh_store::{Error, Store};
 
 fn count(db: &TestDb) -> i64 {
-    db.client().query_one("SELECT count(*) FROM receipts", &[]).unwrap().get(0)
+    db.count("receipts")
 }
 
 fn refused(r: datumesh_store::Result<String>, code: ErrorCode) {
@@ -19,9 +20,8 @@ fn refused(r: datumesh_store::Result<String>, code: ErrorCode) {
     }
 }
 
-#[test]
-fn a_forged_copy_is_refused_and_the_real_one_then_accepted() {
-    let db = TestDb::migrated();
+fn a_forged_copy_is_refused_and_the_real_one_then_accepted(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let good = jcs(&input(&vector("receipt/stored-number")));
     let r = Receipt::from_json(&good).unwrap();
@@ -42,9 +42,8 @@ fn a_forged_copy_is_refused_and_the_real_one_then_accepted() {
     assert_eq!(count(&db), 1);
 }
 
-#[test]
-fn a_receipt_before_its_namespace_is_refused() {
-    let db = TestDb::migrated();
+fn a_receipt_before_its_namespace_is_refused(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let v = vector("receipt/stored-number");
     refused(s.put_receipt(&input(&v)), ErrorCode::KeyUnavailable);
@@ -55,15 +54,14 @@ fn a_receipt_before_its_namespace_is_refused() {
     s.put_namespace("rates.example.org", &key_doc(&v, "rates.example.org"), VALIDATED_AT).unwrap();
     s.put_receipt(&input(&v)).unwrap();
     // A computed receipt needs its own signer's document, not its inputs'.
-    let db2 = TestDb::migrated();
+    let db2 = TestDb::migrated(b);
     let s2 = db2.bare_store();
     s2.put_namespace("rates.example.org", &key_doc(&v, "rates.example.org"), VALIDATED_AT).unwrap();
     refused(s2.put_receipt(&input(&vector("receipt/computed-with-lineage"))), ErrorCode::KeyUnavailable);
 }
 
-#[test]
-fn unknown_key_ids_and_keys_outside_their_window_are_refused() {
-    let db = TestDb::migrated();
+fn unknown_key_ids_and_keys_outside_their_window_are_refused(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let v = vector("receipt/stored-number");
     // A document for rates.example.org that lists only the second key (d9a2...): the receipt
@@ -90,7 +88,7 @@ fn unknown_key_ids_and_keys_outside_their_window_are_refused() {
         ("invalid/receipt-key-not-yet-valid", ErrorCode::KeyNotValid),
         ("invalid/receipt-wrong-signer", ErrorCode::Signature),
     ] {
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.bare_store();
         let iv = vector(id);
         put_vector_keys(&s, &iv);
@@ -99,18 +97,17 @@ fn unknown_key_ids_and_keys_outside_their_window_are_refused() {
     }
 
     // Signed with the first key (valid until 2024-06-01) but issued after: outside the window.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let s = db.store();
     refused(s.put_receipt(&stored_number_at("1.09", "2024-07-01T00:00:00.000000Z")), ErrorCode::KeyNotValid);
     // Inside it: accepted.
     s.put_receipt(&stored_number_at("1.09", "2024-05-31T23:59:59.999999Z")).unwrap();
 }
 
-#[test]
-fn a_later_key_document_does_not_touch_stored_receipts() {
+fn a_later_key_document_does_not_touch_stored_receipts(b: Backend) {
     // Revoking (dropping) a key afterwards: what was stored stays and stays readable, and
     // putting it again is idempotent; new receipts by that key are refused.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/stored-number");
     let h = s.put_receipt(&input(&v)).unwrap();
@@ -142,3 +139,10 @@ fn a_later_key_document_does_not_touch_stored_receipts() {
     assert_eq!(&*s.receipt(&h).unwrap(), good.as_slice());
     refused(s.put_receipt(&stored_number_at("1.09", "2024-03-20T00:00:00.000000Z")), ErrorCode::KeyUnknown);
 }
+
+backends!(
+    a_forged_copy_is_refused_and_the_real_one_then_accepted,
+    a_receipt_before_its_namespace_is_refused,
+    unknown_key_ids_and_keys_outside_their_window_are_refused,
+    a_later_key_document_does_not_touch_stored_receipts,
+);

@@ -9,15 +9,15 @@
 //! Names: bind A at tx1 and B at tx2; `resolve_name` per time; receipts of both functions
 //! still verify through the store.
 
+#[macro_use]
 mod common;
 
 use common::*;
 use datumesh_core::{verify, Cell, Descriptor, ErrorCode, Level, Receipt, ReceiptBuilder, Resolver, Scalar, Type};
 use datumesh_store::{Error, Store};
 
-#[test]
-fn inputs_and_dependents_follow_the_edges() {
-    let db = TestDb::migrated();
+fn inputs_and_dependents_follow_the_edges(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let lineage = vector("receipt/computed-with-lineage");
     let stored = vector("receipt/stored-number");
@@ -86,9 +86,8 @@ fn function_b(tx: &str) -> (Vec<u8>, String, Vec<u8>) {
     (b, hash, receipt_json(&r))
 }
 
-#[test]
-fn names_resolve_per_time_and_both_functions_verify() {
-    let db = TestDb::migrated();
+fn names_resolve_per_time_and_both_functions_verify(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let tx1 = "2024-03-15T16:00:00.000000Z";
     let tx2 = "2024-03-18T10:00:00.000000Z";
@@ -120,9 +119,8 @@ fn names_resolve_per_time_and_both_functions_verify() {
     }
 }
 
-#[test]
-fn bind_name_validates_its_arguments() {
-    let db = TestDb::migrated();
+fn bind_name_validates_its_arguments(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     let a = s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let tx = "2024-03-15T16:00:00.000000Z";
@@ -142,3 +140,9 @@ fn bind_name_validates_its_arguments() {
     assert_eq!(s.resolve_name("", tx).unwrap_err().code(), Some(ErrorCode::CanonName));
     assert_eq!(s.resolve_name("rates.example.org/fx_rate", "\0").unwrap_err().code(), Some(ErrorCode::CanonInstant));
 }
+
+backends!(
+    inputs_and_dependents_follow_the_edges,
+    names_resolve_per_time_and_both_functions_verify,
+    bind_name_validates_its_arguments,
+);

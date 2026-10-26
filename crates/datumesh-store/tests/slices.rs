@@ -13,6 +13,7 @@
 //!   Valid vectors reach their level and code; invalid ones fail with their code, or the store
 //!   refused the part that is wrong.
 
+#[macro_use]
 mod common;
 
 use std::borrow::Cow;
@@ -20,12 +21,12 @@ use std::borrow::Cow;
 use common::*;
 use datumesh_core::json::Value;
 use datumesh_core::{verify, Cell, ErrorCode, Evaluation, Level, Manifest, Receipt, Resolver, Scalar};
-use datumesh_store::{PgStore, Store};
+use datumesh_store::Store;
 
 /// The store for descriptors, receipts and manifests; the vector's `recompute.value` (and
 /// `lineage`) for the evaluation.
 struct WithValue<'a> {
-    store: &'a PgStore,
+    store: &'a TStore,
     value: Option<Scalar>,
     lineage: Option<Vec<String>>,
 }
@@ -52,7 +53,7 @@ impl Resolver for WithValue<'_> {
     }
 }
 
-fn with_value<'a>(store: &'a PgStore, v: &Value) -> WithValue<'a> {
+fn with_value<'a>(store: &'a TStore, v: &Value) -> WithValue<'a> {
     let rc = v.get("recompute");
     WithValue {
         store,
@@ -76,14 +77,13 @@ fn hashes(r: &Receipt) -> Vec<String> {
     r.inputs().iter().filter(|e| !e.starts_with("slice:")).cloned().collect()
 }
 
-#[test]
-fn slice_lineage_vectors_verify_through_the_store() {
+fn slice_lineage_vectors_verify_through_the_store(b: Backend) {
     let valid = slice_vectors("receipt");
     assert!(valid.len() >= 13, "{}", valid.len());
     let mut recomputed = 0;
     for v in &valid {
         let id = str_of(v, "id");
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.bare_store();
         let failed = put_vector_world(&s, v);
         assert!(failed.is_empty(), "{id}: {failed:?}");
@@ -109,14 +109,13 @@ fn slice_lineage_vectors_verify_through_the_store() {
     assert!(recomputed >= 10, "{recomputed}");
 }
 
-#[test]
-fn invalid_slice_lineage_vectors_fail_through_the_store() {
+fn invalid_slice_lineage_vectors_fail_through_the_store(b: Backend) {
     let invalid = slice_vectors("invalid");
     assert!(invalid.len() >= 17, "{}", invalid.len());
     for v in &invalid {
         let id = str_of(v, "id");
         let want = str_of(v, "error");
-        let db = TestDb::migrated();
+        let db = TestDb::migrated(b);
         let s = db.bare_store();
         let failed = put_vector_world(&s, v);
         let out = verify(&input(v), &keys(v), Some(&with_value(&s, v)), None);
@@ -136,9 +135,8 @@ fn invalid_slice_lineage_vectors_fail_through_the_store() {
     }
 }
 
-#[test]
-fn slice_entries_are_recorded_and_receipt_edges_unchanged() {
-    let db = TestDb::migrated();
+fn slice_entries_are_recorded_and_receipt_edges_unchanged(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     // slice-mixed-inputs reads single cells and a slice.
     let v = vector("receipt/slice-mixed-inputs");
@@ -179,9 +177,8 @@ fn slice_entries_are_recorded_and_receipt_edges_unchanged() {
     }
 }
 
-#[test]
-fn members_find_their_manifests_and_the_cells_reading_them() {
-    let db = TestDb::migrated();
+fn members_find_their_manifests_and_the_cells_reading_them(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let v = vector("receipt/slice-weighted-mean");
     let r = Receipt::from_json(&input(&v)).unwrap();
@@ -230,9 +227,8 @@ fn members_find_their_manifests_and_the_cells_reading_them() {
     }
 }
 
-#[test]
-fn put_receipt_of_a_slice_receipt_is_idempotent() {
-    let db = TestDb::migrated();
+fn put_receipt_of_a_slice_receipt_is_idempotent(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     let v = vector("receipt/slice-join");
     assert!(put_vector_world(&s, &v).is_empty());
@@ -246,15 +242,30 @@ fn put_receipt_of_a_slice_receipt_is_idempotent() {
     assert_eq!(&*s.receipt(&h).unwrap(), back.as_slice());
 }
 
-#[test]
-fn the_slice_edges_are_insert_only() {
-    let db = TestDb::migrated();
+fn the_slice_edges_are_insert_only(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.bare_store();
     assert!(put_vector_world(&s, &vector("receipt/slice-range")).is_empty());
-    let mut c = db.client();
-    for sql in ["UPDATE slice_edges SET entry = entry", "DELETE FROM slice_edges", "TRUNCATE slice_edges"] {
-        let e = c.batch_execute(sql).expect_err(sql);
-        let msg = e.as_db_error().map(|d| d.message().to_string()).unwrap_or_default();
-        assert!(msg.contains("append-only"), "{sql}: {msg}");
+    for sql in ["UPDATE slice_edges SET entry = entry", "DELETE FROM slice_edges"] {
+        db.refused(sql);
+    }
+    if db.is_pg() {
+        db.refused("TRUNCATE slice_edges");
+    } else {
+        db.refused("INSERT OR REPLACE INTO slice_edges SELECT * FROM slice_edges");
+    }
+    // The other insert-only tables of 0.3.1: the typed-argument index.
+    for table in ["cells", "cell_args"] {
+        db.refused(&format!("UPDATE {table} SET cell_id = cell_id"));
+        db.refused(&format!("DELETE FROM {table}"));
     }
 }
+
+backends!(
+    slice_lineage_vectors_verify_through_the_store,
+    invalid_slice_lineage_vectors_fail_through_the_store,
+    slice_entries_are_recorded_and_receipt_edges_unchanged,
+    members_find_their_manifests_and_the_cells_reading_them,
+    put_receipt_of_a_slice_receipt_is_idempotent,
+    the_slice_edges_are_insert_only,
+);

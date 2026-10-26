@@ -4,6 +4,7 @@
 //! asof = tx; with a late-signed receipt it answers with both times (`stored_asof`), while
 //! `version_asof` keeps looking at tx only.
 
+#[macro_use]
 mod common;
 
 use common::*;
@@ -13,9 +14,8 @@ use datumesh_store::{Store, Version};
 const TX1: &str = "2024-03-15T16:00:00.000000Z";
 const TX2: &str = "2024-03-18T10:00:00.000000Z";
 
-#[test]
-fn as_of_before_between_after_and_at() {
-    let db = TestDb::migrated();
+fn as_of_before_between_after_and_at(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let r1 = stored_number_at("1.0892", TX1);
@@ -68,11 +68,10 @@ fn as_of_before_between_after_and_at() {
     assert!(s.versions(&other, TX1, TX2).unwrap().is_empty());
 }
 
-#[test]
-fn evaluate_is_none_for_functions_that_are_not_stored() {
+fn evaluate_is_none_for_functions_that_are_not_stored(b: Backend) {
     // computed-with-lineage is a convert (expr) cell: even with a version recorded for it,
     // the store does not evaluate it.
-    let db = TestDb::migrated();
+    let db = TestDb::migrated(b);
     let s = db.store();
     let v = vector("receipt/computed-with-lineage");
     let rc = v.get("recompute").unwrap();
@@ -83,7 +82,7 @@ fn evaluate_is_none_for_functions_that_are_not_stored() {
     s.put_version(&r.cell().id(), r.tx(), &h).unwrap();
     assert_eq!(s.evaluate(r.cell(), r.asof()), None);
     // And without its descriptor, nothing is evaluated either.
-    let db2 = TestDb::migrated();
+    let db2 = TestDb::migrated(b);
     let s2 = db2.store();
     let sn = vector("receipt/stored-number");
     let b = input(&sn);
@@ -98,9 +97,8 @@ fn evaluate_is_none_for_functions_that_are_not_stored() {
 /// vectors' stored-number receipt (tx 2024-03-15T16:00, asof 2024-03-16T09:00) gives no value
 /// from its tx until its asof; a late-signed second version (tx 2024-03-18T10:00, asof
 /// 2024-03-19T12:00) leaves the first answering until its asof. `version_asof` is unchanged.
-#[test]
-fn evaluate_answers_with_both_times() {
-    let db = TestDb::migrated();
+fn evaluate_answers_with_both_times(b: Backend) {
+    let db = TestDb::migrated(b);
     let s = db.store();
     s.put_descriptor(&fx_rate_descriptor()).unwrap();
     let v = vector("receipt/stored-number");
@@ -142,3 +140,9 @@ fn evaluate_answers_with_both_times() {
         assert_eq!(s.evaluate(&cell, a), want, "stored_asof as of {a}");
     }
 }
+
+backends!(
+    as_of_before_between_after_and_at,
+    evaluate_is_none_for_functions_that_are_not_stored,
+    evaluate_answers_with_both_times,
+);
