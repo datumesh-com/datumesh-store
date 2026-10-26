@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use datumesh_store::{migrate, PgStore, PoolOptions, Resolver, SqliteOptions, SqliteStore, Store};
+use datumesh_store::{migrate, PgStore, PoolOptions, Resolver, SqliteOptions, SqliteStore};
 
 /// `check_statements` of a new store of `db`.
 fn check_statements(db: &TestDb) -> datumesh_store::Result<usize> {
@@ -229,8 +229,13 @@ fn instants_order_chronologically_as_text_in_sqlite() {
         want.push((n, us, text));
     }
     want.sort();
-    let got: Vec<String> =
-        c.prepare("SELECT i FROM t ORDER BY i").unwrap().query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+    let got: Vec<String> = c
+        .prepare("SELECT i FROM t ORDER BY i")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
     assert_eq!(got, want.into_iter().map(|(_, _, t)| t).collect::<Vec<_>>());
     // And a comparison in SQL agrees: BETWEEN on instants is chronological.
     let n: i64 = c

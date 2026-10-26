@@ -14,7 +14,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{verify, Cell, Descriptor, ErrorCode, Level, Receipt, ReceiptBuilder, Resolver, Scalar, Type};
-use datumesh_store::{Error, Store};
+use datumesh_store::Error;
 
 fn inputs_and_dependents_follow_the_edges(b: Backend) {
     let db = TestDb::migrated(b);

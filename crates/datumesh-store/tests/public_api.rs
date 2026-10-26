@@ -17,6 +17,8 @@ const FORBIDDEN: &[&str] = &[
     "webpki",
     "webpki_roots",
     "ring",
+    "rusqlite",
+    "libsqlite3_sys",
 ];
 
 fn api() -> String {
@@ -139,6 +141,38 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         "pub datumesh_store::SliceValue::cell: datumesh_core::model::Cell",
     ] {
         assert!(has(item), "missing: {item}");
+    }
+
+    // 0.4.0: the SQLite backend, every Store method on it, its options, its migrations.
+    for item in [
+        "pub struct datumesh_store::SqliteStore",
+        "pub struct datumesh_store::SqliteOptions",
+        "pub fn datumesh_store::SqliteStore::open(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>",
+        "pub fn datumesh_store::SqliteStore::open_with(impl core::convert::AsRef<std::path::Path>, datumesh_store::SqliteOptions) -> datumesh_store::Result<datumesh_store::SqliteStore>",
+        "pub fn datumesh_store::SqliteStore::connect(&str) -> datumesh_store::Result<datumesh_store::SqliteStore>",
+        "pub fn datumesh_store::SqliteStore::check_statements(&self) -> datumesh_store::Result<usize>",
+        "pub fn datumesh_store::SqliteOptions::busy_timeout(self, core::time::Duration) -> datumesh_store::SqliteOptions",
+        "pub fn datumesh_store::SqliteOptions::durable(self, bool) -> datumesh_store::SqliteOptions",
+        "pub fn datumesh_store::SqliteOptions::max_size(self, usize) -> datumesh_store::SqliteOptions",
+        "pub mod datumesh_store::migrate::sqlite",
+        "pub const datumesh_store::migrate::sqlite::MIGRATIONS: &[datumesh_store::migrate::Migration]",
+        "pub fn datumesh_store::migrate::sqlite::apply(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<u32>>",
+        "pub fn datumesh_store::migrate::sqlite::catalog(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>",
+        "pub fn datumesh_store::migrate::sqlite::check(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+    let store_methods: Vec<&str> = api
+        .lines()
+        .filter_map(|l| l.strip_prefix("pub fn datumesh_store::Store::"))
+        .filter_map(|l| l.split('(').next())
+        .collect();
+    assert!(store_methods.len() >= 30, "{store_methods:?}");
+    for m in store_methods {
+        for owner in ["PgStore", "SqliteStore"] {
+            let p = format!("pub fn datumesh_store::{owner}::{m}(");
+            assert!(api.lines().any(|l| l.starts_with(&p)), "missing: {p}");
+        }
     }
 
     // Sealed: the private supertrait (named only in the listing; no crate can implement it).

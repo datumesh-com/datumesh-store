@@ -1,10 +1,18 @@
-//! A PostgreSQL store for [Datumesh](https://datumesh.com): function descriptors, receipts,
-//! blobs, versions of cells over transaction time, lineage, namespaces and function names.
-//! [`PgStore`] implements [`Store`], and through it `datumesh_core`'s [`Resolver`], so
-//! `datumesh_core::verify` can recompute receipts of stored cells from it.
+//! A store for [Datumesh](https://datumesh.com): function descriptors, receipts, blobs,
+//! versions of cells over transaction time, lineage, namespaces and function names, on
+//! PostgreSQL or (since 0.4.0) in one SQLite file. [`PgStore`] and [`SqliteStore`] implement
+//! [`Store`], and through it `datumesh_core`'s [`Resolver`], so `datumesh_core::verify` can
+//! recompute receipts of stored cells from either; the two behave the same (one
+//! conformance suite runs against both).
 //!
-//! The API is synchronous (the `postgres` driver, a small connection pool). Async callers run
-//! it on a blocking thread, e.g. `tokio::task::spawn_blocking`.
+//! The API is synchronous (the `postgres` driver and a small connection pool; `rusqlite`
+//! with SQLite compiled in, feature `sqlite`, on by default). Async callers run it on a
+//! blocking thread, e.g. `tokio::task::spawn_blocking`.
+//!
+//! [`SqliteStore::open`] takes a file path ([`SqliteStore::connect`] a `sqlite:` URL); the
+//! file is in WAL mode, every write is one `BEGIN IMMEDIATE` transaction, and the
+//! append-only rules are triggers in the file, so they hold for writers in several
+//! threads and processes on one machine. Its schema comes from [`migrate::sqlite::apply`].
 //!
 //! [`PgStore::connect`] / [`PgStore::connect_with`] take a URL and [`PoolOptions`]; TLS
 //! (rustls) is used as the URL's `sslmode` says and always verifies the server's
@@ -56,8 +64,11 @@
 //!   time on. Append-only, like versions. [`Store::resolve_binding`] gives the binding
 //!   answering as of A with when it began; [`Store::resolve_name`] its hash.
 //!
-//! Instants are compared as text (fixed width, `COLLATE "C"`), which is exact; each is also
-//! stored as `timestamptz`, which round-trips every instant of the specification exactly.
+//! Instants are compared as text (fixed width, `COLLATE "C"`; SQLite's default collation
+//! is the same byte order), which is exact; on PostgreSQL each is also stored as
+//! `timestamptz`, which round-trips every instant of the specification exactly. Numbers in
+//! the typed-argument index compare as exact decimals (PostgreSQL `numeric`; on SQLite a
+//! text encoding that sorts as the decimal does).
 //!
 //! Every [`Store`] method returns a `Result`: a malformed argument is [`Error::Invalid`] with
 //! the core's code, a database failure [`Error::Database`]. The [`Resolver`] methods keep the
@@ -69,8 +80,9 @@
 //! key document), and its callers rely on that rather than checking again. A `dyn Store`
 //! is still a trait object as before.
 //!
-//! The schema comes from [`migrate::apply`] (the `datumesh-store migrate` command), through
-//! a store on the (possibly empty) database.
+//! The schema comes from [`migrate::apply`] (PostgreSQL) or [`migrate::sqlite::apply`]
+//! (SQLite) (the `datumesh-store migrate` command, for either), through a store on the
+//! (possibly empty) database.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -85,12 +97,19 @@ pub mod migrate;
 mod pg;
 pub mod pg_unstable;
 mod pool;
+mod slices;
 mod sql;
+#[cfg(feature = "sqlite")]
+mod sqlite;
+#[cfg(feature = "sqlite")]
+mod sqlite_sql;
 mod tls;
 
 pub use error::{DatabaseError, Error, Result};
 pub use pg::PgStore;
 pub use pool::PoolOptions;
+#[cfg(feature = "sqlite")]
+pub use sqlite::{SqliteOptions, SqliteStore};
 
 /// A version of a cell: from transaction time `tx` on, the cell's value is that of the
 /// receipt `receipt_hash`, which states it as of `asof`.
@@ -173,8 +192,8 @@ pub struct Namespace {
 /// or a database failure is `None` (logged with `tracing` when it is a failure), which
 /// `verify` reports as unavailable.
 ///
-/// Only this crate implements `Store` (it is sealed, since 0.3.0): the store is the trust
-/// boundary, where every receipt is verified against its host's key document before it is
+/// Only this crate implements `Store` (it is sealed, since 0.3.0; [`PgStore`] and, since
+/// 0.4.0, [`SqliteStore`]): the store is the trust boundary, where every receipt is verified against its host's key document before it is
 /// kept, and what a store answers is relied on as checked. An implementation elsewhere
 /// could answer anything. `Store` stays object-safe (`Arc<dyn Store + Send + Sync>`). Even a complete implementation that
 /// delegates every method to a [`PgStore`] is refused (`E0277`: the private supertrait is
@@ -369,7 +388,8 @@ pub trait Store: Resolver + sealed::Sealed {
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.
     /// The default asks for the two in turn (a receipt that cannot be read then is
-    /// [`Error::NotFound`]); [`PgStore`] answers both with one query. Since 0.2.0.
+    /// [`Error::NotFound`]); [`PgStore`] and [`SqliteStore`] answer both with one query.
+    /// Since 0.2.0.
     fn computed_asof_with_receipt(&self, cell_id: &str, asof: &str) -> Result<Option<(Version, Cow<'_, [u8]>)>> {
         match self.computed_asof(cell_id, asof)? {
             Some(v) => with_receipt(self, v).map(Some),
@@ -391,6 +411,8 @@ pub trait Store: Resolver + sealed::Sealed {
 mod sealed {
     pub trait Sealed {}
     impl Sealed for crate::PgStore {}
+    #[cfg(feature = "sqlite")]
+    impl Sealed for crate::SqliteStore {}
 }
 
 /// A version and its receipt's bytes, for the default `*_with_receipt` methods.

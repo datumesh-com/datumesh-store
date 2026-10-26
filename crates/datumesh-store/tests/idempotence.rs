@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{function_hash, sha256_hex, ErrorCode, Receipt, Resolver};
-use datumesh_store::{Error, Store};
+use datumesh_store::Error;
 
 fn same_descriptor_receipt_blob_twice_is_stored_once(b: Backend) {
     let db = TestDb::migrated(b);

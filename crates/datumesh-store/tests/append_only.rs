@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use common::*;
 use datumesh_core::Receipt;
-use datumesh_store::{Error, Store};
+use datumesh_store::Error;
 
 const TX1: &str = "2024-03-15T16:00:00.000000Z";
 const TX2: &str = "2024-03-18T10:00:00.000000Z";

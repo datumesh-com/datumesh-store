@@ -14,7 +14,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::{Error, Store};
+use datumesh_store::Error;
 
 fn put_version_checks_receipt_cell_and_tx(b: Backend) {
     let db = TestDb::migrated(b);
@@ -137,13 +137,20 @@ enum Outage {
     /// PostgreSQL: the store's connector fails from `down` on, and the open connections
     /// are killed.
     Pg(std::sync::Arc<std::sync::atomic::AtomicBool>),
-    /// SQLite: another connection holds the file in exclusive locking mode (in WAL mode,
-    /// every other connection's reads and writes are then SQLITE_BUSY); `None` until down.
+    /// SQLite: another connection holds the database's write lock (an open `BEGIN
+    /// IMMEDIATE` transaction); `None` until down. In WAL mode nothing another connection
+    /// does can block readers (exclusive locking mode cannot be taken while the store has
+    /// the file open), so on SQLite an outage stops the writers only.
     Lite(Option<rusqlite::Connection>),
 }
 
 /// A store of `db` that an `Outage` can take down: on PostgreSQL connections from a
 /// connector that can be made to fail; on SQLite a busy timeout of 200 ms.
+/// The descriptor of the computed-with-lineage vector (another function than fx_rate).
+fn lineage_descriptor() -> Vec<u8> {
+    vector("receipt/computed-with-lineage").get("recompute").and_then(|r| r.get("descriptor")).unwrap().to_jcs()
+}
+
 fn outage_store(db: &TestDb) -> (TStore, Outage) {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -168,9 +175,8 @@ fn outage_store(db: &TestDb) -> (TStore, Outage) {
             (TStore(Arc::new(s)), Outage::Pg(down))
         }
         Backend::Sqlite => {
-            let options = datumesh_store::SqliteOptions::new()
-                .max_size(2)
-                .busy_timeout(std::time::Duration::from_millis(200));
+            let options =
+                datumesh_store::SqliteOptions::new().max_size(2).busy_timeout(std::time::Duration::from_millis(200));
             (TStore(Arc::new(db.lite().store_with(options))), Outage::Lite(None))
         }
     }
@@ -189,8 +195,7 @@ impl Outage {
             }
             Outage::Lite(held) => {
                 let c = db.lite().conn();
-                c.execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE; SELECT count(*) FROM versions;")
-                    .unwrap();
+                c.execute_batch("BEGIN IMMEDIATE").unwrap();
                 *held = Some(c);
             }
         }
@@ -205,8 +210,11 @@ impl Outage {
 }
 
 /// A store whose database becomes unavailable from some point on (PostgreSQL: no connection
-/// succeeds; SQLite: the file is locked by another connection): every Store read is an
-/// Err, every Resolver method None, nothing panics; then it comes back.
+/// succeeds): every Store read is an Err, every Resolver method None, nothing panics; then
+/// it comes back. SQLite (relaxed: readers cannot be stopped, see `Outage`): another
+/// connection holds the write lock; every write is `Error::Database` (`SQLITE_BUSY`) after
+/// the busy timeout, every read still answers, and the store writes again once the lock is
+/// released. (Reads failing on SQLite, Err and None: `a_renamed_table_is_...`.)
 fn a_database_outage_is_err_from_store_reads_and_none_from_resolver(b: Backend) {
     let db = TestDb::migrated(b);
     let (s, mut outage) = outage_store(&db);
@@ -221,6 +229,29 @@ fn a_database_outage_is_err_from_store_reads_and_none_from_resolver(b: Backend) 
     assert!(s.latest(&cell).unwrap().is_some());
 
     outage.down(&db);
+    if b == Backend::Sqlite {
+        let busy = |e: Error| match e {
+            Error::Database(d) => assert_eq!(d.code(), Some("SQLITE_BUSY"), "{d}"),
+            other => panic!("{other:?}"),
+        };
+        let other = stored_number_at("1.0901", "2024-03-20T00:00:00.000000Z");
+        busy(s.put_receipt(&other).unwrap_err());
+        busy(s.put_descriptor(&lineage_descriptor()).unwrap_err());
+        busy(s.put_blob(b"blocked").unwrap_err());
+        busy(s.bind_name("rates.example.org/fx_rate", &fn_hash, r.tx()).unwrap_err());
+        busy(s.put_manifest(&input(&vector("slice/manifest"))).unwrap_err());
+        // Idempotent puts of what is stored need no write.
+        assert_eq!(s.put_receipt(&bytes).unwrap(), h);
+        assert_eq!(s.put_descriptor(&fx_rate_descriptor()).unwrap(), fn_hash);
+        // Readers do not wait.
+        assert!(s.latest(&cell).unwrap().is_some());
+        assert!(s.receipt(&h).is_some());
+        assert!(s.evaluate(r.cell(), r.asof()).is_some());
+        outage.up();
+        s.put_receipt(&other).unwrap();
+        s.bind_name("rates.example.org/fx_rate", &fn_hash, r.tx()).unwrap();
+        return;
+    }
     // Twice: the first use may meet a killed connection, the second a failing connector.
     for _ in 0..2 {
         let db_err = |e: Error| assert!(matches!(e, Error::Database(_) | Error::PoolTimeout), "{e:?}");
@@ -317,9 +348,11 @@ fn a_database_error_has_the_sqlstate_the_servers_message_and_a_source(b: Backend
             assert_eq!(d.code(), Some("42703"), "{d}");
             assert!(d.message().contains("does not exist"), "{d}");
         }
+        // SQLite names the first missing object it resolves: here the receipts table of
+        // the query's subquery (the PostgreSQL test's database has none either).
         Backend::Sqlite => {
             assert_eq!(d.code(), Some("SQLITE_ERROR"), "{d}");
-            assert!(d.message().contains("no such column"), "{d}");
+            assert!(d.message().contains("no such column") || d.message() == "no such table: receipts", "{d}");
         }
     }
 

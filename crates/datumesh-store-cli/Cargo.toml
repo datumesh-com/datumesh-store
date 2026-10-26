@@ -1,14 +1,14 @@
 [package]
 name = "datumesh-store-cli"
 version = "0.3.2"
-description = "Command-line tool for datumesh-store: migrate, import, export, bench."
+description = "Command-line tool for datumesh-store (PostgreSQL or SQLite): migrate, import, export, bench."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
-keywords = ["datumesh", "postgres", "cli"]
+keywords = ["datumesh", "postgres", "sqlite", "cli"]
 categories = ["command-line-utilities", "database"]
 include = ["src/**/*.rs", "Cargo.toml", "LICENSE"]
 
@@ -24,5 +24,6 @@ doc = false
 datumesh-store = { path = "../datumesh-store", version = "=0.3.2" }
 datumesh-core = { workspace = true, features = ["sign"] }
 postgres.workspace = true
+rusqlite.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "std", "ansi"] }

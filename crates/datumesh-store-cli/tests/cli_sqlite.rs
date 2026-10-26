@@ -148,6 +148,17 @@ fn vectors_without_slices() -> PathBuf {
     vector_set("no-slices", |g, f| !(g == "receipt" && f.starts_with("slice-")))
 }
 
+/// An export's lines without the namespaces' `validated_at` (the time of an import).
+fn without_validation_times(export: &str) -> Vec<String> {
+    export
+        .lines()
+        .map(|l| match l.find(r#""validated_at":""#) {
+            Some(i) if l.starts_with(r#"{"namespace":"#) => format!("{}{}", &l[..i], &l[i + 43..]),
+            _ => l.to_string(),
+        })
+        .collect()
+}
+
 #[test]
 fn migrate_from_empty_rerun_and_check() {
     let db = Lite::new();
@@ -218,11 +229,19 @@ fn import_vectors_export_round_trip_and_agree_with_postgres() {
     ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
     assert_eq!(ok(&db2.run(&["export"])), export1);
 
-    // PostgreSQL, the same import: the same export.
+    // PostgreSQL, the same import: the same export, but for when each import validated the
+    // key documents (now, each time).
     let pg = Pg::new();
     ok(&pg.run(&["migrate"]));
     ok(&pg.run(&["import", dir.to_str().unwrap()]));
-    assert_eq!(ok(&pg.run(&["export"])), export1);
+    let pg_export = ok(&pg.run(&["export"]));
+    assert_eq!(without_validation_times(&pg_export), without_validation_times(&export1));
+    assert_eq!(pg_export.lines().count(), export1.lines().count());
+    // And PostgreSQL's export imports into SQLite as it is, and back.
+    let db3 = Lite::new();
+    ok(&db3.run(&["migrate"]));
+    ok(&db3.run_stdin(&["import", "-"], Some(pg_export.as_bytes())));
+    assert_eq!(ok(&db3.run(&["export"])), pg_export);
 }
 
 /// The 0.1.2 and 0.3.0 export fixtures import into SQLite and export the same lines.

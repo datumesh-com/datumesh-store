@@ -6,11 +6,13 @@
 //! the vectors' test key of rates.example.org, and verified by `put_receipt` against the
 //! stored key document), stored through `put_receipt` and `put_version` from `--threads`
 //! threads, then `--dependents` computed `convert` receipts (each of a cell of its own) that
-//! all list the first version's receipt as their input. Every version's receipt is also
+//! all list the first version's receipt as their input. On either backend (`DATABASE_URL`):
+//! the same rows for PostgreSQL and SQLite. Every version's receipt is also
 //! recorded as a computed version of its cell with `put_computed`, per cell newest first
 //! (as a historical backfill would), and so is every dependent. The loading connections use
-//! `synchronous_commit = off` (to load faster; durability of a benchmark load does not
-//! matter); the timed operations use the server's setting.
+//! `synchronous_commit = off` (PostgreSQL) or `synchronous = NORMAL` (SQLite, the store's
+//! `durable(false)`), to load faster (durability of a benchmark load does not matter); the
+//! timed operations use the server's setting (SQLite: the store's default, durable).
 //!
 //! Timed, one call at a time, `--samples` each: `version_asof` (random cell, random asof),
 //! `receipt` (random stored hash), `put_version` (a new latest version of a random cell; the
@@ -39,9 +41,111 @@ use std::time::{Duration, Instant};
 
 use datumesh_core::json::{self, Value};
 use datumesh_core::{Cell, Manifest, Receipt, ReceiptBuilder, Scalar, SigningKey, Slice, Type};
-use datumesh_store::{pg_unstable, PgStore, Resolver, Store};
+use datumesh_store::{pg_unstable, SqliteOptions, SqliteStore, Store};
 
-use crate::{connect, Fail};
+use crate::{connect, Fail, Opened};
+
+/// A store as the benchmark shares it between its threads.
+type Shared = dyn Store + Send + Sync;
+
+/// A value of a row read with plain SQL.
+enum Col {
+    Text(String),
+    Int(i64),
+    Bytes(Vec<u8>),
+}
+
+impl Col {
+    fn text(&self) -> String {
+        match self {
+            Col::Text(t) => t.clone(),
+            Col::Int(n) => n.to_string(),
+            Col::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+        }
+    }
+
+    fn int(&self) -> i64 {
+        match self {
+            Col::Int(n) => *n,
+            Col::Text(t) => t.parse().unwrap_or(0),
+            Col::Bytes(_) => 0,
+        }
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        match self {
+            Col::Bytes(b) => b.clone(),
+            Col::Text(t) => t.clone().into_bytes(),
+            Col::Int(_) => Vec::new(),
+        }
+    }
+}
+
+/// A plain connection of the database, for what the store does not answer.
+enum Raw {
+    Pg(postgres::Client),
+    Lite(rusqlite::Connection),
+}
+
+impl Raw {
+    fn open(url: &str) -> Result<Raw, Fail> {
+        if crate::is_postgres(url) {
+            return Ok(Raw::Pg(connect(url)?));
+        }
+        let path = match crate::open(url)? {
+            Opened::Lite(s) => s.path().to_path_buf(),
+            Opened::Pg(_) => unreachable!("not a PostgreSQL URL"),
+        };
+        let c = rusqlite::Connection::open(path)?;
+        c.busy_timeout(Duration::from_secs(30))?;
+        Ok(Raw::Lite(c))
+    }
+
+    /// The rows of a query (no parameters: the benchmark's values are inlined, hex and
+    /// fixed names only).
+    fn rows(&mut self, sql: &str) -> Result<Vec<Vec<Col>>, Fail> {
+        let mut out = Vec::new();
+        match self {
+            Raw::Pg(c) => {
+                for r in c.query(sql, &[])? {
+                    let mut row = Vec::new();
+                    for (i, col) in r.columns().iter().enumerate() {
+                        let t = col.type_();
+                        row.push(if *t == postgres::types::Type::INT8 {
+                            Col::Int(r.try_get(i)?)
+                        } else if *t == postgres::types::Type::INT4 {
+                            Col::Int(i64::from(r.try_get::<_, i32>(i)?))
+                        } else if *t == postgres::types::Type::BYTEA {
+                            Col::Bytes(r.try_get(i)?)
+                        } else {
+                            Col::Text(r.try_get(i)?)
+                        });
+                    }
+                    out.push(row);
+                }
+            }
+            Raw::Lite(c) => {
+                let mut st = c.prepare(sql)?;
+                let n = st.column_count();
+                let mut rows = st.query([])?;
+                while let Some(r) = rows.next()? {
+                    let mut row = Vec::new();
+                    for i in 0..n {
+                        row.push(match r.get_ref(i)? {
+                            rusqlite::types::ValueRef::Integer(v) => Col::Int(v),
+                            rusqlite::types::ValueRef::Text(t) => Col::Text(String::from_utf8_lossy(t).into_owned()),
+                            rusqlite::types::ValueRef::Blob(b) => Col::Bytes(b.to_vec()),
+                            rusqlite::types::ValueRef::Real(f) => Col::Text(f.to_string()),
+                            rusqlite::types::ValueRef::Null => Col::Text(String::new()),
+                        });
+                    }
+                    out.push(row);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
 
 /// `receipt/stored-number`'s recompute descriptor (fx_rate, stored), canonical.
 const FX_RATE: &str = r#"{"code":{"body":"","lang":"stored"},"inputs":[],"signature":{"args":{"base":{"type":"string","valid":false},"date":{"type":"date","valid":true},"quote":{"type":"string","valid":false}},"returns":{"type":"number","unit":{"of":{"arg":"quote"},"per":{"arg":"base"}}}}}"#;
@@ -120,7 +224,8 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     let rates = key(RATES_SEED);
     let calc = key(CALC_SEED);
     let per_cell = o.versions / o.cells;
-    let measure = crate::store(url)?;
+    let opened = crate::open(url)?;
+    let measure: &Shared = opened.store();
     measure.put_namespace("rates.example.org", RATES_KEYS.as_bytes(), VALIDATED_AT)?;
     measure.put_namespace("calc.example.net", CALC_KEYS.as_bytes(), VALIDATED_AT)?;
     let fx_rate = measure.put_descriptor(FX_RATE.as_bytes())?;
@@ -129,19 +234,27 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
     let state = if o.skip_load {
         State::read(url)?
     } else {
-        let connector = crate::connector(crate::config(url)?)?;
-        let loader = pg_unstable::with_connector(
-            move || {
-                let mut c = connector.connect()?;
-                c.batch_execute("SET synchronous_commit = off")?;
-                Ok(c)
-            },
-            crate::options()?.max_size(o.threads),
-        )?;
-        let state = load(&loader, o, per_cell, &fx_rate, &convert, &rates, &calc)?;
+        let loader: Box<Shared> = match &opened {
+            Opened::Pg(_) => {
+                let connector = crate::connector(crate::config(url)?)?;
+                Box::new(pg_unstable::with_connector(
+                    move || {
+                        let mut c = connector.connect()?;
+                        c.batch_execute("SET synchronous_commit = off")?;
+                        Ok(c)
+                    },
+                    crate::options()?.max_size(o.threads),
+                )?)
+            }
+            Opened::Lite(s) => {
+                Box::new(SqliteStore::open_with(s.path(), SqliteOptions::new().max_size(o.threads).durable(false))?)
+            }
+        };
+        let loader = &*loader;
+        let state = load(loader, o, per_cell, &fx_rate, &convert, &rates, &calc)?;
         let start = Instant::now();
-        let a = load_slice_cells(&loader, o.threads, &fx_rate, &rates, "SLA", o.slice_cells)?;
-        let b = load_slice_cells(&loader, o.threads, &fx_rate, &rates, "SLB", o.slice_cells.min(1000))?;
+        let a = load_slice_cells(loader, o.threads, &fx_rate, &rates, "SLA", o.slice_cells)?;
+        let b = load_slice_cells(loader, o.threads, &fx_rate, &rates, "SLB", o.slice_cells.min(1000))?;
         println!(
             "load: {} + {} slice cells (quotes SLA, SLB), a version each, in {:.1} s",
             a,
@@ -196,7 +309,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         measure.put_version(&c.id, &tx, &h)?;
         t.push(s.elapsed());
     }
-    row("put_version", &mut t, "one transaction each, synchronous_commit as configured");
+    row("put_version", &mut t, "one transaction each, durable (synchronous_commit / synchronous as configured)");
 
     // dependents of the receipt with the most.
     if let Some((h, n)) = &state.most_depended {
@@ -253,7 +366,7 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         measure.put_computed(&c.id, &tx, &h)?;
         t.push(s.elapsed());
     }
-    row("put_computed", &mut t, "one transaction each, any order, synchronous_commit as configured");
+    row("put_computed", &mut t, "one transaction each, any order, durable (as configured)");
 
     // cell_dependents of the cell with the most.
     if let Some((cell, n)) = &state.most_read_cell {
@@ -301,10 +414,10 @@ pub(crate) fn run(url: &str, o: &Options) -> Result<u8, Fail> {
         row(op, &mut t, &format!("{found} found; {NAMES} names x {BINDINGS} bindings"));
     }
 
-    slices(&measure, url, o, &fx_rate, &state, &mut rng)?;
+    slices(measure, url, o, &fx_rate, &state, &mut rng)?;
 
     disk(url)?;
-    blobs(&measure, o.blob_max, &mut rng)?;
+    blobs(measure, o.blob_max, &mut rng)?;
     Ok(0)
 }
 
@@ -326,16 +439,13 @@ fn fx_slice(fx_rate: &str, quote: &str, range: Option<(i64, i64)>) -> Result<Sli
 type SliceOf<'a> = Box<dyn FnMut(&mut Rng) -> Result<Slice, Fail> + 'a>;
 
 /// The slice benchmarks (see the module docs).
-fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State, rng: &mut Rng) -> Result<(), Fail> {
-    let mut c = connect(url)?;
-    let count = |c: &mut postgres::Client, quote: &str| -> Result<usize, Fail> {
-        let n: i64 = c
-            .query_one(
-                "SELECT count(*) FROM cell_args WHERE fn_hash = $1 AND name = 'quote' AND value = $2",
-                &[&fx_rate, &quote],
-            )?
-            .get(0);
-        Ok(usize::try_from(n).unwrap_or(0))
+fn slices(store: &Shared, url: &str, o: &Options, fx_rate: &str, state: &State, rng: &mut Rng) -> Result<(), Fail> {
+    let mut c = Raw::open(url)?;
+    let count = |c: &mut Raw, quote: &str| -> Result<usize, Fail> {
+        let rows = c.rows(&format!(
+            "SELECT count(*) FROM cell_args WHERE fn_hash = '{fx_rate}' AND name = 'quote' AND value = '{quote}'"
+        ))?;
+        Ok(usize::try_from(rows.first().and_then(|r| r.first()).map_or(0, Col::int)).unwrap_or(0))
     };
     let (na, nb) = (count(&mut c, "SLA")?, count(&mut c, "SLB")?);
     if na == 0 {
@@ -467,7 +577,7 @@ fn slices(store: &PgStore, url: &str, o: &Options, fx_rate: &str, state: &State,
 /// Loads `n` fx_rate cells with quote `quote` (dates from 2000-01-01 on), one version each
 /// at T0, from `threads` threads; returns `n`.
 fn load_slice_cells(
-    store: &PgStore,
+    store: &Shared,
     threads: usize,
     fx_rate: &str,
     key: &SigningKey,
@@ -527,13 +637,12 @@ struct State {
 impl State {
     /// The state of a database loaded by an earlier run (`--skip-load`).
     fn read(url: &str) -> Result<State, Fail> {
-        let mut c = connect(url)?;
+        let mut c = Raw::open(url)?;
         let mut cells = Vec::new();
-        for r in c.query(
+        for r in c.rows(
             "SELECT v.cell_id, v.first, v.last, r.bytes FROM (SELECT cell_id, min(tx) AS first, max(tx) AS last, min(receipt_hash) AS h FROM versions GROUP BY cell_id) v JOIN receipts r ON r.hash = v.h",
-            &[],
         )? {
-            let (id, first, last, bytes): (String, String, String, Vec<u8>) = (r.get(0), r.get(1), r.get(2), r.get(3));
+            let (id, first, last, bytes) = (r[0].text(), r[1].text(), r[2].text(), r[3].bytes());
             let receipt = Receipt::from_json(&bytes)?;
             // The slice cells (quotes SLA, SLB) are not the benchmark's fx_rate cells.
             if receipt.cell().args.get("quote").and_then(|a| a.scalar()).map(|s| s.lexical()) != Some("USD") {
@@ -544,25 +653,25 @@ impl State {
             cells.push(CellInfo { id, day, first: micros(&first), last: micros(&last) });
         }
         cells.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: std::collections::HashSet<&str> = cells.iter().map(|c| c.id.as_str()).collect();
         let hashes = c
-            .query(
-                "SELECT receipt_hash FROM versions WHERE cell_id = ANY($1)",
-                &[&cells.iter().map(|c| c.id.clone()).collect::<Vec<String>>()],
-            )?
-            .iter()
-            .map(|r| r.get(0))
+            .rows("SELECT cell_id, receipt_hash FROM versions")?
+            .into_iter()
+            .filter(|r| ids.contains(r[0].text().as_str()))
+            .map(|r| r[1].text())
             .collect();
         let most_depended = c
-            .query_opt("SELECT input_hash, count(*) FROM edges GROUP BY input_hash ORDER BY 2 DESC LIMIT 1", &[])?
-            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as usize));
+            .rows("SELECT input_hash, count(*) FROM edges GROUP BY input_hash ORDER BY 2 DESC LIMIT 1")?
+            .first()
+            .map(|r| (r[0].text(), r[1].int() as usize));
         let most_read_cell = c
-            .query_opt(
+            .rows(
                 "SELECT i.cell_id, count(DISTINCT d.cell_id) FROM edges e
                    JOIN receipts i ON i.hash = e.input_hash JOIN receipts d ON d.hash = e.receipt_hash
                   GROUP BY i.cell_id ORDER BY 2 DESC LIMIT 1",
-                &[],
             )?
-            .map(|r| (r.get::<_, String>(0), r.get::<_, i64>(1) as usize));
+            .first()
+            .map(|r| (r[0].text(), r[1].int() as usize));
         Ok(State { cells, hashes, most_depended, most_read_cell })
     }
 }
@@ -572,7 +681,7 @@ type Loaded = (Vec<CellInfo>, Vec<String>);
 
 #[allow(clippy::too_many_arguments)]
 fn load(
-    store: &PgStore,
+    store: &Shared,
     o: &Options,
     per_cell: usize,
     fx_rate: &str,
@@ -740,26 +849,38 @@ fn row(op: &str, t: &mut [Duration], note: &str) {
 }
 
 fn disk(url: &str) -> Result<(), Fail> {
-    let mut c = connect(url)?;
+    let mut c = Raw::open(url)?;
     println!("disk: {:<26} {:>12} {:>12} {:>12}", "table", "table MB", "indexes MB", "total MB");
     let mb = |b: i64| b as f64 / (1024.0 * 1024.0);
     let mut sum = (0, 0, 0);
-    for r in c.query(
-        "SELECT c.relname, pg_table_size(c.oid), pg_indexes_size(c.oid), pg_total_relation_size(c.oid)
-           FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' ORDER BY 4 DESC",
-        &[],
-    )? {
-        let (name, t, i, all): (String, i64, i64, i64) = (r.get(0), r.get(1), r.get(2), r.get(3));
+    let (per_table, database) = match &c {
+        Raw::Pg(_) => (
+            "SELECT c.relname, pg_table_size(c.oid), pg_indexes_size(c.oid), pg_total_relation_size(c.oid)
+               FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r' ORDER BY 4 DESC",
+            "SELECT pg_database_size(current_database())",
+        ),
+        // dbstat: the pages of each table's and each index's b-tree.
+        Raw::Lite(_) => (
+            "SELECT t.name, sum(CASE WHEN s.name = t.name THEN s.pgsize ELSE 0 END),
+                    sum(CASE WHEN s.name = t.name THEN 0 ELSE s.pgsize END), sum(s.pgsize)
+               FROM sqlite_schema t JOIN sqlite_schema o ON o.tbl_name = t.name AND o.type IN ('table', 'index')
+               JOIN dbstat s ON s.name = o.name
+              WHERE t.type = 'table' GROUP BY t.name ORDER BY 4 DESC",
+            "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+        ),
+    };
+    for r in c.rows(per_table)? {
+        let (name, t, i, all) = (r[0].text(), r[1].int(), r[2].int(), r[3].int());
         sum = (sum.0 + t, sum.1 + i, sum.2 + all);
         println!("disk: {name:<26} {:>12.1} {:>12.1} {:>12.1}", mb(t), mb(i), mb(all));
     }
     println!("disk: {:<26} {:>12.1} {:>12.1} {:>12.1}", "(all tables)", mb(sum.0), mb(sum.1), mb(sum.2));
-    let db: i64 = c.query_one("SELECT pg_database_size(current_database())", &[])?.get(0);
+    let db = c.rows(database)?.first().and_then(|r| r.first()).map_or(0, Col::int);
     println!("disk: database {:.1} MB", mb(db));
     Ok(())
 }
 
-fn blobs(store: &PgStore, max: usize, rng: &mut Rng) -> Result<(), Fail> {
+fn blobs(store: &Shared, max: usize, rng: &mut Rng) -> Result<(), Fail> {
     println!("{:<14} {:>12} {:>12} {:>12} {:>12} {:>12}", "blob", "bytes", "put ms", "get ms", "put MB/s", "get MB/s");
     let mut size = 1024;
     while size <= max {
@@ -801,11 +922,12 @@ fn wait(url: &str) -> Result<u8, Fail> {
     loop {
         attempts += 1;
         let answered = (|| -> Option<()> {
-            let mut c = connect(url).ok()?;
-            let row = c.query_opt("SELECT cell_id, tx FROM versions ORDER BY cell_id LIMIT 1", &[]).ok()??;
-            let (cell, tx): (String, String) = (row.get(0), row.get(1));
-            let store = crate::store(url).ok()?;
-            store.version_asof(&cell, &tx).ok()?.map(|_| ())
+            let mut c = Raw::open(url).ok()?;
+            let rows = c.rows("SELECT cell_id, tx FROM versions ORDER BY cell_id LIMIT 1").ok()?;
+            let row = rows.first()?;
+            let (cell, tx) = (row[0].text(), row[1].text());
+            let store = crate::open(url).ok()?;
+            store.store().version_asof(&cell, &tx).ok()?.map(|_| ())
         })();
         if answered.is_some() {
             println!(

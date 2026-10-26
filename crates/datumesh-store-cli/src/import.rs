@@ -14,7 +14,7 @@ use std::path::Path;
 
 use datumesh_core::json::{self, Value};
 use datumesh_core::{FunctionDescriptor, Receipt};
-use datumesh_store::{Error, PgStore, Resolver, Store};
+use datumesh_store::{Error, Store};
 
 use crate::Fail;
 
@@ -32,16 +32,17 @@ struct Counts {
 }
 
 pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
-    let store = crate::store(url)?;
+    let opened = crate::open(url)?;
+    let store = opened.store();
     let mut n = Counts::default();
     if paths.is_empty() || paths == ["-"] {
-        lines(&store, "stdin", std::io::stdin().lock(), &mut n);
+        lines(store, "stdin", std::io::stdin().lock(), &mut n);
     } else {
         for p in paths {
             if p == "-" {
-                lines(&store, "stdin", std::io::stdin().lock(), &mut n);
+                lines(store, "stdin", std::io::stdin().lock(), &mut n);
             } else {
-                path(&store, Path::new(p), &mut n)?;
+                path(store, Path::new(p), &mut n)?;
             }
         }
     }
@@ -52,7 +53,7 @@ pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
     Ok(if n.errors == 0 { 0 } else { 1 })
 }
 
-fn path(store: &PgStore, p: &Path, n: &mut Counts) -> Result<(), Fail> {
+fn path(store: &dyn Store, p: &Path, n: &mut Counts) -> Result<(), Fail> {
     if p.is_dir() {
         let mut entries: Vec<_> = std::fs::read_dir(p)
             .map_err(|e| Fail(1, format!("{}: {e}", p.display())))?
@@ -90,7 +91,7 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
 
-fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
+fn vector(store: &dyn Store, name: &str, v: &Value, n: &mut Counts) {
     if !matches!(v.get("valid"), Some(Value::Bool(true))) {
         return;
     }
@@ -163,7 +164,7 @@ fn vector(store: &PgStore, name: &str, v: &Value, n: &mut Counts) {
 
 /// A vector's key document as the host's namespace, validated now, unless the store already
 /// holds this very document (re-importing does not re-validate).
-fn namespace(store: &PgStore, host: &str, body: &[u8], count: &mut u64) -> Result<(), Error> {
+fn namespace(store: &dyn Store, host: &str, body: &[u8], count: &mut u64) -> Result<(), Error> {
     let same = match (store.namespace(host), json::parse(body)) {
         (Ok(Some(ns)), Ok(doc)) => ns.keydoc == doc.to_jcs(),
         _ => false,
@@ -181,26 +182,26 @@ fn now() -> String {
     crate::bench::instant(i64::try_from(us).unwrap_or(i64::MAX))
 }
 
-fn descriptor(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
+fn descriptor(store: &dyn Store, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
     store.put_descriptor(bytes)?;
     *count += 1;
     Ok(())
 }
 
-fn receipt(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
+fn receipt(store: &dyn Store, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
     store.put_receipt(bytes)?;
     *count += 1;
     Ok(())
 }
 
-fn manifest(store: &PgStore, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
+fn manifest(store: &dyn Store, bytes: &[u8], count: &mut u64) -> Result<(), Error> {
     store.put_manifest(bytes)?;
     *count += 1;
     Ok(())
 }
 
 /// put_version, where the same version already present counts as imported.
-fn version(store: &PgStore, cell_id: &str, tx: &str, hash: &str, count: &mut u64) -> Result<(), Error> {
+fn version(store: &dyn Store, cell_id: &str, tx: &str, hash: &str, count: &mut u64) -> Result<(), Error> {
     match store.put_version(cell_id, tx, hash) {
         Err(Error::NotLater { .. })
             if store.version_asof(cell_id, tx)?.is_some_and(|v| v.tx == tx && v.receipt_hash == hash) => {}
@@ -217,7 +218,7 @@ fn unhex(h: &str) -> Option<Vec<u8>> {
     (0..h.len()).step_by(2).map(|i| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok())).collect()
 }
 
-fn lines(store: &PgStore, name: &str, input: impl BufRead, n: &mut Counts) {
+fn lines(store: &dyn Store, name: &str, input: impl BufRead, n: &mut Counts) {
     for (i, l) in input.split(b'\n').enumerate() {
         let at = format!("{name}: line {}", i + 1);
         let l = match l {
@@ -233,7 +234,7 @@ fn lines(store: &PgStore, name: &str, input: impl BufRead, n: &mut Counts) {
     }
 }
 
-fn one_line(store: &PgStore, l: &[u8], n: &mut Counts) -> Result<(), String> {
+fn one_line(store: &dyn Store, l: &[u8], n: &mut Counts) -> Result<(), String> {
     let v = json::parse(l).map_err(|e| format!("not JSON: {e}"))?;
     let members = v.as_object().filter(|m| m.len() == 1).ok_or("expected an object with one member")?;
     let (kind, body) = &members[0];

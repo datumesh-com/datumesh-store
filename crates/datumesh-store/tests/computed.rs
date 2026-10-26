@@ -18,7 +18,7 @@ use std::thread;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::{Error, Store, Version};
+use datumesh_store::{Error, Version};
 
 /// Midnight of a day of March 2024.
 fn day(d: u32) -> String {

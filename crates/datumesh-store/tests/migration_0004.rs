@@ -119,7 +119,7 @@ fn receipts_inserted_by_a_0_3_1_writer_get_their_values() {
     }
     assert_values_are_the_cores(&mut c, &all);
     // put_receipt stores them too.
-    let s = slice_store(&db);
+    let s = slice_store_pg(&db);
     let cell = slice_cell("f", &"1".repeat(64), &[("k", sc(Type::Number, "2"))]);
     let b = slice_receipt(&cell, "42", "2024-01-01T00:00:00.000000Z", "2024-01-01T00:00:00.000000Z");
     let h = s.put_receipt(&b).unwrap();

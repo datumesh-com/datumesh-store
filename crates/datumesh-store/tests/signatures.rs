@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::{Error, Store};
+use datumesh_store::Error;
 
 fn count(db: &TestDb) -> i64 {
     db.count("receipts")

@@ -12,7 +12,6 @@ use std::thread;
 
 use common::*;
 use datumesh_core::{ErrorCode, Manifest, Resolver};
-use datumesh_store::Store;
 
 fn manifest_vectors_are_stored_under_their_entry(b: Backend) {
     let db = TestDb::migrated(b);

@@ -12,6 +12,9 @@ homepage = "https://datumesh.com"
 [workspace.dependencies]
 datumesh-core = "0.3.4"
 postgres = "0.19.14"
+# SQLite (0.4.0): rusqlite with SQLite compiled in (`bundled`), so no system library is
+# needed on any platform; the LRU cache of prepared statements (`cache`).
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "cache"] }
 tracing = "0.1.44"
 # TLS for PostgreSQL connections: rustls with the ring provider (selected explicitly per
 # connector, never installed process-wide), the Mozilla roots, and the bridge to the driver.

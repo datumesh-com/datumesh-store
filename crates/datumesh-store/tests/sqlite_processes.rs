@@ -77,6 +77,7 @@ fn record(lines: &mut Vec<String>, what: &str, r: Result<(), Error>, detail: &st
 /// The child process: waits for the go file, then runs its writer threads; writes what
 /// they did to its result file. A no-op in an ordinary test run.
 #[test]
+#[allow(clippy::needless_range_loop)] // k indexes rounds and attempts at once
 fn child() {
     let (Ok(path), Ok(p)) = (std::env::var("DM_SQLITE_CHILD_DB"), std::env::var("DM_SQLITE_CHILD_INDEX")) else {
         return;
@@ -114,7 +115,12 @@ fn child() {
                         let r = store.put_receipt(&rivals[k]).map(|_| ());
                         record(&mut lines, "rival_receipt", r, "");
                         let rr = Receipt::from_json(&rivals[k]).unwrap();
-                        record(&mut lines, &format!("computed{k}"), store.put_computed(cell, rr.tx(), rr.hash()), rr.hash());
+                        record(
+                            &mut lines,
+                            &format!("computed{k}"),
+                            store.put_computed(cell, rr.tx(), rr.hash()),
+                            rr.hash(),
+                        );
                     }
                     if k % 5 == 0 {
                         record(&mut lines, "same_receipt", store.put_receipt(same).map(|_| ()), "");
@@ -228,8 +234,11 @@ fn processes_and_threads_keep_the_append_only_guarantees() {
         let lines: Vec<&&String> = all.iter().filter(|l| l.starts_with(&format!("{what} "))).collect();
         let attempts = if what == "raw" { PROCESSES * ATTEMPTS * 2 } else { total };
         assert_eq!(lines.len(), attempts, "{what}");
-        let mut ok: Vec<String> =
-            lines.iter().filter(|l| l.split(' ').nth(1) == Some("ok")).map(|l| l.split(' ').nth(2).unwrap().to_string()).collect();
+        let mut ok: Vec<String> = lines
+            .iter()
+            .filter(|l| l.split(' ').nth(1) == Some("ok"))
+            .map(|l| l.split(' ').nth(2).unwrap().to_string())
+            .collect();
         let not_later = lines.iter().filter(|l| l.split(' ').nth(1) == Some("notlater")).count();
         assert_eq!(ok.len() + not_later, attempts, "{what}");
         // Inserted in tx order: each success was later than everything before it.
@@ -254,7 +263,10 @@ fn processes_and_threads_keep_the_append_only_guarantees() {
         let at = format!("2024-04-01T{r:02}:00:00.000000Z");
         assert_eq!(s.computed_asof(&cell, &at).unwrap().unwrap().receipt_hash, winners[0]);
     }
-    assert_eq!(db.conn().query_row("SELECT count(*) FROM computed_versions", [], |r| r.get::<_, i64>(0)).unwrap(), ROUNDS as i64);
+    assert_eq!(
+        db.conn().query_row("SELECT count(*) FROM computed_versions", [], |r| r.get::<_, i64>(0)).unwrap(),
+        ROUNDS as i64
+    );
     // Puts of one receipt and one manifest: all ok, stored once.
     for what in ["same_receipt", "manifest", "rival_receipt"] {
         let lines: Vec<&&String> = all.iter().filter(|l| l.starts_with(&format!("{what} "))).collect();

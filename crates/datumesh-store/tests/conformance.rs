@@ -19,7 +19,6 @@ mod common;
 use common::*;
 use datumesh_core::testkit::{AnswerRule, Fixtures, Kit};
 use datumesh_core::{ErrorCode, Receipt, Resolver};
-use datumesh_store::Store;
 
 fn load(db: &TestDb, fx: &Fixtures) -> TStore {
     let s = db.bare_store();

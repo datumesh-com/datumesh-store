@@ -1,7 +1,8 @@
 //! `datumesh-store`: migrate, import, export and benchmark a datumesh-store database.
 //!
-//! The database is named by `DATABASE_URL` (a `postgres://` URL; TLS as its `sslmode` says,
-//! verified against the Mozilla roots plus the PEM bundle in `DATABASE_CA_FILE`, if set).
+//! The database is named by `DATABASE_URL`: a `postgres://` URL (TLS as its `sslmode`
+//! says, verified against the Mozilla roots plus the PEM bundle in `DATABASE_CA_FILE`, if
+//! set), or (since 0.4.0) a SQLite file, as a `sqlite:` URL or a plain path.
 //! Exit status: 0 success, 1 failure (or drift found by `migrate --check`), 2 usage or
 //! connection error.
 
@@ -14,7 +15,7 @@ mod import;
 use std::process::ExitCode;
 
 use datumesh_store::pg_unstable::{self, Connector};
-use datumesh_store::{migrate, PgStore, PoolOptions};
+use datumesh_store::{migrate, PgStore, PoolOptions, SqliteStore, Store};
 use postgres::{Client, Config};
 
 const USAGE: &str = "usage: datumesh-store [-v] <command>
@@ -34,7 +35,8 @@ commands:
 environment:
   DATABASE_URL       postgres://user:password@host:port/database[?sslmode=disable|prefer|require]
                      (TLS when the server offers it, by default; the server's certificate
-                     and host name are always verified)
+                     and host name are always verified), or a SQLite file:
+                     sqlite:PATH, sqlite://PATH, or a plain PATH (created if missing)
   DATABASE_CA_FILE   PEM file of root certificates to trust besides the Mozilla roots
                      (a private CA, a self-signed server)";
 
@@ -131,6 +133,39 @@ fn database_url() -> Result<String, Fail> {
     std::env::var("DATABASE_URL").map_err(|_| Fail(2, "DATABASE_URL is not set".into()))
 }
 
+/// Which backend `DATABASE_URL` names: PostgreSQL for a `postgres://` or `postgresql://`
+/// URL or a `key=value` connection string; SQLite for a `sqlite:` URL or any other text (a
+/// file path).
+pub(crate) fn is_postgres(url: &str) -> bool {
+    url.starts_with("postgres://")
+        || url.starts_with("postgresql://")
+        || (!url.starts_with("sqlite:") && url.contains('='))
+}
+
+/// A store of either backend.
+pub(crate) enum Opened {
+    Pg(PgStore),
+    Lite(SqliteStore),
+}
+
+impl Opened {
+    pub(crate) fn store(&self) -> &(dyn Store + Send + Sync + 'static) {
+        match self {
+            Opened::Pg(s) => s,
+            Opened::Lite(s) => s,
+        }
+    }
+}
+
+/// The store `DATABASE_URL` names (PostgreSQL: `PgStore::connect_with`, with
+/// `DATABASE_CA_FILE`; SQLite: `SqliteStore::connect`).
+pub(crate) fn open(url: &str) -> Result<Opened, Fail> {
+    if is_postgres(url) {
+        return Ok(Opened::Pg(store(url)?));
+    }
+    SqliteStore::connect(url).map(Opened::Lite).map_err(|e| Fail(2, format!("cannot open: {e}")))
+}
+
 /// The pool options: the defaults, plus the roots of `DATABASE_CA_FILE`.
 pub(crate) fn options() -> Result<PoolOptions, Fail> {
     let options = PoolOptions::new();
@@ -163,19 +198,26 @@ pub(crate) fn store(url: &str) -> Result<PgStore, Fail> {
 }
 
 fn migrate_apply(url: &str) -> Result<u8, Fail> {
-    let store = store(url)?;
-    let applied = migrate::apply(&store)?;
+    let (applied, all) = match open(url)? {
+        Opened::Pg(store) => (migrate::apply(&store)?, migrate::MIGRATIONS),
+        Opened::Lite(store) => (migrate::sqlite::apply(&store)?, migrate::sqlite::MIGRATIONS),
+    };
     if applied.is_empty() {
-        println!("schema up to date ({} migrations)", migrate::MIGRATIONS.len());
+        println!("schema up to date ({} migrations)", all.len());
     }
     for v in applied {
-        let m = migrate::MIGRATIONS.iter().find(|m| m.version == v).map_or("", |m| m.name);
+        let m = all.iter().find(|m| m.version == v).map_or("", |m| m.name);
         println!("applied migration {v} ({m})");
     }
     Ok(0)
 }
 
 fn migrate_check(url: &str) -> Result<u8, Fail> {
+    if !is_postgres(url) {
+        let Opened::Lite(live) = open(url)? else { unreachable!("not a PostgreSQL URL") };
+        let diff = migrate::sqlite::check(&live)?;
+        return report_check(&diff, || Ok(live.check_statements()?));
+    }
     let config = config(url)?;
     let live = store(url)?;
     let mut admin = connect(url)?;
@@ -194,14 +236,19 @@ fn migrate_check(url: &str) -> Result<u8, Fail> {
     let dropped = admin.batch_execute(&format!("DROP DATABASE IF EXISTS {scratch} WITH (FORCE)"));
     let diff = result?;
     dropped?;
+    report_check(&diff, || Ok(live.check_statements()?))
+}
+
+/// Prints the drift found (exit status 1), or prepares every statement (`statements`).
+fn report_check(diff: &[String], statements: impl FnOnce() -> Result<usize, Fail>) -> Result<u8, Fail> {
     if !diff.is_empty() {
         println!("schema drift ({} lines; - expected but missing, + present but not expected):", diff.len());
-        for l in &diff {
+        for l in diff {
             println!("{l}");
         }
         return Ok(1);
     }
-    let n = live.check_statements()?;
+    let n = statements()?;
     println!("no drift: the schema is what the migrations produce; {n} statements prepare");
     Ok(0)
 }

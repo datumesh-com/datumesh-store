@@ -52,9 +52,10 @@ pub enum Error {
         /// The receipt hash.
         hash: String,
     },
-    /// The database refused or failed: the server's message and SQLSTATE, or the driver's
-    /// description of a failure that is not the server's (no connection, a URL that does
-    /// not parse, a TLS handshake refused, a certificate that did not verify).
+    /// The database refused or failed: the server's message and SQLSTATE (PostgreSQL) or
+    /// SQLite's message and result code, or the driver's description of a failure that is
+    /// not the database's (no connection, a URL that does not parse, a TLS handshake
+    /// refused, a certificate that did not verify).
     Database(DatabaseError),
     /// No connection became free within the pool's checkout timeout.
     PoolTimeout,
@@ -66,17 +67,18 @@ pub enum Error {
     Config(String),
 }
 
-/// A database failure, [`Error::Database`]: what the server said (its message and
-/// SQLSTATE), or the driver's description of a failure that is not the server's.
+/// A database failure, [`Error::Database`]: what the database said (PostgreSQL: the
+/// server's message and SQLSTATE; SQLite: its message and result code), or the driver's
+/// description of a failure that is not the database's.
 ///
 /// Its [`source`](std::error::Error::source) is the driver's error (type erased: the
-/// driver's types are not part of this crate's API outside
+/// drivers' types are not part of this crate's API outside
 /// [`pg_unstable`](crate::pg_unstable)).
 #[derive(Debug)]
 pub struct DatabaseError {
     message: String,
     code: Option<String>,
-    source: postgres::Error,
+    source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
 
 impl DatabaseError {
@@ -85,18 +87,34 @@ impl DatabaseError {
             Some(d) => (d.message().to_string(), Some(d.code().code().to_string())),
             None => (driver_text(&e), None),
         };
-        DatabaseError { message, code, source: e }
+        DatabaseError { message, code, source: Box::new(e) }
     }
 
-    /// The server's message (`relation "versions" does not exist`), or the driver's text
-    /// and its causes when the server said nothing (`error connecting to server: ...`,
-    /// `error performing TLS handshake: invalid peer certificate: ...`).
+    /// A SQLite failure: SQLite's message and the name of its (extended) result code,
+    /// or, for a failure of the driver's own (a value of an unexpected type), its text.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn sqlite(e: rusqlite::Error) -> DatabaseError {
+        let (message, code) = match &e {
+            rusqlite::Error::SqliteFailure(f, msg) => {
+                (msg.clone().unwrap_or_else(|| f.to_string()), Some(crate::sqlite::result_code_name(f.extended_code)))
+            }
+            other => (other.to_string(), None),
+        };
+        DatabaseError { message, code, source: Box::new(e) }
+    }
+
+    /// The database's message (`relation "versions" does not exist`, `no such table:
+    /// versions`), or the driver's text and its causes when the database said nothing
+    /// (`error connecting to server: ...`, `error performing TLS handshake: invalid peer
+    /// certificate: ...`).
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// The SQLSTATE the server reported (five characters, e.g. `42P01`), if it was the
-    /// server's error.
+    /// The code the database reported, if it was the database's error: PostgreSQL's
+    /// SQLSTATE (five characters, e.g. `42P01`), or (since 0.4.0) the name of SQLite's
+    /// extended result code (e.g. `SQLITE_ERROR`, `SQLITE_BUSY`,
+    /// `SQLITE_CONSTRAINT_TRIGGER`, `SQLITE_CANTOPEN`).
     pub fn code(&self) -> Option<&str> {
         self.code.as_deref()
     }
@@ -130,7 +148,7 @@ impl fmt::Display for DatabaseError {
 
 impl std::error::Error for DatabaseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
+        Some(&*self.source)
     }
 }
 
@@ -186,6 +204,13 @@ pub(crate) trait Db<T> {
 impl<T> Db<T> for core::result::Result<T, postgres::Error> {
     fn db(self) -> Result<T> {
         self.map_err(|e| Error::Database(DatabaseError::new(e)))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl<T> Db<T> for core::result::Result<T, rusqlite::Error> {
+    fn db(self) -> Result<T> {
+        self.map_err(|e| Error::Database(DatabaseError::sqlite(e)))
     }
 }
 

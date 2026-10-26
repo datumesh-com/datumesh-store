@@ -21,7 +21,6 @@ use std::borrow::Cow;
 use common::*;
 use datumesh_core::json::Value;
 use datumesh_core::{verify, Cell, ErrorCode, Evaluation, Level, Manifest, Receipt, Resolver, Scalar};
-use datumesh_store::Store;
 
 /// The store for descriptors, receipts and manifests; the vector's `recompute.value` (and
 /// `lineage`) for the evaluation.

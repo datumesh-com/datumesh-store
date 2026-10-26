@@ -16,7 +16,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, Resolver, Type};
-use datumesh_store::{SliceMember, Store};
+use datumesh_store::SliceMember;
 
 fn day(d: u32) -> String {
     format!("2024-01-{d:02}T00:00:00.000000Z")
@@ -148,7 +148,10 @@ fn decimals_order_and_range_exactly_at_the_edges(b: Backend) {
     let all = s.slice_members(&open(&h), &day(2)).unwrap();
     assert_eq!(arg_of(&all, "k"), sorted);
     let vals = s.slice_values(&open(&h), &day(2)).unwrap();
-    assert_eq!(vals.iter().map(|v| v.cell.args["k"].scalar().unwrap().lexical().to_string()).collect::<Vec<_>>(), sorted);
+    assert_eq!(
+        vals.iter().map(|v| v.cell.args["k"].scalar().unwrap().lexical().to_string()).collect::<Vec<_>>(),
+        sorted
+    );
     let at = |lo: &str, hi: &str| arg_of(&s.slice_members(&range(&h, "number", lo, hi), &day(2)).unwrap(), "k");
     let idx = |a: usize, z: usize| sorted[a..=z].to_vec();
     assert_eq!(at("-1.5", "-1"), idx(4, 8));
@@ -162,19 +165,14 @@ fn decimals_order_and_range_exactly_at_the_edges(b: Backend) {
     assert_eq!(at(&sorted[11], &sorted[13]), idx(11, 13));
     // Bounds between stored values.
     assert_eq!(at("-1.2", "-1.05"), idx(6, 7));
-    assert_eq!(at("0.1001", "0.1099"), Vec::<String>::new());
+    assert_eq!(at("0.1001", "0.1089"), Vec::<String>::new());
     assert_eq!(at("0.1001", "0.1091"), idx(16, 16));
     assert_eq!(at("10", "9"), Vec::<String>::new());
-    // A bound value matches exactly its canonical form.
-    let bound = |v: &str| {
-        slice(&format!(
-            r#"{{"args":{{"k":{{"type":"number","value":"{v}"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
-        ))
-    };
+    // A range of one value holds exactly that number.
     for v in [&sorted[0], &sorted[11], &sorted[13], &sorted[30], &"0.109".to_string()] {
-        assert_eq!(arg_of(&s.slice_members(&bound(v), &day(2)).unwrap(), "k"), [v.clone()]);
+        assert_eq!(at(v, v), std::slice::from_ref(v));
     }
-    assert!(s.slice_members(&bound("0.12"), &day(2)).unwrap().is_empty());
+    assert!(at("0.12", "0.12").is_empty());
 }
 
 fn dates_instants_and_strings_in_their_order(b: Backend) {

@@ -22,6 +22,7 @@ use datumesh_store::{migrate, pg_unstable, PgStore, PoolOptions, SqliteOptions, 
 
 /// `backends!(a, b)`: `#[test] fn a()` in modules `pg` and `sqlite`, each calling `a` with
 /// its backend.
+#[allow(unused_macros)]
 macro_rules! backends {
     ($($name:ident),* $(,)?) => {
         mod pg {
@@ -717,6 +718,13 @@ pub fn slice_store(db: &TestDb) -> TStore {
     s
 }
 
+/// `slice_store` on a PostgreSQL database alone (the Postgres-only tests).
+pub fn slice_store_pg(db: &PgDb) -> PgStore {
+    let s = db.store();
+    s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
+    s
+}
+
 /// A `stored` descriptor of `SLICE_HOST` with the given arguments (name, type), returning a
 /// dimensionless number; `body` tells functions with the same arguments apart.
 pub fn stored_descriptor(args: &[(&str, Type)], body: &str) -> Vec<u8> {
@@ -777,7 +785,13 @@ pub fn slice_receipt(cell: &datumesh_core::Cell, value: &str, tx: &str, asof: &s
 
 /// Stores a receipt of `cell` (as `slice_receipt`) and records it as the cell's version at
 /// `tx`; returns its hash.
-pub fn put_member(s: &(impl AsStore + ?Sized), cell: &datumesh_core::Cell, value: &str, tx: &str, asof: &str) -> String {
+pub fn put_member(
+    s: &(impl AsStore + ?Sized),
+    cell: &datumesh_core::Cell,
+    value: &str,
+    tx: &str,
+    asof: &str,
+) -> String {
     let s = s.st();
     let h = s.put_receipt(&slice_receipt(cell, value, tx, asof)).unwrap();
     s.put_version(&cell.id(), tx, &h).unwrap();

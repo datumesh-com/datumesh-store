@@ -14,7 +14,7 @@ mod common;
 
 use common::*;
 use datumesh_core::{ErrorCode, Receipt, ReceiptBuilder, Scalar, Type};
-use datumesh_store::{SliceValue, Store};
+use datumesh_store::SliceValue;
 
 fn day(d: u32) -> String {
     format!("2024-01-{d:02}T00:00:00.000000Z")
