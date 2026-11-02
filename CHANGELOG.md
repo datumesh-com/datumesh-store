@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-11-02)
 
 For the local resolver (step 1.8a): a second backend, SQLite, in one file with no server,
 implementing the sealed `Store` with the same behaviour as `PgStore`. Additions only for
