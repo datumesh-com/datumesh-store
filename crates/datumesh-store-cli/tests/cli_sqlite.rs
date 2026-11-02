@@ -186,8 +186,18 @@ fn migrate_from_empty_rerun_and_check() {
 }
 
 #[test]
+fn check_of_a_missing_file_fails_and_creates_nothing() {
+    let db = Lite::new();
+    let o = db.run(&["migrate", "--check"]);
+    assert_eq!(o.status.code(), Some(2), "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("no such database file"), "{}", text(&o.stderr));
+    assert_eq!(std::fs::read_dir(&db.dir).unwrap().count(), 0, "migrate --check created a file");
+}
+
+#[test]
 fn check_on_an_empty_file_reports_everything_missing() {
     let db = Lite::new();
+    std::fs::write(&db.path, b"").unwrap();
     let o = db.run(&["migrate", "--check"]);
     assert_eq!(o.status.code(), Some(1), "{}", text(&o.stderr));
     assert!(text(&o.stdout).contains("- table versions"), "{}", text(&o.stdout));

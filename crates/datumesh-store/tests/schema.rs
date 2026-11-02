@@ -202,6 +202,28 @@ fn an_edited_migration_is_refused(b: Backend) {
     assert!(e.to_string().contains("checksum"), "{e}");
 }
 
+/// SQLite: checking has no side effects. `SqliteStore::open_existing` and
+/// `migrate::sqlite::check_file` refuse a path with no file ("no such database file") and
+/// create nothing; `SqliteStore::open` creates the file (documented).
+#[test]
+fn sqlite_check_of_a_missing_file_creates_nothing() {
+    let db = SqliteDb::empty();
+    let missing = db.dir.join("missing.db");
+    let e = SqliteStore::open_existing(&missing).unwrap_err();
+    assert!(e.to_string().contains("no such database file"), "{e}");
+    let e = migrate::sqlite::check_file(&missing).unwrap_err();
+    assert!(e.to_string().contains("no such database file"), "{e}");
+    assert_eq!(std::fs::read_dir(&db.dir).unwrap().count(), 0, "something was created");
+    // An existing, migrated file: no drift, through either.
+    let db = SqliteDb::migrated();
+    assert!(migrate::sqlite::check_file(&db.path).unwrap().is_empty());
+    assert!(migrate::sqlite::check(&SqliteStore::open_existing(&db.path).unwrap()).unwrap().is_empty());
+    // open creates.
+    let fresh = db.dir.join("fresh.db");
+    SqliteStore::open(&fresh).unwrap();
+    assert!(fresh.exists());
+}
+
 /// SQLite: instants are TEXT with the default (BINARY) collation, so they order as bytes;
 /// fixed width makes that chronological. Random instants of the specification's range,
 /// ordered by the database, are in the order of their (day, microsecond) values.
