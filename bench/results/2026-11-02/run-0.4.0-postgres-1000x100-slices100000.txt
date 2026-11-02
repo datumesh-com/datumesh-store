@@ -1,0 +1,53 @@
+load: 100000 versions (1000 cells x 100) in 168.3 s (594 versions/s: sign + put_receipt (verifying) + put_version + put_computed, 6 threads, synchronous_commit=off)
+load: 1000 dependents of e10cdad90b2ef317299a0d8f1d08ce47319a011feb8f5a243adbaedf90d0bba3 in 4.7 s
+load: 100000 + 1000 slice cells (quotes SLA, SLB), a version each, in 136.3 s
+op                          samples     p50 µs     p99 µs    mean µs
+version_asof                  10000        242       1308        291  10000 found
+receipt                       10000        168       1123        205  
+put_version                   10000       1768       6393       2032  one transaction each, durable (synchronous_commit / synchronous as configured)
+dependents                    10000       1560       3462       1653  1000 dependents each
+computed_asof                 10000        205        872        240  10000 found
+computed_asof+receipt         10000        407       1688        460  10000 found
+computed_asof_with_receipt    10000        221        973        251  10000 found
+stored_asof                   10000        237        946        270  10000 found
+stored_asof+receipt           10000        387       1494        436  10000 found
+stored_asof_with_receipt      10000        212        775        237  10000 found
+put_computed                  10000       1517       3356       1602  one transaction each, any order, durable (as configured)
+cell_dependents               10000       8049      14970       8576  1000 dependent cells each
+resolve_binding               10000        178        500        194  9913 found; 100 names x 100 bindings
+resolve_name                  10000        162        458        177  9904 found; 100 names x 100 bindings
+slice_members bounded           200      91598     162416      94058  1000 members
+slice_members unbounded         200      60316      94223      61981  1000 members
+slice_members unbounded          10    7291549    7496671    6973867  100000 members
+slice_members bounded            10    7128532    7626953    6850184  100000 members
+slice_values bounded            200      99024     130711      99571  1000 members
+slice_values unbounded          200      73907     128496      79637  1000 members
+slice_values unbounded           10    7459751    8269151    7591046  100000 members
+slice_values bounded             10    7608622    8636900    7626124  100000 members
+slice_changed_after bounded      200      25703      83644      27380  1000 members
+slice_changed_after unbounded      200      18428      38022      18521  1000 members
+slice_changed_after unbounded      200    1996305    2567628    1124227  100000 members
+slice_changed_after bounded      200    1922418    3133682    1144572  100000 members
+versions_between              10000        573       3352        742  22.1 versions on average
+put_manifest                    200      73619     113706      74909  1000 members, one transaction each
+manifest                       4000        375        752        399  1000 members
+put_manifest                     10    7707237    9916649    7686603  100000 members, one transaction each
+manifest                        200      18770      34337      19618  100000 members
+disk: table                          table MB   indexes MB     total MB
+disk: manifest_members                  275.8        963.3       1239.2
+disk: receipts                          248.1        127.5        375.6
+disk: cell_args                          53.9        109.6        163.5
+disk: versions                           41.3         61.3        102.6
+disk: manifests                          79.9          0.1         79.9
+disk: computed_versions                  26.3         51.3         77.6
+disk: cells                              18.8         34.2         53.0
+disk: name_bindings                       1.6          1.2          2.9
+disk: edges                               0.2          0.5          0.7
+disk: datumesh_schema_migrations          0.0          0.0          0.0
+disk: namespaces                          0.0          0.0          0.0
+disk: descriptors                         0.0          0.0          0.0
+disk: slice_edges                         0.0          0.0          0.0
+disk: blobs                               0.0          0.0          0.0
+disk: (all tables)                      746.0       1349.1       2095.1
+disk: database 2103.2 MB
+blob                  bytes       put ms       get ms     put MB/s     get MB/s

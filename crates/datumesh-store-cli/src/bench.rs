@@ -739,7 +739,7 @@ fn load(
     cells.sort_by_key(|c| c.day);
     let loaded = start.elapsed();
     println!(
-        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt (verifying) + put_version + put_computed, {} threads, synchronous_commit=off)",
+        "load: {} versions ({} cells x {per_cell}) in {:.1} s ({:.0} versions/s: sign + put_receipt (verifying) + put_version + put_computed, {} threads, synchronous_commit=off or synchronous=NORMAL)",
         hashes.len(),
         cells.len(),
         loaded.as_secs_f64(),
