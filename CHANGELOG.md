@@ -15,6 +15,9 @@ users of `PgStore` (`API-CHANGES-0.4.0.md`); 0.4.0 because the trait gains a bac
   `Store` and `Resolver` method, every error code and rule of `PgStore`. SQLite is compiled
   in (`rusqlite` 0.40 with `bundled`), behind the feature `sqlite`, on by default
   (`default-features = false` builds the PostgreSQL store alone).
+- `SqliteStore::open_existing` (no file is created; a missing path is `no such database
+  file`) and `migrate::sqlite::check_file(path)`; `open` creates a missing file. The
+  command's `migrate --check` on SQLite creates nothing.
 - `migrate::sqlite::{MIGRATIONS, apply, catalog, check}` and `migrations/sqlite/0001_initial.sql`:
   the schema of PostgreSQL migrations 1-4 in one, with the differences listed in the README.
 - Concurrency on one file from several threads and processes: WAL, a busy timeout,

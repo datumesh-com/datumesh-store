@@ -103,6 +103,15 @@ impl DatabaseError {
         DatabaseError { message, code, source: Box::new(e) }
     }
 
+    /// A SQLite file that does not exist, for a call that must not create it
+    /// ([`SqliteStore::open_existing`](crate::SqliteStore::open_existing)).
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn no_such_file(path: &std::path::Path) -> DatabaseError {
+        let message = format!("no such database file: {}", path.display());
+        let source = std::io::Error::new(std::io::ErrorKind::NotFound, message.clone());
+        DatabaseError { message, code: Some("SQLITE_CANTOPEN".into()), source: Box::new(source) }
+    }
+
     /// The database's message (`relation "versions" does not exist`, `no such table:
     /// versions`), or the driver's text and its causes when the database said nothing
     /// (`error connecting to server: ...`, `error performing TLS handshake: invalid peer

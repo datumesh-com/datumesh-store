@@ -151,6 +151,8 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         "pub fn datumesh_store::SqliteStore::open_with(impl core::convert::AsRef<std::path::Path>, datumesh_store::SqliteOptions) -> datumesh_store::Result<datumesh_store::SqliteStore>",
         "pub fn datumesh_store::SqliteStore::connect(&str) -> datumesh_store::Result<datumesh_store::SqliteStore>",
         "pub fn datumesh_store::SqliteStore::check_statements(&self) -> datumesh_store::Result<usize>",
+        "pub fn datumesh_store::SqliteStore::open_existing(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>",
+        "pub fn datumesh_store::migrate::sqlite::check_file(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>",
         "pub fn datumesh_store::SqliteOptions::busy_timeout(self, core::time::Duration) -> datumesh_store::SqliteOptions",
         "pub fn datumesh_store::SqliteOptions::durable(self, bool) -> datumesh_store::SqliteOptions",
         "pub fn datumesh_store::SqliteOptions::max_size(self, usize) -> datumesh_store::SqliteOptions",

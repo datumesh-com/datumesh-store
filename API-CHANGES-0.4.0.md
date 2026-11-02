@@ -14,10 +14,11 @@ brief: "store 0.4.0, since the trait gains a backend"); `Store` itself is unchan
 
 | Item | Reason |
 |---|---|
-| `pub struct SqliteStore` with `open(path)`, `open_with(path, SqliteOptions)`, `connect(url)` (`sqlite:<path>`, `sqlite://<path>`, or a path), `path()`, `check_statements()` | The second backend: one SQLite file, no server, for the local resolver (`datumesh-local`). The same constructors' shape as `PgStore` (`connect` / `connect_with`, `check_statements`). |
+| `pub struct SqliteStore` with `open(path)`, `open_with(path, SqliteOptions)`, `connect(url)` (`sqlite:<path>`, `sqlite://<path>`, or a path), `path()`, `check_statements()` | The second backend: one SQLite file, no server, for the local resolver (`datumesh-local`). The same constructors' shape as `PgStore` (`connect` / `connect_with`, `check_statements`). `open` creates a missing file (not its directory). |
+| `SqliteStore::open_existing(path)` | Opens only an existing file and changes nothing about it (no file created, journal mode left as it is); a missing path is `Error::Database` "no such database file: <path>" (`SQLITE_CANTOPEN`). For checks, which have no side effects. |
 | `impl Store for SqliteStore`, `impl Resolver for SqliteStore` (every method, as listed below) | The same behaviour as `PgStore`, checked by one conformance suite run against both. |
 | `pub struct SqliteOptions` (`new`, `Default`, `max_size`, `busy_timeout`, `durable`; `Clone`, `Debug`, `Eq`) | Idle connections kept; how long a writer waits for the database's write lock (default 30 s, as `PoolOptions::checkout_timeout`); durable commits (`synchronous = FULL`, default) or not (`NORMAL`, for bulk loads, like `synchronous_commit = off`). `PoolOptions` is PostgreSQL's (TLS roots), so SQLite has its own. |
-| `pub mod migrate::sqlite` with `MIGRATIONS`, `apply(&SqliteStore)`, `catalog(&SqliteStore)`, `check(&SqliteStore)` | The `migrate` / `migrate --check` contract for SQLite. `check` takes no scratch store: it migrates a scratch database in memory. The PostgreSQL functions keep their signatures (`&PgStore`), so no caller changes. |
+| `pub mod migrate::sqlite` with `MIGRATIONS`, `apply(&SqliteStore)`, `catalog(&SqliteStore)`, `check(&SqliteStore)`, `check_file(path)` (`check` through `open_existing`: creates nothing) | The `migrate` / `migrate --check` contract for SQLite. `check` takes no scratch store: it migrates a scratch database in memory. The PostgreSQL functions keep their signatures (`&PgStore`), so no caller changes. |
 | feature `sqlite` (default) | `cargo add datumesh-store` keeps working and gets both backends; `default-features = false` builds the PostgreSQL store alone (no C compilation of SQLite). |
 
 Not visible in the listing, but worth naming:
@@ -48,6 +49,7 @@ Added items to the public API
 +pub fn datumesh_store::migrate::sqlite::apply(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<u32>>
 +pub fn datumesh_store::migrate::sqlite::catalog(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 +pub fn datumesh_store::migrate::sqlite::check(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
++pub fn datumesh_store::migrate::sqlite::check_file(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 +pub struct datumesh_store::SqliteOptions
 +impl datumesh_store::SqliteOptions
 +pub fn datumesh_store::SqliteOptions::busy_timeout(self, core::time::Duration) -> datumesh_store::SqliteOptions
@@ -69,6 +71,7 @@ Added items to the public API
 +pub fn datumesh_store::SqliteStore::check_statements(&self) -> datumesh_store::Result<usize>
 +pub fn datumesh_store::SqliteStore::connect(&str) -> datumesh_store::Result<datumesh_store::SqliteStore>
 +pub fn datumesh_store::SqliteStore::open(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>
++pub fn datumesh_store::SqliteStore::open_existing(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>
 +pub fn datumesh_store::SqliteStore::open_with(impl core::convert::AsRef<std::path::Path>, datumesh_store::SqliteOptions) -> datumesh_store::Result<datumesh_store::SqliteStore>
 +pub fn datumesh_store::SqliteStore::path(&self) -> &std::path::Path
 +impl core::fmt::Debug for datumesh_store::SqliteStore

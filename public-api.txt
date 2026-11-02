@@ -6,6 +6,7 @@ pub const datumesh_store::migrate::sqlite::MIGRATIONS: &[datumesh_store::migrate
 pub fn datumesh_store::migrate::sqlite::apply(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<u32>>
 pub fn datumesh_store::migrate::sqlite::catalog(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::migrate::sqlite::check(&datumesh_store::SqliteStore) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::migrate::sqlite::check_file(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub struct datumesh_store::migrate::Migration
 pub datumesh_store::migrate::Migration::name: &'static str
 pub datumesh_store::migrate::Migration::sql: &'static str
@@ -211,6 +212,7 @@ impl datumesh_store::SqliteStore
 pub fn datumesh_store::SqliteStore::check_statements(&self) -> datumesh_store::Result<usize>
 pub fn datumesh_store::SqliteStore::connect(&str) -> datumesh_store::Result<datumesh_store::SqliteStore>
 pub fn datumesh_store::SqliteStore::open(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>
+pub fn datumesh_store::SqliteStore::open_existing(impl core::convert::AsRef<std::path::Path>) -> datumesh_store::Result<datumesh_store::SqliteStore>
 pub fn datumesh_store::SqliteStore::open_with(impl core::convert::AsRef<std::path::Path>, datumesh_store::SqliteOptions) -> datumesh_store::Result<datumesh_store::SqliteStore>
 pub fn datumesh_store::SqliteStore::path(&self) -> &std::path::Path
 impl core::fmt::Debug for datumesh_store::SqliteStore

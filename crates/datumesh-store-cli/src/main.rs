@@ -22,8 +22,9 @@ const USAGE: &str = "usage: datumesh-store [-v] <command>
 
 commands:
   migrate            apply the migrations not yet applied
-  migrate --check    compare the live schema with the migrations' (needs CREATEDB for a
-                     scratch database) and prepare every statement; exit 1 on drift
+  migrate --check    compare the live schema with the migrations' (PostgreSQL: needs
+                     CREATEDB for a scratch database) and prepare every statement; exit 1
+                     on drift (SQLite: the file must exist; nothing is created)
   import [PATH...]   import spec vector files or directories, or JSON lines files
                      (\"-\" or nothing: JSON lines on stdin)
   export             write everything as JSON lines to stdout
@@ -36,7 +37,8 @@ environment:
   DATABASE_URL       postgres://user:password@host:port/database[?sslmode=disable|prefer|require]
                      (TLS when the server offers it, by default; the server's certificate
                      and host name are always verified), or a SQLite file:
-                     sqlite:PATH, sqlite://PATH, or a plain PATH (created if missing)
+                     sqlite:PATH, sqlite://PATH, or a plain PATH (created if missing,
+                     except by migrate --check)
   DATABASE_CA_FILE   PEM file of root certificates to trust besides the Mozilla roots
                      (a private CA, a self-signed server)";
 
@@ -214,7 +216,9 @@ fn migrate_apply(url: &str) -> Result<u8, Fail> {
 
 fn migrate_check(url: &str) -> Result<u8, Fail> {
     if !is_postgres(url) {
-        let Opened::Lite(live) = open(url)? else { unreachable!("not a PostgreSQL URL") };
+        // A check has no side effects: the file must exist, and is not changed.
+        let path = url.strip_prefix("sqlite:").map_or(url, |p| p.strip_prefix("//").unwrap_or(p));
+        let live = SqliteStore::open_existing(path).map_err(|e| Fail(2, format!("cannot open: {e}")))?;
         let diff = migrate::sqlite::check(&live)?;
         return report_check(&diff, || Ok(live.check_statements()?));
     }

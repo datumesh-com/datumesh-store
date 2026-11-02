@@ -334,7 +334,16 @@ pub mod sqlite {
         Ok(lines)
     }
 
-    /// Compares the live file's schema with what the migrations produce: applies every
+    /// [`check`] of the file at `path`, opened with
+    /// [`SqliteStore::open_existing`]: a path with no file is an error (`no such database
+    /// file`) and nothing is created. Since 0.4.0.
+    pub fn check_file(path: impl AsRef<std::path::Path>) -> Result<Vec<String>> {
+        check(&SqliteStore::open_existing(path)?)
+    }
+
+    /// Compares the live file's schema with what the migrations produce (a store from
+    /// [`SqliteStore::open_existing`] checks without creating or changing anything;
+    /// [`SqliteStore::open`] creates a missing file): applies every
     /// migration to a scratch database in memory, then diffs the two catalogs. Returns the
     /// differences, `- <line>` for what the live database lacks and `+ <line>` for what it
     /// has in addition; empty when they agree.

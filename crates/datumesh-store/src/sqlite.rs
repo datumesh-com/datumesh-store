@@ -96,6 +96,8 @@ pub struct SqliteStore {
     /// busy handler polls with sleeps of up to 100 ms, so threads contending for the lock
     /// would mostly sleep. Other stores and processes still meet at the database's lock.
     writer: Mutex<()>,
+    /// Opened with `open_existing`: never creates the file, never changes its journal mode.
+    existing: bool,
 }
 
 impl std::fmt::Debug for SqliteStore {
@@ -133,12 +135,16 @@ impl Drop for Pooled<'_> {
 }
 
 impl SqliteStore {
-    /// Opens (or creates) the SQLite file at `path` with the default [`SqliteOptions`].
+    /// Opens the SQLite file at `path` with the default [`SqliteOptions`]; a missing file
+    /// is created (empty: apply [`migrate::sqlite::apply`](crate::migrate::sqlite::apply)
+    /// next), as a missing directory is not. [`open_existing`](Self::open_existing) creates
+    /// nothing.
     pub fn open(path: impl AsRef<Path>) -> Result<SqliteStore> {
         SqliteStore::open_with(path, SqliteOptions::new())
     }
 
-    /// Opens (or creates) the SQLite file at `path`. One connection is opened at once (and
+    /// Opens the SQLite file at `path`, creating it when it is missing (its directory must
+    /// exist). One connection is opened at once (and
     /// the file put in WAL mode), so a path that cannot be opened fails here
     /// (`SQLITE_CANTOPEN`); the schema is not looked at, so a new or empty file is fine
     /// (create the schema with [`migrate::sqlite::apply`](crate::migrate::sqlite::apply)).
@@ -148,6 +154,32 @@ impl SqliteStore {
             options,
             idle: Mutex::new(Vec::new()),
             writer: Mutex::new(()),
+            existing: false,
+        };
+        let c = store.open_connection()?;
+        if let Ok(mut idle) = store.idle.lock() {
+            idle.push(c);
+        }
+        Ok(store)
+    }
+
+    /// Opens an existing SQLite file without changing anything: a path with no file is
+    /// [`Error::Database`] (`no such database file: <path>`, code `SQLITE_CANTOPEN`) and
+    /// nothing is created; the file's journal mode is left as it is. For checking a
+    /// database ([`migrate::sqlite::check`](crate::migrate::sqlite::check), the command's
+    /// `migrate --check`), which has no side effects. Writes through such a store work
+    /// as through any other. Since 0.4.0.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<SqliteStore> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(Error::Database(crate::error::DatabaseError::no_such_file(path)));
+        }
+        let store = SqliteStore {
+            path: path.to_path_buf(),
+            options: SqliteOptions::new(),
+            idle: Mutex::new(Vec::new()),
+            writer: Mutex::new(()),
+            existing: true,
         };
         let c = store.open_connection()?;
         if let Ok(mut idle) = store.idle.lock() {
@@ -169,10 +201,18 @@ impl SqliteStore {
     }
 
     fn open_connection(&self) -> Result<Connection> {
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        if !self.existing {
+            flags |= OpenFlags::SQLITE_OPEN_CREATE;
+        }
         let c = Connection::open_with_flags(&self.path, flags).db()?;
         c.busy_timeout(self.options.busy_timeout).db()?;
         c.set_prepared_statement_cache_capacity(L::ALL.len() + 16);
+        if self.existing {
+            // Nothing about the file changes: no journal mode, no synchronous setting.
+            c.execute_batch("PRAGMA foreign_keys = ON").db()?;
+            return Ok(c);
+        }
         // WAL: readers and the writer do not block each other, and a commit appends to the
         // log. Changing the mode needs a lock the busy handler does not always wait for (a
         // new file opened by several processes at once), so it is retried here.
