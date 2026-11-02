@@ -52,6 +52,20 @@ jobs:
           cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
           cargo run -q -p datumesh-store-cli --locked -- export > export.jsonl
           wc -l export.jsonl
+      # The same on a SQLite file (DATABASE_URL a path, then a sqlite: URL).
+      - name: SQLite - migrate from empty, re-run, check, import, export
+        env:
+          DATABASE_URL: ${{ runner.temp }}/ci-store.db
+        run: |
+          cargo run -q -p datumesh-store-cli --locked -- migrate
+          cargo run -q -p datumesh-store-cli --locked -- migrate
+          DATABASE_URL="sqlite:$DATABASE_URL" cargo run -q -p datumesh-store-cli --locked -- migrate --check
+          cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
+          cargo run -q -p datumesh-store-cli --locked -- export > export-sqlite.jsonl
+          # The same lines but the namespaces' validated_at (the time of each import).
+          cmp <(grep -v '^{"namespace"' export.jsonl) <(grep -v '^{"namespace"' export-sqlite.jsonl)
+      # The library builds with each backend alone (feature sqlite off: PostgreSQL only).
+      - run: cargo check -p datumesh-store --no-default-features --locked
       - name: the command over TLS (sslmode=require, the run's CA)
         env:
           DATABASE_URL: ${{ env.DATABASE_TLS_URL }}?sslmode=require
@@ -69,6 +83,7 @@ jobs:
       - run: rustup toolchain install 1.99 --profile minimal --component clippy,rustfmt && rustup default 1.99
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p datumesh-store --lib --no-default-features --locked -- -D warnings
 
   # The public API names no type of the driver or of a TLS crate outside pg_unstable, and
   # public-api.txt is current (the test public_api.rs checks the file itself).
@@ -108,5 +123,6 @@ jobs:
           submodules: true
       - run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
       # Package both crates, build a new project on the packaged library and run the README
-      # example; build the packaged command and run migrate --check.
+      # examples (PostgreSQL and SQLite); build the packaged command and run migrate --check
+      # on both.
       - run: tools/package_test.sh --native

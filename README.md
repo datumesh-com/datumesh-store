@@ -1,6 +1,6 @@
 # datumesh-store
 
-A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function descriptors, signed receipts, blobs, versions of cells over transaction time (stored and computed), lineage (slices and their manifests included), the members of slices, namespaces' key documents and function names. `PgStore` implements the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. It passes `datumesh-core`'s resolver test kit as a time-aware resolver under the kit's default answer rule (`AnswerRule::TxAndAsof`: a version answers as of A when its `tx` and its receipt's `asof` are both at or before A), with the slice checks (`Kit::slices(true)`: it serves manifests). `Store` is sealed: only this crate implements it (see [The store](#the-store)).
+A store for the [Datumesh](https://datumesh.com) protocol, on PostgreSQL or (since 0.4.0) in one SQLite file: function descriptors, signed receipts, blobs, versions of cells over transaction time (stored and computed), lineage (slices and their manifests included), the members of slices, namespaces' key documents and function names. `PgStore` and `SqliteStore` implement the `Store` trait and, through it, `datumesh-core`'s `Resolver`, so `datumesh_core::verify` recomputes receipts of stored cells from the database. One conformance suite runs against both backends. Each passes `datumesh-core`'s resolver test kit as a time-aware resolver under the kit's default answer rule (`AnswerRule::TxAndAsof`: a version answers as of A when its `tx` and its receipt's `asof` are both at or before A), with the slice checks (`Kit::slices(true)`: it serves manifests). `Store` is sealed: only this crate implements it (see [The store](#the-store)).
 
 - `datumesh-store`: the library.
 - `datumesh-store-cli`: the `datumesh-store` command: `migrate [--check]`, `import`, `export`, `bench`.
@@ -9,8 +9,8 @@ A PostgreSQL store for the [Datumesh](https://datumesh.com) protocol: function d
 
 ```toml
 [dependencies]
-datumesh-store = "0.3.0"
-datumesh-core = "0.3.3"
+datumesh-store = "0.4.0"
+datumesh-core = "0.3.4"
 ```
 
 Store the key documents of `spec/vectors/receipt/stored-number.json`, its receipt (verified against them on the way in), its function's descriptor and the version it states, then verify the receipt through the store (it recomputes the stored value as of the receipt's `asof`):
@@ -57,6 +57,41 @@ fn main() {
 ```
 
 It prints `verified recomputed receipt 19a5fe3a744c5792f747fb4c286ce396ab44b95922de4f07937502fe595b6f81`, then the function hash and the version's tx.
+
+The same in one SQLite file (no server; SQLite is compiled in, feature `sqlite`, on by default):
+
+```rust
+use datumesh_core::json::{self, Value};
+use datumesh_core::{verify, Keys, Level, Receipt, Resolver};
+use datumesh_store::{migrate, SqliteStore, Store};
+
+fn main() {
+    // A path (created if missing), or a sqlite: URL with SqliteStore::connect.
+    let path = std::env::var("STORE_PATH").unwrap_or_else(|_| "store.db".into());
+    let store = SqliteStore::open(&path).unwrap();
+    migrate::sqlite::apply(&store).unwrap();
+
+    let vector = json::parse(&std::fs::read("stored-number.json").unwrap()).unwrap();
+    let text = vector.get("input").and_then(Value::as_str).unwrap().as_bytes();
+    let descriptor = vector.get("recompute").and_then(|r| r.get("descriptor")).unwrap().to_jcs();
+    let mut keys = Keys::new();
+    for (host, env) in vector.get("keys").and_then(Value::as_object).unwrap() {
+        let body = env.get("https").and_then(|h| h.get("body")).and_then(Value::as_str).unwrap();
+        store.put_namespace(host, body.as_bytes(), "2024-03-16T09:00:00.000000Z").unwrap();
+        keys.insert_response(host, 200, Some(body.as_bytes()));
+    }
+    store.put_descriptor(&descriptor).unwrap();
+    let hash = store.put_receipt(text).unwrap();
+    let receipt = Receipt::from_json(text).unwrap();
+    let cell_id = receipt.cell().id();
+    if store.latest(&cell_id).unwrap().is_none() {
+        store.put_version(&cell_id, receipt.tx(), &hash).unwrap();
+    }
+    let result = verify(text, &keys, Some(&store as &dyn Resolver), None);
+    assert_eq!(result.level, Some(Level::Recomputed), "{:?}", result.error());
+    println!("verified {} receipt {} in {path}", result.level.unwrap().as_str(), hash);
+}
+```
 
 The API is synchronous. From async code, call it on a blocking thread (`tokio::task::spawn_blocking`). `PgStore` is `Send + Sync`; share one per process.
 
@@ -108,7 +143,7 @@ So a server with `ssl=on` and a self-signed certificate (or one from a private C
 
 ### `pg_unstable`
 
-No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.3.2"`) if you use it.
+No type of the `postgres` driver or of a TLS crate is part of the API, except in the module `pg_unstable`, which is **outside semver until 1.0: it exposes the `postgres` driver's types, and any release may change it, including a patch release.** It holds `with_connector(f, PoolOptions)` (a store whose connections come from any function returning a `postgres::Client`: client certificates, another TLS setup, session settings), `Connector` (plain `postgres` clients that connect exactly as the store does) and `pub use postgres` (the driver this crate is built with). Depend on an exact version (`datumesh-store = "=0.4.0"`) if you use it.
 
 ## Schema
 
@@ -124,6 +159,18 @@ Plain SQL in [`migrations/`](crates/datumesh-store/migrations) (`migrations` at 
 
 `datumesh-store migrate --check` migrates a scratch database (the role needs `CREATEDB`; `migrate::check(&live, &scratch)` takes a store on each), compares the two catalogs (relations, columns, constraints, indexes, triggers and their enabled state, functions, recorded migrations), prints the differences and exits 1 on drift; then it prepares every statement the store uses. The sync driver has no compile-time query checking, so the test suite prepares every statement against the migrated schema.
 
+### SQLite (0.4.0)
+
+`SqliteStore::open(path)` (or `open_with(path, SqliteOptions)`, or `connect("sqlite:path")`) stores everything in one file, with SQLite compiled into the crate (`rusqlite` with `bundled`: no system library, the same SQLite on Linux, macOS and Windows). Same methods, errors and rules as `PgStore`; one conformance suite runs every shared test against both. Its schema is one migration, `migrations/sqlite/0001_initial.sql` (`migrate::sqlite::apply`, `catalog`, `check`; `check` migrates a scratch database in memory). The differences from the PostgreSQL schema:
+
+- STRICT tables; `TEXT` for hashes, ids, names and instants (SQLite's default collation is byte order, as `COLLATE "C"`), `BLOB` for bytes; no `timestamptz` (`*_at`) columns; `GLOB` checks instead of regular expressions.
+- `cell_args.sort_key` instead of `cell_args.num numeric`: a text that sorts as the exact decimal does (sign class; the decimal exponent plus 500 in three digits; the significant digits; for a negative number exponent and digits complemented and `~` appended, so prefixes reverse too). Every other type's key is its lexical form. One index `(fn_hash, name, type, sort_key, cell_id)` serves all ranges. Tested on the hard cases: `9` < `10`, `-1.5` < `-1.25` < `-1`, `0.1` < `0.109` < `0.11`, zero, and 128-character numbers at both ends and next to zero.
+- The derived columns (`receipts.asof`, `value_type`, `value`) and the typed-argument index are written by the store in the receipt's transaction (there is no older SQLite writer to serve); the receipt columns are still checked against the bytes (`json_extract`).
+- Append-only by triggers on the same tables (no `TRUNCATE` in SQLite; `DELETE` without `WHERE` fires the delete triggers), also on `receipts`, `edges` and `descriptors` (SQLite enforces foreign keys only on connections that ask, so referenced rows protect themselves), plus triggers refusing an insert over an existing key (so `INSERT OR REPLACE` cannot replace a row) and an insert naming a receipt, descriptor, cell or manifest that is not stored.
+- `receipts_fn_hash` is not created (`receipts_fn_hash_asof` covers it).
+
+Concurrency: the file is in WAL mode (readers never wait); every `put_*` is one `BEGIN IMMEDIATE` transaction, which takes the database's single write lock before its checks, so check-then-insert (`NotLater`, `Conflict`, idempotent puts) is atomic against every other writer, thread or process; the busy timeout (`SqliteOptions::busy_timeout`, 30 s) makes writers wait rather than fail, and a store's own threads queue on a mutex first (SQLite's busy handler polls with sleeps). The append-only and order rules are triggers, so a raw connection is held to them as well. `tests/sqlite_processes.rs` runs four processes of four threads each (plus a raw-SQL writer each) against one file and checks that the history is in tx order by insertion, that every failure is `NotLater` or `Conflict`, and that one receipt and one manifest put by everyone are stored once. A commit that finds the write-ahead log beyond 64 MiB checkpoints and truncates it (under a steady load of readers SQLite's automatic checkpoints never restart the log). Commits are durable (`synchronous = FULL`) unless `SqliteOptions::durable(false)` (`NORMAL`: a power loss can lose the latest commits, never consistency). A file on a network file system is not supported.
+
 ## The command
 
 ```sh
@@ -134,9 +181,10 @@ datumesh-store migrate --check         # exit 1 on drift
 datumesh-store import spec/vectors     # vector files or directories; JSON lines; - for stdin
 datumesh-store export > store.jsonl    # JSON lines: namespaces, descriptors, receipts, manifests, blobs, versions, computed versions, names
 datumesh-store bench                   # see below
+DATABASE_URL=store.db datumesh-store migrate   # a SQLite file (or sqlite:store.db, sqlite:///abs/path)
 ```
 
-Every command connects as `PgStore::connect_with` does (TLS as the URL's `sslmode` says, verified against the Mozilla roots plus `DATABASE_CA_FILE`). `export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing; exports of 0.1.x (without computed versions), 0.2.x and 0.3.0 (without manifests) import too. A store keeps one key document per host, the last validated, and an export carries only that one: receipts verified under a document that was replaced since cannot be imported from the export again (`E_KEY_UNKNOWN`). The specification's vectors are such a set since spec-0.4.0 (its slice-lineage receipt vectors sign for three hosts with other keys than the earlier vectors). Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts, with its recompute descriptor, inputs and (since 0.3.1) manifests, and each valid slice vector that is a manifest.
+`DATABASE_URL` names PostgreSQL when it is a `postgres://` / `postgresql://` URL or a `key=value` connection string, and a SQLite file otherwise (a `sqlite:` URL or a path; created if missing). An export from one backend imports into the other, and both export the same lines for the same contents. Every PostgreSQL command connects as `PgStore::connect_with` does (TLS as the URL's `sslmode` says, verified against the Mozilla roots plus `DATABASE_CA_FILE`). `export` writes one consistent snapshot in an order `import` replays (namespaces first: receipts are verified against them); importing what is already there changes nothing; exports of 0.1.x (without computed versions), 0.2.x and 0.3.0 (without manifests) import too. A store keeps one key document per host, the last validated, and an export carries only that one: receipts verified under a document that was replaced since cannot be imported from the export again (`E_KEY_UNKNOWN`). The specification's vectors are such a set since spec-0.4.0 (its slice-lineage receipt vectors sign for three hosts with other keys than the earlier vectors). Importing vectors stores each valid receipt vector's key documents (validated at the time of the import, unless the same document is already stored) before its receipts, with its recompute descriptor, inputs and (since 0.3.1) manifests, and each valid slice vector that is a manifest.
 
 ## Development
 

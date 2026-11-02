@@ -2,6 +2,38 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.4.0 (unreleased)
+
+For the local resolver (step 1.8a): a second backend, SQLite, in one file with no server,
+implementing the sealed `Store` with the same behaviour as `PgStore`. Additions only for
+users of `PgStore` (`API-CHANGES-0.4.0.md`); 0.4.0 because the trait gains a backend.
+
+### Added
+
+- `SqliteStore` (`open`, `open_with`, `connect` for `sqlite:` URLs, `path`,
+  `check_statements`) and `SqliteOptions` (`max_size`, `busy_timeout`, `durable`): every
+  `Store` and `Resolver` method, every error code and rule of `PgStore`. SQLite is compiled
+  in (`rusqlite` 0.40 with `bundled`), behind the feature `sqlite`, on by default
+  (`default-features = false` builds the PostgreSQL store alone).
+- `migrate::sqlite::{MIGRATIONS, apply, catalog, check}` and `migrations/sqlite/0001_initial.sql`:
+  the schema of PostgreSQL migrations 1-4 in one, with the differences listed in the README.
+- Concurrency on one file from several threads and processes: WAL, a busy timeout,
+  `BEGIN IMMEDIATE` for every write, triggers for the append-only and order rules (on any
+  connection), a bounded write-ahead log.
+- Exact decimals in SQLite's typed-argument index: a sortable text encoding (`sort_key`).
+- `DatabaseError::code` gives SQLite's result code name (`SQLITE_BUSY`, ...) for SQLite.
+- The command takes a SQLite file as `DATABASE_URL` (a path or a `sqlite:` URL): `migrate`
+  (`--check` against a scratch database in memory), `import`, `export` (the same lines as
+  PostgreSQL's for the same contents), `bench` (the same rows).
+- Tests: one conformance suite runs every shared test against both backends (`pg::*`,
+  `sqlite::*`); `tests/sqlite_processes.rs` (several processes and threads on one file).
+
+### Changed
+
+- `DatabaseError`'s source is the driver's error behind a `Box<dyn Error + Send + Sync>`
+  (private; `source()` still returns it).
+- `datumesh-store-cli` 0.4.0 depends on `datumesh-store = "=0.4.0"` and on `rusqlite`.
+
 ## 0.3.2 (2026-10-26)
 
 For the engine 0.3.1: the members of a slice as values, and a cheap check that a slice does

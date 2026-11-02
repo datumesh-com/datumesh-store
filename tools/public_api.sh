@@ -1,8 +1,9 @@
 #!/bin/sh
 # The library's public API (`cargo public-api -ss`, which needs a nightly toolchain and
-# cargo-public-api 0.52): with default features and with all features (the crate has none,
-# so the two must be equal), checked to name no type of the PostgreSQL driver or of a TLS
-# crate outside `datumesh_store::pg_unstable`, and compared with public-api.txt.
+# cargo-public-api 0.52): with default features and with all features (the one feature,
+# `sqlite`, is on by default, so the two must be equal), checked to name no type of the
+# PostgreSQL or SQLite driver or of a TLS crate outside `datumesh_store::pg_unstable`, and
+# compared with public-api.txt.
 #
 #   tools/public_api.sh [--write]            in the datumesh-nightly-tools image (tools/cargo.sh)
 #   tools/public_api.sh --native [--write]   with the local cargo (CI)
@@ -30,7 +31,7 @@ diff -u "$work/default.txt" "$work/all.txt"
 
 # Identifiers of the driver and TLS crates, on any line not about pg_unstable.
 leaks="$(grep -v 'datumesh_store::pg_unstable' "$work/default.txt" \
-  | grep -E '(^|[^A-Za-z0-9_])(postgres|tokio_postgres|postgres_types|postgres_protocol|rustls|tokio_rustls|tokio_postgres_rustls|rustls_pki_types|pki_types|webpki|webpki_roots|ring)([^A-Za-z0-9_]|$)' || true)"
+  | grep -E '(^|[^A-Za-z0-9_])(postgres|tokio_postgres|postgres_types|postgres_protocol|rustls|tokio_rustls|tokio_postgres_rustls|rustls_pki_types|pki_types|webpki|webpki_roots|ring|rusqlite|libsqlite3_sys)([^A-Za-z0-9_]|$)' || true)"
 if [ -n "$leaks" ]; then
   echo "driver or TLS types outside pg_unstable:" >&2
   echo "$leaks" >&2

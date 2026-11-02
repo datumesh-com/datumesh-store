@@ -1,6 +1,6 @@
 [package]
 name = "datumesh-store"
-version = "0.3.2"
+version = "0.4.0"
 description = "Store for Datumesh on PostgreSQL or SQLite: descriptors, receipts, blobs, versions over transaction time, lineage, namespaces and names; a datumesh-core Resolver."
 edition.workspace = true
 rust-version.workspace = true

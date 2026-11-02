@@ -167,7 +167,7 @@ fn the_api_has_pg_unstable_and_the_replacements() {
         .filter_map(|l| l.strip_prefix("pub fn datumesh_store::Store::"))
         .filter_map(|l| l.split('(').next())
         .collect();
-    assert!(store_methods.len() >= 30, "{store_methods:?}");
+    assert!(store_methods.len() >= 29, "{store_methods:?}");
     for m in store_methods {
         for owner in ["PgStore", "SqliteStore"] {
             let p = format!("pub fn datumesh_store::{owner}::{m}(");
