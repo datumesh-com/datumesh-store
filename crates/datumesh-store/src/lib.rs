@@ -183,10 +183,10 @@ pub struct Namespace {
     /// store refuses new writes under the host ([`Error::NamespaceSuspended`]).
     pub suspended_at: Option<String>,
     /// How many checks of the host's key document have failed in a row (zero after a
-    /// success). Since the namespace checks (after 0.4.0).
+    /// success). Since the namespace checks (since 0.4.1).
     pub consecutive_failures: u32,
     /// When the host's key document was last checked, successfully or not; `None` before
-    /// the first check recorded. Since the namespace checks (after 0.4.0).
+    /// the first check recorded. Since the namespace checks (since 0.4.1).
     pub last_checked_at: Option<String>,
 }
 
@@ -321,7 +321,7 @@ pub trait Store: Resolver + sealed::Sealed {
     fn put_namespace(&self, host: &str, keydoc_bytes: &[u8], validated_at: &str) -> Result<()>;
     /// A host's recorded key document.
     fn namespace(&self, host: &str) -> Result<Option<Namespace>>;
-    /// Every recorded namespace, by host. Since the namespace checks (after 0.4.0).
+    /// Every recorded namespace, by host. Since the namespace checks (since 0.4.1).
     fn namespaces(&self) -> Result<Vec<Namespace>>;
     /// Records a failed check of `host`'s key document at `checked_at` (domain validation):
     /// the consecutive failures grow by one, and when they reach `threshold` (zero counts as
@@ -332,14 +332,14 @@ pub trait Store: Resolver + sealed::Sealed {
     /// verification and the stored key document are not affected, and neither is putting a
     /// receipt that is already stored. Returns the namespace as recorded, or `None` for a
     /// host with no namespace (there is nothing to suspend). A `checked_at` earlier than the
-    /// latest check is [`Error::NotLater`]. Since the namespace checks (after 0.4.0).
+    /// latest check is [`Error::NotLater`]. Since the namespace checks (since 0.4.1).
     fn record_namespace_failure(&self, host: &str, checked_at: &str, threshold: u32) -> Result<Option<Namespace>>;
     /// Records a successful check of `host`'s key document at `checked_at`: the consecutive
     /// failures are reset to zero and a suspension is lifted (the namespace is reinstated).
     /// The document itself is recorded with [`put_namespace`](Store::put_namespace) (which
     /// neither suspends nor reinstates). Returns the namespace as recorded, or `None` for a
     /// host with no namespace. A `checked_at` earlier than the latest check is
-    /// [`Error::NotLater`]. Since the namespace checks (after 0.4.0).
+    /// [`Error::NotLater`]. Since the namespace checks (since 0.4.1).
     fn record_namespace_success(&self, host: &str, checked_at: &str) -> Result<Option<Namespace>>;
     /// Appends a binding: from `tx` on, the fully qualified function name `fn_name` means
     /// `fn_hash`, whose descriptor must be stored. `tx` must be later than the name's latest

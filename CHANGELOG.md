@@ -2,7 +2,9 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## Unreleased (branch step-1.5-namespace-validation; version to be decided, 0.5.0 proposed)
+## 0.4.1 (unreleased; branch step-1.5-namespace-validation, held for the spec-0.5.0 round)
+
+Additive: cargo-semver-checks 0.51.0 against 0.4.0 finds no semver update required (202 checks pass, default and all features). `datumesh-store-cli` 0.4.1 follows the store version; it has no changes of its own.
 
 Domain validation (step 1.5): the store records the outcome of each check of a host's key
 document, suspends a namespace after consecutive failures and refuses new writes under a
