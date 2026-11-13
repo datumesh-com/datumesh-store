@@ -7,7 +7,7 @@ use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
-use crate::{Binding, Namespace, SliceMember, SliceValue, Store, Version};
+use crate::{Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, ErrorCode, FunctionDescriptor, Keys, Manifest, Receipt,
@@ -736,6 +736,26 @@ impl Store for PgStore {
         }
         let pattern = Pattern::of(&v)?;
         self.run("slice_changed_after", |c| pattern.changed_after(c, asof))
+    }
+
+    fn put_class(&self, _bytes: &[u8]) -> Result<String> {
+        todo!("put_class: see IMPL-NOTES-0.4.1-classes.md")
+    }
+
+    fn class(&self, _class_hash: &str) -> Result<Option<Vec<u8>>> {
+        todo!("class: see IMPL-NOTES-0.4.1-classes.md")
+    }
+
+    fn bind_class(&self, _class_name: &str, _class_hash: &str, _tx: &str) -> Result<()> {
+        todo!("bind_class: see IMPL-NOTES-0.4.1-classes.md")
+    }
+
+    fn resolve_class(&self, _class_name: &str, _asof: &str) -> Result<Option<String>> {
+        todo!("resolve_class: see IMPL-NOTES-0.4.1-classes.md")
+    }
+
+    fn resolve_class_binding(&self, _class_name: &str, _asof: &str) -> Result<Option<ClassBinding>> {
+        todo!("resolve_class_binding: see IMPL-NOTES-0.4.1-classes.md")
     }
 
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {

@@ -10,7 +10,7 @@ repository = "https://github.com/datumesh-com/datumesh-store"
 homepage = "https://datumesh.com"
 
 [workspace.dependencies]
-datumesh-core = "0.3.4"
+datumesh-core = "0.3.8"
 postgres = "0.19.14"
 # SQLite (0.4.0): rusqlite with SQLite compiled in (`bundled`), so no system library is
 # needed on any platform; the LRU cache of prepared statements (`cache`).

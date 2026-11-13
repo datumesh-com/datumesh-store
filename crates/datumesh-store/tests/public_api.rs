@@ -185,3 +185,40 @@ fn the_api_has_pg_unstable_and_the_replacements() {
     assert!(api.lines().any(|l| l.starts_with("pub fn datumesh_store::pg_unstable::with_connector<F>(")));
     assert!(!api.lines().any(|l| l == "pub use datumesh_store::postgres"));
 }
+
+/// 0.4.1: classes, additively (`public-api.txt` is regenerated with the implementation).
+#[test]
+fn the_api_has_classes_since_0_4_1() {
+    let api = api();
+    let has = |item: &str| api.lines().any(|l| l == item);
+    for owner in ["Store", "PgStore", "SqliteStore"] {
+        for item in [
+            format!("pub fn datumesh_store::{owner}::put_class(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>"),
+            format!("pub fn datumesh_store::{owner}::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>"),
+            format!("pub fn datumesh_store::{owner}::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>"),
+            format!("pub fn datumesh_store::{owner}::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>"),
+            format!("pub fn datumesh_store::{owner}::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>"),
+        ] {
+            assert!(has(&item), "missing: {item}");
+        }
+    }
+    for item in [
+        "#[non_exhaustive] pub struct datumesh_store::ClassBinding",
+        "pub datumesh_store::ClassBinding::class_hash: alloc::string::String",
+        "pub datumesh_store::ClassBinding::tx: alloc::string::String",
+        "pub datumesh_store::Error::NameTaken",
+        "pub datumesh_store::Error::NameTaken::bound_as: &'static str",
+        "pub datumesh_store::Error::NameTaken::name: alloc::string::String",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+    // Additions only: what 0.4.0 and the namespace checks had is still there.
+    for item in [
+        "pub fn datumesh_store::Store::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>",
+        "pub fn datumesh_store::Store::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>",
+        "pub datumesh_store::Error::NamespaceSuspended",
+        "pub datumesh_store::Error::NotFound::what: &'static str",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+}

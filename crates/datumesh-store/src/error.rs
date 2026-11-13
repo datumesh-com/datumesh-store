@@ -28,9 +28,10 @@ pub enum Error {
         latest: String,
     },
     /// Something the write refers to is not in the store: the receipt of a version, the
-    /// descriptor of a name binding.
+    /// descriptor of a name binding, or (since 0.4.1) the class or a method's descriptor of a
+    /// class binding.
     NotFound {
-        /// `"receipt"` or `"descriptor"`.
+        /// `"receipt"`, `"descriptor"` or (since 0.4.1) `"class"`.
         what: &'static str,
         /// Its hash.
         key: String,
@@ -61,6 +62,17 @@ pub enum Error {
         host: String,
         /// When it was suspended.
         suspended_at: String,
+    },
+    /// Class names and function names share one namespace of names, and `name` is currently
+    /// bound as the other kind: [`Store::bind_class`](crate::Store::bind_class) of a name
+    /// whose latest binding is a function (or of a class's method name whose latest binding is
+    /// a class), or [`Store::bind_name`](crate::Store::bind_name) of a name whose latest
+    /// binding is a class. Nothing is bound. Since 0.4.1.
+    NameTaken {
+        /// The name refused (for a method name, `<class name>/<method>`).
+        name: String,
+        /// What it is bound as now: `"function"` or `"class"`.
+        bound_as: &'static str,
     },
     /// The database refused or failed: the server's message and SQLSTATE (PostgreSQL) or
     /// SQLite's message and result code, or the driver's description of a failure that is
@@ -197,6 +209,9 @@ impl fmt::Display for Error {
             }
             Error::NamespaceSuspended { host, suspended_at } => {
                 write!(f, "namespace {host} has been suspended since {suspended_at}: no new writes under it")
+            }
+            Error::NameTaken { name, bound_as } => {
+                write!(f, "name {name} is bound as a {bound_as}: class and function names are one namespace")
             }
             Error::Database(e) => write!(f, "database: {e}"),
             Error::PoolTimeout => f.write_str("no database connection became free in time"),

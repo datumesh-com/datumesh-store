@@ -166,6 +166,18 @@ pub struct Binding {
     pub tx: String,
 }
 
+/// A class-name binding: from transaction time `tx` on, a class name means the class
+/// `class_hash` ([`Store::bind_class`]). The class counterpart of [`Binding`]; the bindings
+/// answer of SPEC 9.7 gives `class_hash` in place of `fn_hash` for such a name. Since 0.4.1.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClassBinding {
+    /// The class hash the name means.
+    pub class_hash: String,
+    /// When the binding began (an instant, SPEC 3.3).
+    pub tx: String,
+}
+
 /// A namespace's host and its key document.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -232,7 +244,7 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 /// use std::borrow::Cow;
 /// use datumesh_core::{Cell, Scalar};
 /// use datumesh_core::Slice;
-/// use datumesh_store::{Binding, Namespace, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Version};
+/// use datumesh_store::{Binding, ClassBinding, Namespace, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Version};
 ///
 /// struct Wrapper(PgStore);
 /// impl Resolver for Wrapper {
@@ -260,6 +272,11 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 ///     fn bind_name(&self, n: &str, f: &str, t: &str) -> Result<()> { self.0.bind_name(n, f, t) }
 ///     fn resolve_name(&self, n: &str, a: &str) -> Result<Option<String>> { self.0.resolve_name(n, a) }
 ///     fn resolve_binding(&self, n: &str, a: &str) -> Result<Option<Binding>> { self.0.resolve_binding(n, a) }
+///     fn put_class(&self, b: &[u8]) -> Result<String> { self.0.put_class(b) }
+///     fn class(&self, h: &str) -> Result<Option<Vec<u8>>> { self.0.class(h) }
+///     fn bind_class(&self, n: &str, h: &str, t: &str) -> Result<()> { self.0.bind_class(n, h, t) }
+///     fn resolve_class(&self, n: &str, a: &str) -> Result<Option<String>> { self.0.resolve_class(n, a) }
+///     fn resolve_class_binding(&self, n: &str, a: &str) -> Result<Option<ClassBinding>> { self.0.resolve_class_binding(n, a) }
 ///     fn put_computed(&self, c: &str, t: &str, r: &str) -> Result<()> { self.0.put_computed(c, t, r) }
 ///     fn computed_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.computed_asof(c, a) }
 ///     fn stored_asof(&self, c: &str, a: &str) -> Result<Option<Version>> { self.0.stored_asof(c, a) }
@@ -353,6 +370,62 @@ pub trait Store: Resolver + sealed::Sealed {
     /// A name bound again to a hash it meant before (even the hash of the binding before
     /// it) begins again: the later binding's `tx`. Since 0.3.0.
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>>;
+
+    /// Stores a class descriptor (SPEC 16.1, 16.2) under its class hash and returns the hash.
+    /// Since 0.4.1.
+    ///
+    /// `bytes` must be a **flattened** descriptor in **canonical form** (the bytes
+    /// `ClassDescriptor::canonical` gives, 6.2: what the class hash hashes). The core checks it
+    /// (`ClassDescriptor::from_json`: strict JSON, then 16.1 in its check order; a flattened
+    /// descriptor passes). Bytes that are a valid descriptor but not the canonical form of
+    /// it (white space, members out of order) are refused with [`Error::Invalid`], code
+    /// `E_SCHEMA`, and nothing is stored: unlike [`put_descriptor`](Store::put_descriptor),
+    /// which canonicalises, the bytes put are the bytes stored, so the class hash is the
+    /// SHA-256 of what [`class`](Store::class) returns. Idempotent for the same bytes.
+    ///
+    /// The store does not flatten (that is define's, with the parent in hand), and does not
+    /// need the parent, the method functions or the interfaces to be stored (`bind_class`
+    /// needs the methods' descriptors). It does not check the owner either (16.2 step 1 is the
+    /// definer's check: the store records, http and the engine enforce). It is a write under
+    /// the class's steward namespace (`steward.namespace`): refused with
+    /// [`Error::NamespaceSuspended`] while that namespace is suspended, even for a class
+    /// already stored.
+    fn put_class(&self, bytes: &[u8]) -> Result<String>;
+    /// The canonical bytes of the class descriptor with this class hash, as stored
+    /// ([`put_class`](Store::put_class)); `None` when no such class is stored. A malformed
+    /// hash is `E_CANON_HEX`. Never refused under a suspended namespace. Since 0.4.1.
+    fn class(&self, class_hash: &str) -> Result<Option<Vec<u8>>>;
+    /// Binds the class name `class_name` (a full name, 2.3) to the stored class `class_hash`
+    /// from `tx` on and, in the same transaction, binds each method `<class_name>/<m>` of the
+    /// stored (flattened, so inherited methods included) descriptor to the method's function
+    /// hash from the same `tx` (SPEC 16.3, 9.7). All of it or nothing:
+    ///
+    /// - the class must be stored ([`Error::NotFound`], `what` `"class"`), and so must every
+    ///   method's function descriptor ([`Error::NotFound`], `what` `"descriptor"`, the missing
+    ///   function hash; the first in JCS order of method names);
+    /// - class names and function names share one namespace of names: `class_name`, or a
+    ///   method name, whose latest binding is of the other kind (a function for `class_name`,
+    ///   a class for a method name) is refused with [`Error::NameTaken`]. A method name bound
+    ///   as a function, to whatever hash, is simply bound again;
+    /// - `tx` must be later than the latest binding of `class_name` and of each method name
+    ///   ([`Error::NotLater`], `what` `"name"`, the name that is not);
+    /// - while the namespace of `class_name`'s host is suspended: [`Error::NamespaceSuspended`].
+    ///
+    /// The store does not check that the class name is under the steward's namespace, nor
+    /// who binds it (the definer's check, 16.2 step 1). Since 0.4.1.
+    fn bind_class(&self, class_name: &str, class_hash: &str, tx: &str) -> Result<()>;
+    /// The class hash `class_name` meant as of `asof`: the hash of
+    /// [`resolve_class_binding`](Store::resolve_class_binding)'s binding. `None` before the
+    /// first binding, and for a name whose binding as of `asof` is a function's. Since 0.4.1.
+    fn resolve_class(&self, class_name: &str, asof: &str) -> Result<Option<String>>;
+    /// The class binding of `class_name` that answers as of `asof`: the latest with
+    /// `tx <= asof`, with its class hash and its `tx` (when it began; binding the same hash
+    /// again begins again), as [`resolve_binding`](Store::resolve_binding) does for functions.
+    /// `None` before the first, and for a function name. The function accessors
+    /// ([`resolve_name`](Store::resolve_name), [`resolve_binding`](Store::resolve_binding))
+    /// answer `None` for a class name: a bindings answer (9.7) has `fn_hash` or `class_hash`,
+    /// never both. Since 0.4.1.
+    fn resolve_class_binding(&self, class_name: &str, asof: &str) -> Result<Option<ClassBinding>>;
 
     /// Records that `receipt_hash` (stored, a receipt of `cell_id` at `tx`) is a computed
     /// version of the cell. Insert-only, in any order (an older version may be added after a

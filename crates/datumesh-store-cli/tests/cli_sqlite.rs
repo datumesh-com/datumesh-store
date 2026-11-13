@@ -362,3 +362,134 @@ fn bench_runs_small() {
     let out = ok(&db.run(&["bench", "--wait"]));
     assert!(out.contains("answered"), "{out}");
 }
+
+// ---- Classes (0.4.1) ---------------------------------------------------------------------
+//
+// The command has no put/bind subcommands for functions, so it has none for classes (the
+// contract's item 5 asks for them only "if the CLI has the matching function commands"). What
+// it does have, export and import, must not lose classes: a class descriptor and a class
+// binding (with the method bindings it made) go through an export and an import unchanged.
+// The line formats are the implementation's to choose (see IMPL-NOTES-0.4.1-classes.md).
+
+mod classes {
+    use super::*;
+    use datumesh_store::{PgStore, SqliteStore, Store};
+
+    const CLASS: &str = "rates.example.org/fx_pair";
+    const T1: &str = "2024-03-15T16:00:00.000000Z";
+    const T2: &str = "2024-03-18T10:00:00.000000Z";
+    const END: &str = "9999-12-31T23:59:59.999999Z";
+
+    fn method_fn(tag: &str) -> Vec<u8> {
+        let key = r#"{"key_normalisation":"upper_ascii","type":"string","valid":false}"#;
+        format!(
+            r#"{{"code":{{"body":"{tag}","lang":"stored"}},"inputs":[],"signature":{{"args":{{"base":{key},"date":{{"type":"date","valid":true}},"quote":{key}}},"order":["base","quote","date"],"returns":{{"type":"number","unit":"1"}}}}}}"#
+        )
+        .into_bytes()
+    }
+
+    /// (flattened canonical bytes, class hash, function descriptors, method name -> function hash)
+    type Fx = (Vec<u8>, String, Vec<Vec<u8>>, Vec<(String, String)>);
+
+    fn fx(version: &str) -> Fx {
+        let fns = [("rate", method_fn(&format!("rate {version}"))), ("spot", method_fn("spot"))];
+        let mut env = datumesh_core::ClassEnv::new("rates.example.org");
+        let mut methods = Vec::new();
+        for (m, f) in &fns {
+            let d = datumesh_core::FunctionDescriptor::from_json(f).unwrap();
+            methods.push((m.to_string(), d.hash()));
+            env.insert_function(d);
+        }
+        let text = format!(
+            r#"{{"keys":{{"base":{{"key_normalisation":"upper_ascii","type":"string"}},"quote":{{"key_normalisation":"upper_ascii","type":"string"}}}},"methods":{{"rate":"{}","spot":"{}"}},"order":["base","quote"],"steward":{{"namespace":"rates.example.org","process":"https://rates.example.org/classes/change"}}}}"#,
+            methods[0].1, methods[1].1
+        );
+        let flat = datumesh_core::define_class(CLASS, text.as_bytes(), &env).unwrap();
+        (flat.canonical(), flat.hash(), fns.into_iter().map(|(_, f)| f).collect(), methods)
+    }
+
+    /// Fills a store: a function name, then the class bound at T1 and rebound (a new `rate`) at T2.
+    fn fill(s: &dyn Store) {
+        let (_, h1, fns1, _) = fx("v1");
+        let (_, h2, fns2, _) = fx("v2");
+        for f in fns1.iter().chain(&fns2) {
+            s.put_descriptor(f).unwrap();
+        }
+        s.bind_name(
+            "rates.example.org/fx_rate",
+            &datumesh_core::FunctionDescriptor::from_json(&fns1[0]).unwrap().hash(),
+            T1,
+        )
+        .unwrap();
+        for (bytes, hash) in [(fx("v1").0, &h1), (fx("v2").0, &h2)] {
+            assert_eq!(&s.put_class(&bytes).unwrap(), hash);
+        }
+        s.bind_class(CLASS, &h1, T1).unwrap();
+        s.bind_class(CLASS, &h2, T2).unwrap();
+    }
+
+    /// What `fill` made is in `s`.
+    fn check(s: &dyn Store) {
+        let (b1, h1, _, m1) = fx("v1");
+        let (b2, h2, _, m2) = fx("v2");
+        assert_eq!(s.class(&h1).unwrap(), Some(b1));
+        assert_eq!(s.class(&h2).unwrap(), Some(b2));
+        assert_eq!(s.resolve_class(CLASS, T1).unwrap(), Some(h1));
+        assert_eq!(s.resolve_class(CLASS, END).unwrap(), Some(h2));
+        let tx = |asof: &str| s.resolve_class_binding(CLASS, asof).unwrap().unwrap().tx;
+        assert_eq!((tx(T1).as_str(), tx(END).as_str()), (T1, T2));
+        let rate = |asof: &str| s.resolve_name(&format!("{CLASS}/rate"), asof).unwrap();
+        assert_eq!(rate(T1).as_deref(), Some(m1[0].1.as_str()));
+        assert_eq!(rate(END).as_deref(), Some(m2[0].1.as_str()));
+        assert_ne!(m1[0].1, m2[0].1);
+        assert_eq!(s.resolve_name(&format!("{CLASS}/spot"), END).unwrap().as_deref(), Some(m2[1].1.as_str()));
+        // The function name next to them is still a function.
+        assert!(s.resolve_name("rates.example.org/fx_rate", END).unwrap().is_some());
+        assert_eq!(s.resolve_class("rates.example.org/fx_rate", END).unwrap(), None);
+    }
+
+    #[test]
+    fn export_and_import_keep_classes_and_class_bindings() {
+        let a = Lite::new();
+        ok(&a.run(&["migrate"]));
+        let store = SqliteStore::open(&a.path).unwrap();
+        fill(&store);
+        check(&store);
+        let export1 = ok(&a.run(&["export"]));
+        for l in export1.lines() {
+            datumesh_core::json::parse(l.as_bytes()).unwrap();
+        }
+        // The export says something about classes: their descriptors are in it.
+        assert!(export1.contains(&fx("v1").1) && export1.contains(&fx("v2").1), "{export1}");
+
+        // Into a new SQLite file: the same store, the same export; again: a no-op.
+        let b = Lite::new();
+        ok(&b.run(&["migrate"]));
+        let out = ok(&b.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+        assert!(out.contains("0 errors"), "{out}");
+        check(&SqliteStore::open(&b.path).unwrap());
+        assert_eq!(ok(&b.run(&["export"])), export1);
+        let out = ok(&b.run_stdin(&["import", "-"], Some(export1.as_bytes())));
+        assert!(out.contains("0 errors"), "{out}");
+        assert_eq!(ok(&b.run(&["export"])), export1);
+
+        // Into PostgreSQL, and back: the same lines from either backend.
+        let pg = Pg::new();
+        ok(&pg.run(&["migrate"]));
+        let out = ok(&pg.run_stdin_pg(&["import", "-"], export1.as_bytes()));
+        assert!(out.contains("0 errors"), "{out}");
+        check(&PgStore::connect(&pg.url).unwrap());
+        let pg_export = ok(&pg.run(&["export"]));
+        assert_eq!(pg_export, export1);
+        let c = Lite::new();
+        ok(&c.run(&["migrate"]));
+        ok(&c.run_stdin(&["import", "-"], Some(pg_export.as_bytes())));
+        assert_eq!(ok(&c.run(&["export"])), export1);
+    }
+}
+
+impl Pg {
+    fn run_stdin_pg(&self, args: &[&str], stdin: &[u8]) -> Output {
+        run(args, Some(&self.url), Some(stdin))
+    }
+}
