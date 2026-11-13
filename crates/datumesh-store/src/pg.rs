@@ -240,6 +240,65 @@ impl Resolver for PgStore {
     }
 }
 
+/// The host of a fully qualified function name (`host/name`): what precedes the last `/`.
+fn name_host(fn_name: &str) -> &str {
+    fn_name.rsplit_once('/').map_or("", |(h, _)| h)
+}
+
+/// The namespace in `row`, whose columns from `at` are keydoc, validated_at, suspended_at,
+/// consecutive_failures, last_checked_at.
+fn namespace_row(host: &str, row: &postgres::Row, at: usize) -> Result<Namespace> {
+    let failures: i32 = row.try_get(at + 3).db()?;
+    Ok(Namespace {
+        host: host.to_string(),
+        keydoc: row.try_get(at).db()?,
+        validated_at: row.try_get(at + 1).db()?,
+        suspended_at: row.try_get(at + 2).db()?,
+        consecutive_failures: u32::try_from(failures).unwrap_or(0),
+        last_checked_at: row.try_get(at + 4).db()?,
+    })
+}
+
+impl PgStore {
+    /// A failed check (`threshold` is `Some`) or a successful one (`None`) at `checked_at`.
+    fn record_check(
+        &self,
+        op: &'static str,
+        host: &str,
+        checked_at: &str,
+        threshold: Option<u32>,
+    ) -> Result<Option<Namespace>> {
+        check_dns_name(host, "host")?;
+        check_instant(checked_at, "checked_at")?;
+        let out = self.run(op, |c| {
+            let lock = c.stmt(Q::Lock)?;
+            let get = c.stmt(Q::NamespaceGet)?;
+            let put = c.stmt(Q::NamespaceCheck)?;
+            let mut t = c.client.transaction().db()?;
+            t.execute(&lock, &[&"namespaces", &host]).db()?;
+            let Some(row) = t.query_opt(&get, &[&host]).db()? else { return Ok(None) };
+            let mut ns = namespace_row(host, &row, 0)?;
+            if let Some(at) = &ns.last_checked_at {
+                if checked_at < at.as_str() {
+                    return Err(Error::NotLater {
+                        what: "namespace",
+                        key: host.to_string(),
+                        given: checked_at.to_string(),
+                        latest: at.clone(),
+                    });
+                }
+            }
+            crate::apply_check(&mut ns, checked_at, threshold);
+            let failures = i32::try_from(ns.consecutive_failures).unwrap_or(i32::MAX);
+            t.execute(&put, &[&host, &failures, &checked_at, &ns.suspended_at]).db()?;
+            t.commit().db()?;
+            Ok(Some(ns))
+        })?;
+        tracing::debug!(target: "datumesh_store", host, checked_at, ok = threshold.is_none(), "namespace check");
+        Ok(out)
+    }
+}
+
 impl Store for PgStore {
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
         // spec-0.4.0's descriptor: `signature.order` and argument `extent` allowed.
@@ -286,6 +345,10 @@ impl Store for PgStore {
             // a host without keys (E_KEY_UNAVAILABLE).
             let mut keys = Keys::new();
             if let Some(row) = t.query_opt(&ns, &[&host]).db()? {
+                // No new writes under a suspended namespace.
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended { host: host.clone(), suspended_at: since });
+                }
                 let doc: Vec<u8> = row.try_get(0).db()?;
                 keys.insert_response(&host, 200, Some(&doc));
             }
@@ -342,6 +405,8 @@ impl Store for PgStore {
         self.run("put_version", |c| {
             let lock = c.stmt(Q::Lock)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
+            let get = c.stmt(Q::ReceiptGet)?;
+            let ns = c.stmt(Q::NamespaceGet)?;
             let latest = c.stmt(Q::VersionLatestTx)?;
             let put = c.stmt(Q::VersionPut)?;
             let mut t = c.client.transaction().db()?;
@@ -349,6 +414,14 @@ impl Store for PgStore {
             let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
+            // No new versions of a receipt signed by a suspended namespace.
+            let stored: Vec<u8> = t.query_one(&get, &[&receipt_hash]).db()?.try_get(0).db()?;
+            let signer = Receipt::from_json(&stored)?.signer_host().to_string();
+            if let Some(row) = t.query_opt(&ns, &[&signer]).db()? {
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended { host: signer, suspended_at: since });
+                }
+            }
             let (r_cell, r_tx): (String, String) = (row.try_get(0).db()?, row.try_get(1).db()?);
             if r_cell != cell_id {
                 return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
@@ -444,13 +517,28 @@ impl Store for PgStore {
         self.run("namespace", |c| {
             let st = c.stmt(Q::NamespaceGet)?;
             let Some(row) = c.client.query_opt(&st, &[&host]).db()? else { return Ok(None) };
-            Ok(Some(Namespace {
-                host: host.to_string(),
-                keydoc: row.try_get(0).db()?,
-                validated_at: row.try_get(1).db()?,
-                suspended_at: row.try_get(2).db()?,
-            }))
+            Ok(Some(namespace_row(host, &row, 0)?))
         })
+    }
+
+    fn namespaces(&self) -> Result<Vec<Namespace>> {
+        self.run("namespaces", |c| {
+            let st = c.stmt(Q::NamespaceList)?;
+            let mut out = Vec::new();
+            for row in c.client.query(&st, &[]).db()? {
+                let host: String = row.try_get(0).db()?;
+                out.push(namespace_row(&host, &row, 1)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn record_namespace_failure(&self, host: &str, checked_at: &str, threshold: u32) -> Result<Option<Namespace>> {
+        self.record_check("record_namespace_failure", host, checked_at, Some(threshold))
+    }
+
+    fn record_namespace_success(&self, host: &str, checked_at: &str) -> Result<Option<Namespace>> {
+        self.record_check("record_namespace_success", host, checked_at, None)
     }
 
     fn bind_name(&self, fn_name: &str, fn_hash: &str, tx: &str) -> Result<()> {
@@ -460,10 +548,20 @@ impl Store for PgStore {
         self.run("bind_name", |c| {
             let lock = c.stmt(Q::Lock)?;
             let exists = c.stmt(Q::DescriptorExists)?;
+            let ns = c.stmt(Q::NamespaceGet)?;
             let latest = c.stmt(Q::NameLatest)?;
             let put = c.stmt(Q::NamePut)?;
             let mut t = c.client.transaction().db()?;
             t.execute(&lock, &[&"names", &fn_name]).db()?;
+            // No new bindings under a suspended namespace.
+            if let Some(row) = t.query_opt(&ns, &[&name_host(fn_name)]).db()? {
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended {
+                        host: name_host(fn_name).to_string(),
+                        suspended_at: since,
+                    });
+                }
+            }
             let found: bool = t.query_one(&exists, &[&fn_hash]).db()?.try_get(0).db()?;
             if !found {
                 return Err(Error::NotFound { what: "descriptor", key: fn_hash.to_string() });

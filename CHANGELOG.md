@@ -2,6 +2,27 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## Unreleased (branch step-1.5-namespace-validation; version to be decided, 0.5.0 proposed)
+
+Domain validation (step 1.5): the store records the outcome of each check of a host's key
+document, suspends a namespace after consecutive failures and refuses new writes under a
+suspended one. Additions only (the trait is sealed; `Namespace` and `Error` are
+non-exhaustive); new migrations, none edited.
+
+### Added
+
+- Migrations: PostgreSQL 0005 and SQLite 0002 (`namespace_checks`): `namespaces.consecutive_failures`
+  (not null, default 0) and `namespaces.last_checked_at` (PostgreSQL also `last_checked_at_at`).
+- `Namespace::consecutive_failures` and `Namespace::last_checked_at`.
+- `Store::record_namespace_failure(host, checked_at, threshold)`: counts the failure and
+  suspends (`suspended_at`, the single record of suspension) when the count reaches the
+  threshold; `Store::record_namespace_success(host, checked_at)`: resets the count and
+  reinstates; `Store::namespaces()`: every namespace, by host.
+- `Error::NamespaceSuspended { host, suspended_at }`: new writes under a suspended namespace
+  (`put_receipt` of a receipt signed by the host, `put_version` of such a receipt,
+  `bind_name` of a name under the host) are refused with it. Reads, verification, putting a
+  receipt that is already stored, and `put_namespace` (a rotation) are not affected.
+
 ## 0.4.0 (2026-11-02)
 
 For the local resolver (step 1.8a): a second backend, SQLite, in one file with no server,

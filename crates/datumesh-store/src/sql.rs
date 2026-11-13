@@ -192,7 +192,14 @@ statements! {
     Dependents = "SELECT receipt_hash FROM edges WHERE input_hash = $1 ORDER BY receipt_hash" => [TEXT];
     Inputs = "SELECT input_hash FROM edges WHERE receipt_hash = $1 ORDER BY input_hash" => [TEXT];
 
-    NamespaceGet = "SELECT keydoc, validated_at, suspended_at FROM namespaces WHERE host = $1" => [TEXT];
+    NamespaceGet = "SELECT keydoc, validated_at, suspended_at, consecutive_failures, last_checked_at
+                    FROM namespaces WHERE host = $1" => [TEXT];
+    NamespaceList = "SELECT host, keydoc, validated_at, suspended_at, consecutive_failures, last_checked_at
+                     FROM namespaces ORDER BY host" => [];
+    NamespaceCheck = "UPDATE namespaces SET consecutive_failures = $2, last_checked_at = $3,
+                        last_checked_at_at = datumesh_instant($3), suspended_at = $4::text,
+                        suspended_at_at = CASE WHEN $4::text IS NULL THEN NULL ELSE datumesh_instant($4::text) END
+                      WHERE host = $1" => [TEXT, INT4, TEXT, TEXT];
     NamespacePut = "INSERT INTO namespaces (host, keydoc, validated_at, validated_at_at)
                     VALUES ($1, $2, $3, datumesh_instant($3))
                     ON CONFLICT (host) DO UPDATE SET keydoc = EXCLUDED.keydoc,

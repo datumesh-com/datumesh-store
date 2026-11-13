@@ -431,6 +431,28 @@ fn version_row(r: &rusqlite::Row<'_>, cell_id: &str) -> rusqlite::Result<Version
     Ok(Version { cell_id: cell_id.to_string(), tx: r.get(0)?, receipt_hash: r.get(1)?, asof: r.get(2)? })
 }
 
+/// The host of a fully qualified function name (`host/name`): what precedes the last `/`.
+fn name_host(fn_name: &str) -> &str {
+    fn_name.rsplit_once('/').map_or("", |(h, _)| h)
+}
+
+fn read_namespace(c: &Connection, host: &str) -> Result<Option<Namespace>> {
+    c.prepare_cached(L::NamespaceGet.sql())
+        .db()?
+        .query_row([host], |r| {
+            Ok(Namespace {
+                host: host.to_string(),
+                keydoc: r.get(0)?,
+                validated_at: r.get(1)?,
+                suspended_at: r.get(2)?,
+                consecutive_failures: r.get(3)?,
+                last_checked_at: r.get(4)?,
+            })
+        })
+        .optional()
+        .db()
+}
+
 fn get_bytes(c: &Connection, q: L, key: &str) -> Result<Option<Vec<u8>>> {
     c.prepare_cached(q.sql()).db()?.query_row([key], |r| r.get(0)).optional().db()
 }
@@ -572,6 +594,38 @@ impl Resolver for SqliteStore {
     }
 }
 
+impl SqliteStore {
+    /// A failed check (`threshold` is `Some`) or a successful one (`None`) at `checked_at`.
+    fn record_check(
+        &self,
+        op: &'static str,
+        host: &str,
+        checked_at: &str,
+        threshold: Option<u32>,
+    ) -> Result<Option<Namespace>> {
+        check_dns_name(host, "host")?;
+        check_instant(checked_at, "checked_at")?;
+        let out = self.write(op, |c| {
+            let Some(mut ns) = read_namespace(c, host)? else { return Ok(None) };
+            if let Some(at) = &ns.last_checked_at {
+                if checked_at < at.as_str() {
+                    return Err(Error::NotLater {
+                        what: "namespace",
+                        key: host.to_string(),
+                        given: checked_at.to_string(),
+                        latest: at.clone(),
+                    });
+                }
+            }
+            crate::apply_check(&mut ns, checked_at, threshold);
+            exec(c, L::NamespaceCheck, rusqlite::params![host, ns.consecutive_failures, checked_at, ns.suspended_at])?;
+            Ok(Some(ns))
+        })?;
+        tracing::debug!(target: "datumesh_store", host, checked_at, ok = threshold.is_none(), "namespace check");
+        Ok(out)
+    }
+}
+
 impl Store for SqliteStore {
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
         let d = FunctionDescriptor::from_json(bytes)?;
@@ -625,8 +679,12 @@ impl Store for SqliteStore {
             // Steps 5-6 against the stored key document of the signer host (outside the
             // write lock: verifying is the slow part).
             let mut keys = Keys::new();
-            if let Some(doc) = get_bytes(c, L::NamespaceGet, &host)? {
-                keys.insert_response(&host, 200, Some(&doc));
+            if let Some(ns) = read_namespace(c, &host)? {
+                // No new writes under a suspended namespace.
+                if let Some(since) = ns.suspended_at {
+                    return Err(Error::NamespaceSuspended { host: host.clone(), suspended_at: since });
+                }
+                keys.insert_response(&host, 200, Some(&ns.keydoc));
             }
             let out = verify(bytes, &keys, None, None);
             if !out.ok {
@@ -714,6 +772,13 @@ impl Store for SqliteStore {
             let Some((r_cell, r_tx)) = meta else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
+            // No new versions of a receipt signed by a suspended namespace.
+            let stored = get_bytes(c, L::ReceiptGet, receipt_hash)?
+                .ok_or_else(|| Error::NotFound { what: "receipt", key: receipt_hash.to_string() })?;
+            let signer = Receipt::from_json(&stored)?.signer_host().to_string();
+            if let Some(since) = read_namespace(c, &signer)?.and_then(|n| n.suspended_at) {
+                return Err(Error::NamespaceSuspended { host: signer, suspended_at: since });
+            }
             if r_cell != cell_id {
                 return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
             }
@@ -799,20 +864,34 @@ impl Store for SqliteStore {
 
     fn namespace(&self, host: &str) -> Result<Option<Namespace>> {
         check_dns_name(host, "host")?;
-        self.run("namespace", |c| {
-            c.prepare_cached(L::NamespaceGet.sql())
-                .db()?
-                .query_row([host], |r| {
+        self.run("namespace", |c| read_namespace(c, host))
+    }
+
+    fn namespaces(&self) -> Result<Vec<Namespace>> {
+        self.run("namespaces", |c| {
+            let mut st = c.prepare_cached(L::NamespaceList.sql()).db()?;
+            let rows = st
+                .query_map([], |r| {
                     Ok(Namespace {
-                        host: host.to_string(),
-                        keydoc: r.get(0)?,
-                        validated_at: r.get(1)?,
-                        suspended_at: r.get(2)?,
+                        host: r.get(0)?,
+                        keydoc: r.get(1)?,
+                        validated_at: r.get(2)?,
+                        suspended_at: r.get(3)?,
+                        consecutive_failures: r.get(4)?,
+                        last_checked_at: r.get(5)?,
                     })
                 })
-                .optional()
-                .db()
+                .db()?;
+            rows.collect::<rusqlite::Result<Vec<Namespace>>>().db()
         })
+    }
+
+    fn record_namespace_failure(&self, host: &str, checked_at: &str, threshold: u32) -> Result<Option<Namespace>> {
+        self.record_check("record_namespace_failure", host, checked_at, Some(threshold))
+    }
+
+    fn record_namespace_success(&self, host: &str, checked_at: &str) -> Result<Option<Namespace>> {
+        self.record_check("record_namespace_success", host, checked_at, None)
     }
 
     fn bind_name(&self, fn_name: &str, fn_hash: &str, tx: &str) -> Result<()> {
@@ -820,6 +899,11 @@ impl Store for SqliteStore {
         check_hex(fn_hash, 64, "fn_hash")?;
         check_instant(tx, "tx")?;
         self.write("bind_name", |c| {
+            // No new bindings under a suspended namespace.
+            let host = name_host(fn_name);
+            if let Some(since) = read_namespace(c, host)?.and_then(|n| n.suspended_at) {
+                return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
+            }
             if !exists(c, L::DescriptorExists, fn_hash)? {
                 return Err(Error::NotFound { what: "descriptor", key: fn_hash.to_string() });
             }

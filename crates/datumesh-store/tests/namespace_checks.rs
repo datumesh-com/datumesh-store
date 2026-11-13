@@ -44,9 +44,15 @@ fn the_second_consecutive_failure_suspends(b: Backend) {
     let s = db.bare_store();
     s.put_namespace(HOST, &key_doc(&vector("receipt/stored-number"), HOST), T1).unwrap();
     let ns = s.record_namespace_failure(HOST, T2, 2).unwrap().unwrap();
-    assert_eq!((ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()), (1, None, Some(T2)));
+    assert_eq!(
+        (ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()),
+        (1, None, Some(T2))
+    );
     let ns = s.record_namespace_failure(HOST, T3, 2).unwrap().unwrap();
-    assert_eq!((ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()), (2, Some(T3), Some(T3)));
+    assert_eq!(
+        (ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()),
+        (2, Some(T3), Some(T3))
+    );
     // What the store reads back is what it returned.
     assert_eq!(s.namespace(HOST).unwrap().unwrap(), ns);
     // A further failure counts, and keeps the time the suspension began.
@@ -69,7 +75,10 @@ fn a_success_reinstates_and_resets_the_count(b: Backend) {
     s.record_namespace_failure(HOST, T2, 2).unwrap();
     // A success between failures resets the count: failures must be consecutive.
     let ns = s.record_namespace_success(HOST, T3).unwrap().unwrap();
-    assert_eq!((ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()), (0, None, Some(T3)));
+    assert_eq!(
+        (ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()),
+        (0, None, Some(T3))
+    );
     let ns = s.record_namespace_failure(HOST, T4, 2).unwrap().unwrap();
     assert_eq!((ns.consecutive_failures, ns.suspended_at.as_deref()), (1, None));
     // Suspend, then reinstate.
@@ -77,7 +86,10 @@ fn a_success_reinstates_and_resets_the_count(b: Backend) {
     let t6 = "2024-04-20T09:00:00.000000Z";
     assert!(s.record_namespace_failure(HOST, t5, 2).unwrap().unwrap().suspended_at.is_some());
     let ns = s.record_namespace_success(HOST, t6).unwrap().unwrap();
-    assert_eq!((ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()), (0, None, Some(t6)));
+    assert_eq!(
+        (ns.consecutive_failures, ns.suspended_at.as_deref(), ns.last_checked_at.as_deref()),
+        (0, None, Some(t6))
+    );
 }
 
 fn put_namespace_replaces_the_document_and_leaves_the_checks_alone(b: Backend) {
@@ -117,7 +129,7 @@ fn a_check_is_recorded_forward_in_time_only(b: Backend) {
     );
     assert_eq!(
         s.record_namespace_success("Not A Host", T4).unwrap_err().code(),
-        Some(datumesh_core::ErrorCode::CanonDnsName)
+        Some(datumesh_core::ErrorCode::CanonName)
     );
 }
 
@@ -168,10 +180,7 @@ fn a_suspended_namespace_refuses_new_writes_but_not_reads(b: Backend) {
     s2.put_descriptor(&fx_rate_descriptor()).unwrap();
     let h2 = s2.put_receipt(&bytes).unwrap();
     s2.record_namespace_failure(HOST, T2, 1).unwrap();
-    assert_eq!(
-        suspended(s2.put_version(&r.cell().id(), r.tx(), &h2).unwrap_err()),
-        (HOST.to_string(), T2.to_string())
-    );
+    assert_eq!(suspended(s2.put_version(&r.cell().id(), r.tx(), &h2).unwrap_err()), (HOST.to_string(), T2.to_string()));
     assert_eq!(s2.latest(&r.cell().id()).unwrap(), None);
 
     // Reads and verification go on: the receipt, the version, the answer, the document.

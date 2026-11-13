@@ -94,7 +94,8 @@ fn migration_4_backfills_receipt_values() {
     assert!(types.len() >= 5, "{types:?}");
 
     let s = db.bare_store();
-    assert_eq!(migrate::apply(&s).unwrap(), [4]);
+    // Since the namespace checks, migration 5 follows.
+    assert_eq!(migrate::apply(&s).unwrap(), [4, 5]);
     assert_values_are_the_cores(&mut c, &all);
 
     let scratch = PgDb::empty();

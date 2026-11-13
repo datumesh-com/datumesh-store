@@ -48,6 +48,9 @@ pub datumesh_store::Error::Mismatch
 pub datumesh_store::Error::Mismatch::expected: alloc::string::String
 pub datumesh_store::Error::Mismatch::found: alloc::string::String
 pub datumesh_store::Error::Mismatch::what: &'static str
+pub datumesh_store::Error::NamespaceSuspended
+pub datumesh_store::Error::NamespaceSuspended::host: alloc::string::String
+pub datumesh_store::Error::NamespaceSuspended::suspended_at: alloc::string::String
 pub datumesh_store::Error::NotFound
 pub datumesh_store::Error::NotFound::key: alloc::string::String
 pub datumesh_store::Error::NotFound::what: &'static str
@@ -91,8 +94,10 @@ pub fn datumesh_store::DatabaseError::fmt(&self, &mut core::fmt::Formatter<'_>) 
 impl core::fmt::Display for datumesh_store::DatabaseError
 pub fn datumesh_store::DatabaseError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub struct datumesh_store::Namespace
+pub datumesh_store::Namespace::consecutive_failures: u32
 pub datumesh_store::Namespace::host: alloc::string::String
 pub datumesh_store::Namespace::keydoc: alloc::vec::Vec<u8>
+pub datumesh_store::Namespace::last_checked_at: core::option::Option<alloc::string::String>
 pub datumesh_store::Namespace::suspended_at: core::option::Option<alloc::string::String>
 pub datumesh_store::Namespace::validated_at: alloc::string::String
 impl core::clone::Clone for datumesh_store::Namespace
@@ -128,6 +133,7 @@ pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<al
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::PgStore::namespaces(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
@@ -135,6 +141,8 @@ pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Re
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
+pub fn datumesh_store::PgStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::PgStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
@@ -233,6 +241,7 @@ pub fn datumesh_store::SqliteStore::inputs(&self, &str) -> datumesh_store::Resul
 pub fn datumesh_store::SqliteStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::SqliteStore::namespaces(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
@@ -240,6 +249,8 @@ pub fn datumesh_store::SqliteStore::put_manifest(&self, &[u8]) -> datumesh_store
 pub fn datumesh_store::SqliteStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
+pub fn datumesh_store::SqliteStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::SqliteStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::SqliteStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
@@ -278,6 +289,7 @@ pub fn datumesh_store::Store::inputs(&self, &str) -> datumesh_store::Result<allo
 pub fn datumesh_store::Store::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::Store::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::Store::namespaces(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Namespace>>
 pub fn datumesh_store::Store::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
@@ -285,6 +297,8 @@ pub fn datumesh_store::Store::put_manifest(&self, &[u8]) -> datumesh_store::Resu
 pub fn datumesh_store::Store::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
+pub fn datumesh_store::Store::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::Store::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::Store::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::Store::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::Store::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
@@ -308,6 +322,7 @@ pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<al
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::PgStore::namespaces(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
@@ -315,6 +330,8 @@ pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Re
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
+pub fn datumesh_store::PgStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::PgStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
@@ -338,6 +355,7 @@ pub fn datumesh_store::SqliteStore::inputs(&self, &str) -> datumesh_store::Resul
 pub fn datumesh_store::SqliteStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::member_manifests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::namespace(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::SqliteStore::namespaces(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::put_blob(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
@@ -345,6 +363,8 @@ pub fn datumesh_store::SqliteStore::put_manifest(&self, &[u8]) -> datumesh_store
 pub fn datumesh_store::SqliteStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
+pub fn datumesh_store::SqliteStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
+pub fn datumesh_store::SqliteStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::resolve_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Binding>>
 pub fn datumesh_store::SqliteStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>

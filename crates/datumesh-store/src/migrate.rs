@@ -45,6 +45,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0004_receipt_values.sql",
         sql: include_str!("../migrations/0004_receipt_values.sql"),
     },
+    Migration {
+        version: 5,
+        name: "0005_namespace_checks.sql",
+        sql: include_str!("../migrations/0005_namespace_checks.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -214,13 +219,17 @@ pub mod sqlite {
     use crate::error::{Db, Error, Result};
     use crate::SqliteStore;
 
-    /// Every SQLite migration, in order. One so far: the schema of the PostgreSQL
-    /// migrations 1-4 at once (there is no earlier SQLite schema to migrate from).
-    pub const MIGRATIONS: &[Migration] = &[Migration {
-        version: 1,
-        name: "0001_initial.sql",
-        sql: include_str!("../migrations/sqlite/0001_initial.sql"),
-    }];
+    /// Every SQLite migration, in order. The first is the schema of the PostgreSQL
+    /// migrations 1-4 at once (there is no earlier SQLite schema to migrate from); the
+    /// second is PostgreSQL's migration 5 (the namespace checks).
+    pub const MIGRATIONS: &[Migration] = &[
+        Migration { version: 1, name: "0001_initial.sql", sql: include_str!("../migrations/sqlite/0001_initial.sql") },
+        Migration {
+            version: 2,
+            name: "0002_namespace_checks.sql",
+            sql: include_str!("../migrations/sqlite/0002_namespace_checks.sql"),
+        },
+    ];
 
     const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
     version INTEGER PRIMARY KEY,

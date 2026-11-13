@@ -52,6 +52,16 @@ pub enum Error {
         /// The receipt hash.
         hash: String,
     },
+    /// A new write under a suspended namespace (domain validation): a receipt signed by the
+    /// host, a version of such a receipt, or a name under the host, while the host's
+    /// namespace is suspended ([`Namespace::suspended_at`](crate::Namespace::suspended_at)).
+    /// Reads, and putting a receipt that is already stored, are not refused.
+    NamespaceSuspended {
+        /// The suspended host.
+        host: String,
+        /// When it was suspended.
+        suspended_at: String,
+    },
     /// The database refused or failed: the server's message and SQLSTATE (PostgreSQL) or
     /// SQLite's message and result code, or the driver's description of a failure that is
     /// not the database's (no connection, a URL that does not parse, a TLS handshake
@@ -184,6 +194,9 @@ impl fmt::Display for Error {
             }
             Error::Conflict { hash } => {
                 write!(f, "receipt {hash} is stored with another valid signature; kept the stored one")
+            }
+            Error::NamespaceSuspended { host, suspended_at } => {
+                write!(f, "namespace {host} has been suspended since {suspended_at}: no new writes under it")
             }
             Error::Database(e) => write!(f, "database: {e}"),
             Error::PoolTimeout => f.write_str("no database connection became free in time"),

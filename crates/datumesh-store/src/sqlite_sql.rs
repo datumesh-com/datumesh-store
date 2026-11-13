@@ -205,7 +205,12 @@ statements! {
     Dependents = "SELECT receipt_hash FROM edges WHERE input_hash = ?1 ORDER BY receipt_hash";
     Inputs = "SELECT input_hash FROM edges WHERE receipt_hash = ?1 ORDER BY input_hash";
 
-    NamespaceGet = "SELECT keydoc, validated_at, suspended_at FROM namespaces WHERE host = ?1";
+    NamespaceGet = "SELECT keydoc, validated_at, suspended_at, consecutive_failures, last_checked_at
+                    FROM namespaces WHERE host = ?1";
+    NamespaceList = "SELECT host, keydoc, validated_at, suspended_at, consecutive_failures, last_checked_at
+                     FROM namespaces ORDER BY host";
+    NamespaceCheck = "UPDATE namespaces SET consecutive_failures = ?2, last_checked_at = ?3, suspended_at = ?4
+                      WHERE host = ?1";
     NamespacePut = "INSERT INTO namespaces (host, keydoc, validated_at) VALUES (?1, ?2, ?3)
                     ON CONFLICT (host) DO UPDATE SET keydoc = excluded.keydoc, validated_at = excluded.validated_at";
 
