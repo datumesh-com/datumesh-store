@@ -4,7 +4,13 @@ All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
 ## 0.4.1 (unreleased; branch step-1.5-namespace-validation, held for the spec-0.5.0 round)
 
-Additive: cargo-semver-checks 0.51.0 against 0.4.0 finds no semver update required (202 checks pass, default and all features). `datumesh-store-cli` 0.4.1 follows the store version; it has no changes of its own.
+Additive: cargo-semver-checks 0.51.0 against 0.4.0 finds no semver update required (SEMVER_RESULT). `datumesh-store-cli` 0.4.1 follows the store version; its changes are the export and import of classes below.
+
+Classes (SPEC 16.1 to 16.3, 9.7): a class descriptor is stored by its class hash, and a class
+name is bound over transaction time to a class, with its methods bound in the same transaction.
+The store records what it is given. The owner rule (16.2 step 1) is the definer's check, not the
+store's: http and the engine enforce it. Requires `datumesh-core` 0.3.8 (not yet published; the
+lock is updated at release).
 
 Domain validation (step 1.5): the store records the outcome of each check of a host's key
 document, suspends a namespace after consecutive failures and refuses new writes under a
@@ -24,6 +30,35 @@ non-exhaustive); new migrations, none edited.
   (`put_receipt` of a receipt signed by the host, `put_version` of such a receipt,
   `bind_name` of a name under the host) are refused with it. Reads, verification, putting a
   receipt that is already stored, and `put_namespace` (a rotation) are not affected.
+
+- Migrations: PostgreSQL 0006 and SQLite 0003 (`classes`): `classes` (the canonical flattened
+  class descriptors by class hash; PostgreSQL also checks the hash against the bytes) and
+  `class_bindings` (a class name over tx), append-only and in tx order as the other tables. On
+  PostgreSQL triggers keep the one namespace of names. Existing rows are untouched.
+- `Store::put_class(bytes)`: stores a flattened class descriptor under its class hash and returns
+  the hash. The core checks it (`ClassDescriptor::from_json`). The bytes must be the canonical
+  form: other bytes are refused with `E_SCHEMA` and nothing is stored. Idempotent. Refused with
+  `Error::NamespaceSuspended` while the steward's namespace is suspended, even for a class
+  already stored. The store does not check the owner (16.2 step 1; see above).
+- `Store::class(class_hash)`: the canonical bytes of a stored class, `None` when not stored.
+  Never refused under a suspended namespace.
+- `Store::bind_class(class_name, class_hash, tx)`: binds the class name, and each method
+  `<class name>/<m>` of the flattened descriptor to its function hash, in one transaction. The
+  class and every method descriptor must be stored (`NotFound`, `what` `"class"` or
+  `"descriptor"`); `tx` must be later than the latest binding of each name (`NotLater`). On any
+  failure nothing is bound. Refused with `NamespaceSuspended` while the host of the class name is
+  suspended.
+- `Store::resolve_class(class_name, asof)` and `Store::resolve_class_binding(class_name, asof)`
+  (with `ClassBinding { class_hash, tx }`, as `resolve_binding` gives `Binding`): the class
+  name's binding as of `asof`.
+- `Error::NameTaken { name, bound_as }`: class names and function names are one namespace.
+  `bind_class` of a name bound as a function, and `bind_name` of a name bound as a class, are
+  refused with it; so is a method name bound as a class. A method name bound as a function is
+  bound again.
+- `datumesh-store-cli`: `export` writes the classes (`{"class":…}`, after the descriptors) and
+  the class bindings (`{"class_binding":…}`); `import` reads them back. A store with no class
+  bindings exports exactly what 0.4.0 did; with them, the names and class bindings are in one
+  tx-ordered list. No new commands.
 
 ## 0.4.0 (2026-11-02)
 

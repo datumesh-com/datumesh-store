@@ -218,6 +218,17 @@ statements! {
     NamePut = "INSERT INTO name_bindings (fn_name, tx, fn_hash) VALUES (?1, ?2, ?3)";
     NameAsof = "SELECT fn_hash FROM name_bindings WHERE fn_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
     BindingAsof = "SELECT fn_hash, tx FROM name_bindings WHERE fn_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
+    // Whether a name is bound as a function, or as a class (any binding): one namespace of names.
+    NameBound = "SELECT EXISTS (SELECT 1 FROM name_bindings WHERE fn_name = ?1)";
+    ClassNameBound = "SELECT EXISTS (SELECT 1 FROM class_bindings WHERE class_name = ?1)";
+
+    // Classes: flattened class descriptors by class hash, and class-name bindings.
+    ClassPut = "INSERT INTO classes (class_hash, bytes) SELECT ?1, ?2
+                 WHERE NOT EXISTS (SELECT 1 FROM classes WHERE class_hash = ?1)";
+    ClassGet = "SELECT bytes FROM classes WHERE class_hash = ?1";
+    ClassBindingLatest = "SELECT tx FROM class_bindings WHERE class_name = ?1 ORDER BY tx DESC LIMIT 1";
+    ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, class_hash) VALUES (?1, ?2, ?3)";
+    ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
 
     ManifestExists = "SELECT EXISTS (SELECT 1 FROM manifests WHERE entry = ?1)";
     ManifestPut = "INSERT INTO manifests (entry, slice_id, members_hash, fn_hash, members, bytes)

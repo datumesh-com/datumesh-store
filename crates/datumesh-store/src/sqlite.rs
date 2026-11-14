@@ -11,12 +11,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use crate::error::{Db, Error, Result};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
-use crate::{Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
+use crate::{not_canonical_class, Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
-    keys_from_response, sha256_hex, verify, Arg, Args, Cell, ErrorCode, FunctionDescriptor, Keys, Manifest, Receipt,
-    Resolver, Scalar, Slice, Type,
+    keys_from_response, sha256_hex, verify, Arg, Args, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys,
+    Manifest, Receipt, Resolver, Scalar, Slice, Type,
 };
 
 /// How a [`SqliteStore`] opens and uses its connections.
@@ -904,6 +904,10 @@ impl Store for SqliteStore {
             if let Some(since) = read_namespace(c, host)?.and_then(|n| n.suspended_at) {
                 return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
             }
+            // One namespace of names: a class name is not a function name.
+            if exists(c, L::ClassNameBound, fn_name)? {
+                return Err(Error::NameTaken { name: fn_name.to_string(), bound_as: "class" });
+            }
             if !exists(c, L::DescriptorExists, fn_hash)? {
                 return Err(Error::NotFound { what: "descriptor", key: fn_hash.to_string() });
             }
@@ -932,24 +936,112 @@ impl Store for SqliteStore {
         })
     }
 
-    fn put_class(&self, _bytes: &[u8]) -> Result<String> {
-        todo!("put_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn put_class(&self, bytes: &[u8]) -> Result<String> {
+        // The core checks the descriptor (strict JSON, then 16.1); the bytes must be its
+        // canonical form, since the class hash is the hash of the bytes stored.
+        let d = ClassDescriptor::from_json(bytes)?;
+        let canonical = d.canonical();
+        if canonical != bytes {
+            return Err(not_canonical_class());
+        }
+        let hash = d.hash();
+        let host = d.steward.namespace.clone();
+        self.write("put_class", |c| {
+            // No new writes under a suspended namespace: the steward's (16.2).
+            if let Some(since) = read_namespace(c, &host)?.and_then(|n| n.suspended_at) {
+                return Err(Error::NamespaceSuspended { host: host.clone(), suspended_at: since });
+            }
+            exec(c, L::ClassPut, rusqlite::params![hash, canonical])?;
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", class_hash = %hash, "put_class");
+        Ok(hash)
     }
 
-    fn class(&self, _class_hash: &str) -> Result<Option<Vec<u8>>> {
-        todo!("class: see IMPL-NOTES-0.4.1-classes.md")
+    fn class(&self, class_hash: &str) -> Result<Option<Vec<u8>>> {
+        check_hex(class_hash, 64, "class_hash")?;
+        self.run("class", |c| get_bytes(c, L::ClassGet, class_hash))
     }
 
-    fn bind_class(&self, _class_name: &str, _class_hash: &str, _tx: &str) -> Result<()> {
-        todo!("bind_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn bind_class(&self, class_name: &str, class_hash: &str, tx: &str) -> Result<()> {
+        check_function_name(class_name, "class_name")?;
+        check_hex(class_hash, 64, "class_hash")?;
+        check_instant(tx, "tx")?;
+        self.write("bind_class", |c| {
+            // No new bindings under a suspended namespace: the host of the class name.
+            let host = name_host(class_name);
+            if let Some(since) = read_namespace(c, host)?.and_then(|n| n.suspended_at) {
+                return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
+            }
+            let Some(bytes) = get_bytes(c, L::ClassGet, class_hash)? else {
+                return Err(Error::NotFound { what: "class", key: class_hash.to_string() });
+            };
+            let flat = ClassDescriptor::from_json(&bytes)?;
+            let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
+            let method_names: Vec<String> = methods.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
+            // Every method's function descriptor is stored.
+            for (_, h) in &methods {
+                if !exists(c, L::DescriptorExists, h)? {
+                    return Err(Error::NotFound { what: "descriptor", key: h.clone() });
+                }
+            }
+            // One namespace of names: the class name is not a function name, and no method
+            // name is a class name.
+            if exists(c, L::NameBound, class_name)? {
+                return Err(Error::NameTaken { name: class_name.to_string(), bound_as: "function" });
+            }
+            for name in &method_names {
+                if exists(c, L::ClassNameBound, name)? {
+                    return Err(Error::NameTaken { name: name.clone(), bound_as: "class" });
+                }
+            }
+            // Later than the latest binding of the class name and of each method name.
+            if let Some(l) = get_strings(c, L::ClassBindingLatest, class_name)?.pop() {
+                if tx <= l.as_str() {
+                    return Err(Error::NotLater {
+                        what: "name",
+                        key: class_name.to_string(),
+                        given: tx.to_string(),
+                        latest: l,
+                    });
+                }
+            }
+            for name in &method_names {
+                if let Some(l) = get_strings(c, L::NameLatest, name)?.pop() {
+                    if tx <= l.as_str() {
+                        return Err(Error::NotLater {
+                            what: "name",
+                            key: name.clone(),
+                            given: tx.to_string(),
+                            latest: l,
+                        });
+                    }
+                }
+            }
+            exec(c, L::ClassBindingPut, rusqlite::params![class_name, tx, class_hash])?;
+            for ((_, h), name) in methods.iter().zip(&method_names) {
+                exec(c, L::NamePut, rusqlite::params![name.as_str(), tx, h.as_str()])?;
+            }
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", class_name, class_hash, tx, "bind_class");
+        Ok(())
     }
 
-    fn resolve_class(&self, _class_name: &str, _asof: &str) -> Result<Option<String>> {
-        todo!("resolve_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn resolve_class(&self, class_name: &str, asof: &str) -> Result<Option<String>> {
+        Ok(self.resolve_class_binding(class_name, asof)?.map(|b| b.class_hash))
     }
 
-    fn resolve_class_binding(&self, _class_name: &str, _asof: &str) -> Result<Option<ClassBinding>> {
-        todo!("resolve_class_binding: see IMPL-NOTES-0.4.1-classes.md")
+    fn resolve_class_binding(&self, class_name: &str, asof: &str) -> Result<Option<ClassBinding>> {
+        check_function_name(class_name, "class_name")?;
+        check_instant(asof, "asof")?;
+        self.run("resolve_class_binding", |c| {
+            c.prepare_cached(L::ClassBindingAsof.sql())
+                .db()?
+                .query_row([class_name, asof], |r| Ok(ClassBinding { class_hash: r.get(0)?, tx: r.get(1)? }))
+                .optional()
+                .db()
+        })
     }
 
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {

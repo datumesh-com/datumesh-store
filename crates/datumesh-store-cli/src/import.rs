@@ -28,6 +28,8 @@ struct Counts {
     namespaces: u64,
     names: u64,
     manifests: u64,
+    classes: u64,
+    class_names: u64,
     errors: u64,
 }
 
@@ -47,8 +49,9 @@ pub(crate) fn run(url: &str, paths: &[String]) -> Result<u8, Fail> {
         }
     }
     println!(
-        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} computed versions, {} namespaces, {} names, {} manifests; {} errors",
-        n.descriptors, n.receipts, n.blobs, n.versions, n.computed, n.namespaces, n.names, n.manifests, n.errors
+        "imported {} descriptors, {} receipts, {} blobs, {} versions, {} computed versions, {} namespaces, {} names, {} manifests, {} classes, {} class names; {} errors",
+        n.descriptors, n.receipts, n.blobs, n.versions, n.computed, n.namespaces, n.names, n.manifests, n.classes,
+        n.class_names, n.errors
     );
     Ok(if n.errors == 0 { 0 } else { 1 })
 }
@@ -255,6 +258,12 @@ fn one_line(store: &dyn Store, l: &[u8], n: &mut Counts) -> Result<(), String> {
             let t = body.as_str().ok_or("manifest: expected a string")?;
             manifest(store, t.as_bytes(), &mut n.manifests).map_err(e)
         }
+        "class" => {
+            let t = body.as_str().ok_or("class: expected a string")?;
+            store.put_class(t.as_bytes()).map_err(e)?;
+            n.classes += 1;
+            Ok(())
+        }
         "blob" => {
             let b = body.as_str().and_then(unhex).ok_or("blob: expected hex")?;
             store.put_blob(&b).map_err(e)?;
@@ -291,6 +300,20 @@ fn one_line(store: &dyn Store, l: &[u8], n: &mut Counts) -> Result<(), String> {
                 r => r.map_err(e)?,
             }
             n.names += 1;
+            Ok(())
+        }
+        // Already bound to this hash at that time (its methods were bound with it): imported before.
+        "class_binding" => {
+            let (name, h, tx) = (text("class_name")?, text("class_hash")?, text("tx")?);
+            match store.bind_class(&name, &h, &tx) {
+                Err(Error::NotLater { .. })
+                    if store
+                        .resolve_class_binding(&name, &tx)
+                        .map_err(e)?
+                        .is_some_and(|b| b.class_hash == h && b.tx == tx) => {}
+                r => r.map_err(e)?,
+            }
+            n.class_names += 1;
             Ok(())
         }
         other => Err(format!("unknown kind {other:?}")),

@@ -7,11 +7,11 @@ use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
-use crate::{Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
+use crate::{not_canonical_class, Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
-    json, keys_from_response, sha256_hex, verify, Cell, ErrorCode, FunctionDescriptor, Keys, Manifest, Receipt,
-    Resolver, Scalar, Slice, Type,
+    json, keys_from_response, sha256_hex, verify, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys, Manifest,
+    Receipt, Resolver, Scalar, Slice, Type,
 };
 
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
@@ -551,6 +551,7 @@ impl Store for PgStore {
             let ns = c.stmt(Q::NamespaceGet)?;
             let latest = c.stmt(Q::NameLatest)?;
             let put = c.stmt(Q::NamePut)?;
+            let class_bound = c.stmt(Q::ClassNameBound)?;
             let mut t = c.client.transaction().db()?;
             t.execute(&lock, &[&"names", &fn_name]).db()?;
             // No new bindings under a suspended namespace.
@@ -561,6 +562,11 @@ impl Store for PgStore {
                         suspended_at: since,
                     });
                 }
+            }
+            // One namespace of names: a class name is not a function name.
+            let class: bool = t.query_one(&class_bound, &[&fn_name]).db()?.try_get(0).db()?;
+            if class {
+                return Err(Error::NameTaken { name: fn_name.to_string(), bound_as: "class" });
             }
             let found: bool = t.query_one(&exists, &[&fn_hash]).db()?.try_get(0).db()?;
             if !found {
@@ -738,24 +744,139 @@ impl Store for PgStore {
         self.run("slice_changed_after", |c| pattern.changed_after(c, asof))
     }
 
-    fn put_class(&self, _bytes: &[u8]) -> Result<String> {
-        todo!("put_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn put_class(&self, bytes: &[u8]) -> Result<String> {
+        // The core checks the descriptor (strict JSON, then 16.1); the bytes must be its
+        // canonical form, since the class hash is the hash of the bytes stored.
+        let d = ClassDescriptor::from_json(bytes)?;
+        let canonical = d.canonical();
+        if canonical != bytes {
+            return Err(not_canonical_class());
+        }
+        let hash = d.hash();
+        let host = d.steward.namespace.clone();
+        self.run("put_class", |c| {
+            // No new writes under a suspended namespace: the steward's (16.2).
+            let ns = c.stmt(Q::NamespaceGet)?;
+            if let Some(row) = c.client.query_opt(&ns, &[&host]).db()? {
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended { host: host.clone(), suspended_at: since });
+                }
+            }
+            let put = c.stmt(Q::ClassPut)?;
+            c.client.execute(&put, &[&hash, &canonical]).db()?;
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", class_hash = %hash, "put_class");
+        Ok(hash)
     }
 
-    fn class(&self, _class_hash: &str) -> Result<Option<Vec<u8>>> {
-        todo!("class: see IMPL-NOTES-0.4.1-classes.md")
+    fn class(&self, class_hash: &str) -> Result<Option<Vec<u8>>> {
+        check_hex(class_hash, 64, "class_hash")?;
+        self.run("class", |c| get_bytes(c, Q::ClassGet, class_hash))
     }
 
-    fn bind_class(&self, _class_name: &str, _class_hash: &str, _tx: &str) -> Result<()> {
-        todo!("bind_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn bind_class(&self, class_name: &str, class_hash: &str, tx: &str) -> Result<()> {
+        check_function_name(class_name, "class_name")?;
+        check_hex(class_hash, 64, "class_hash")?;
+        check_instant(tx, "tx")?;
+        self.run("bind_class", |c| {
+            let lock = c.stmt(Q::Lock)?;
+            let ns = c.stmt(Q::NamespaceGet)?;
+            let get = c.stmt(Q::ClassGet)?;
+            let exists = c.stmt(Q::DescriptorExists)?;
+            let name_bound = c.stmt(Q::NameBound)?;
+            let class_bound = c.stmt(Q::ClassNameBound)?;
+            let class_latest = c.stmt(Q::ClassBindingLatest)?;
+            let latest = c.stmt(Q::NameLatest)?;
+            let class_put = c.stmt(Q::ClassBindingPut)?;
+            let name_put = c.stmt(Q::NamePut)?;
+            let mut t = c.client.transaction().db()?;
+            // Every name this binding makes is locked before it is read: the class name, then
+            // its method names (the flattened descriptor's, in JCS order).
+            t.execute(&lock, &[&"names", &class_name]).db()?;
+            // No new bindings under a suspended namespace: the host of the class name.
+            let host = name_host(class_name);
+            if let Some(row) = t.query_opt(&ns, &[&host]).db()? {
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
+                }
+            }
+            let Some(row) = t.query_opt(&get, &[&class_hash]).db()? else {
+                return Err(Error::NotFound { what: "class", key: class_hash.to_string() });
+            };
+            let flat = ClassDescriptor::from_json(&row.try_get::<_, Vec<u8>>(0).db()?)?;
+            let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
+            let method_names: Vec<String> = methods.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
+            for name in &method_names {
+                t.execute(&lock, &[&"names", &name.as_str()]).db()?;
+            }
+            // Every method's function descriptor is stored.
+            for (_, h) in &methods {
+                let found: bool = t.query_one(&exists, &[h]).db()?.try_get(0).db()?;
+                if !found {
+                    return Err(Error::NotFound { what: "descriptor", key: h.clone() });
+                }
+            }
+            // One namespace of names: the class name is not a function name, and no method
+            // name is a class name.
+            let function: bool = t.query_one(&name_bound, &[&class_name]).db()?.try_get(0).db()?;
+            if function {
+                return Err(Error::NameTaken { name: class_name.to_string(), bound_as: "function" });
+            }
+            for name in &method_names {
+                let class: bool = t.query_one(&class_bound, &[&name.as_str()]).db()?.try_get(0).db()?;
+                if class {
+                    return Err(Error::NameTaken { name: name.clone(), bound_as: "class" });
+                }
+            }
+            // Later than the latest binding of the class name and of each method name.
+            if let Some(row) = t.query_opt(&class_latest, &[&class_name]).db()? {
+                let l: String = row.try_get(0).db()?;
+                if tx <= l.as_str() {
+                    return Err(Error::NotLater {
+                        what: "name",
+                        key: class_name.to_string(),
+                        given: tx.to_string(),
+                        latest: l,
+                    });
+                }
+            }
+            for name in &method_names {
+                if let Some(row) = t.query_opt(&latest, &[&name.as_str()]).db()? {
+                    let l: String = row.try_get(0).db()?;
+                    if tx <= l.as_str() {
+                        return Err(Error::NotLater {
+                            what: "name",
+                            key: name.clone(),
+                            given: tx.to_string(),
+                            latest: l,
+                        });
+                    }
+                }
+            }
+            t.execute(&class_put, &[&class_name, &tx, &class_hash]).db()?;
+            for ((_, h), name) in methods.iter().zip(&method_names) {
+                t.execute(&name_put, &[&name.as_str(), &tx, &h.as_str()]).db()?;
+            }
+            t.commit().db()?;
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", class_name, class_hash, tx, "bind_class");
+        Ok(())
     }
 
-    fn resolve_class(&self, _class_name: &str, _asof: &str) -> Result<Option<String>> {
-        todo!("resolve_class: see IMPL-NOTES-0.4.1-classes.md")
+    fn resolve_class(&self, class_name: &str, asof: &str) -> Result<Option<String>> {
+        Ok(self.resolve_class_binding(class_name, asof)?.map(|b| b.class_hash))
     }
 
-    fn resolve_class_binding(&self, _class_name: &str, _asof: &str) -> Result<Option<ClassBinding>> {
-        todo!("resolve_class_binding: see IMPL-NOTES-0.4.1-classes.md")
+    fn resolve_class_binding(&self, class_name: &str, asof: &str) -> Result<Option<ClassBinding>> {
+        check_function_name(class_name, "class_name")?;
+        check_instant(asof, "asof")?;
+        self.run("resolve_class_binding", |c| {
+            let st = c.stmt(Q::ClassBindingAsof)?;
+            let Some(row) = c.client.query_opt(&st, &[&class_name, &asof]).db()? else { return Ok(None) };
+            Ok(Some(ClassBinding { class_hash: row.try_get(0).db()?, tx: row.try_get(1).db()? }))
+        })
     }
 
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {

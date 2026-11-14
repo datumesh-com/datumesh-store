@@ -6,18 +6,25 @@
 //! receipts. One consistent snapshot (PostgreSQL: a read-only REPEATABLE READ transaction;
 //! SQLite: one read transaction, a snapshot in WAL mode), streamed. The same lines from
 //! either backend for the same contents.
+//! Since 0.4.1: class descriptors (`{"class":…}`, after the descriptors) and class-name
+//! bindings (`{"class_binding":…}`). A store with no class bindings exports its names per name
+//! in tx order, as before; with class bindings, the names and the class bindings are one list in
+//! tx order (then by name): a class binding binds its methods at its tx, so the method rows
+//! that follow it are the ones it made, and the list replays in order.
 //! `import` reads 0.1.x, 0.2.x and 0.3.0 exports too (they have no manifests, and 0.1.x no
 //! computed versions).
 //!
 //! ```text
 //! {"namespace":{"host":"…","keydoc":"<key document JSON text>","validated_at":"…"}}
 //! {"descriptor":"<descriptor JSON text>"}
+//! {"class":"<flattened class descriptor JSON text>"}
 //! {"receipt":"<receipt JSON text>"}
 //! {"manifest":"<manifest JSON text>"}
 //! {"blob":"<content, lowercase hex>"}
 //! {"version":{"cell_id":"…","receipt_hash":"…","tx":"…"}}
 //! {"computed":{"asof":"…","cell_id":"…","receipt_hash":"…","tx":"…"}}
 //! {"name":{"fn_hash":"…","fn_name":"…","tx":"…"}}
+//! {"class_binding":{"class_hash":"…","class_name":"…","tx":"…"}}
 //! ```
 
 use std::io::{BufWriter, Write};
@@ -153,6 +160,7 @@ fn write(t: &mut dyn Snapshot) -> Result<(), Fail> {
     t.each("SELECT bytes FROM descriptors ORDER BY fn_hash", &[0], &mut |r| {
         line(&mut out, "descriptor", s(r[0].text()?))
     })?;
+    t.each("SELECT bytes FROM classes ORDER BY class_hash", &[0], &mut |r| line(&mut out, "class", s(r[0].text()?)))?;
     t.each("SELECT bytes FROM receipts ORDER BY hash", &[0], &mut |r| line(&mut out, "receipt", s(r[0].text()?)))?;
     t.each("SELECT bytes FROM manifests ORDER BY entry", &[0], &mut |r| line(&mut out, "manifest", s(r[0].text()?)))?;
     t.each("SELECT bytes FROM blobs ORDER BY sha256", &[0], &mut |r| line(&mut out, "blob", s(to_hex(&r[0].bytes()))))?;
@@ -179,13 +187,38 @@ fn write(t: &mut dyn Snapshot) -> Result<(), Fail> {
             )
         },
     )?;
-    t.each("SELECT fn_name, tx, fn_hash FROM name_bindings ORDER BY fn_name, tx", &[], &mut |r| {
-        line(
-            &mut out,
-            "name",
-            obj(vec![("fn_name", s(r[0].text()?)), ("tx", s(r[1].text()?)), ("fn_hash", s(r[2].text()?))]),
-        )
+    let mut class_bindings = 0;
+    t.each("SELECT CAST(count(*) AS TEXT) FROM class_bindings", &[], &mut |r| {
+        class_bindings = r[0].text()?.parse::<u64>().map_err(|e| Fail(1, format!("class_bindings: {e}")))?;
+        Ok(())
     })?;
+    if class_bindings == 0 {
+        t.each("SELECT fn_name, tx, fn_hash FROM name_bindings ORDER BY fn_name, tx", &[], &mut |r| {
+            line(
+                &mut out,
+                "name",
+                obj(vec![("fn_name", s(r[0].text()?)), ("tx", s(r[1].text()?)), ("fn_hash", s(r[2].text()?))]),
+            )
+        })?;
+    } else {
+        // Both kinds in tx order, then by name (a class name before its method names at a tx).
+        t.each(
+            "SELECT k, name, tx, h FROM (
+                SELECT 'name' AS k, fn_name AS name, tx, fn_hash AS h FROM name_bindings
+                UNION ALL
+                SELECT 'class', class_name, tx, class_hash FROM class_bindings) AS x
+              ORDER BY tx, name, k",
+            &[],
+            &mut |r| {
+                let (name, tx, hash) = (s(r[1].text()?), s(r[2].text()?), s(r[3].text()?));
+                if r[0].text()? == "class" {
+                    line(&mut out, "class_binding", obj(vec![("class_name", name), ("tx", tx), ("class_hash", hash)]))
+                } else {
+                    line(&mut out, "name", obj(vec![("fn_name", name), ("tx", tx), ("fn_hash", hash)]))
+                }
+            },
+        )?;
+    }
     out.flush()?;
     Ok(())
 }

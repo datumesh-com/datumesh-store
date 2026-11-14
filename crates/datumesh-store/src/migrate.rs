@@ -50,6 +50,7 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0005_namespace_checks.sql",
         sql: include_str!("../migrations/0005_namespace_checks.sql"),
     },
+    Migration { version: 6, name: "0006_classes.sql", sql: include_str!("../migrations/0006_classes.sql") },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -221,7 +222,8 @@ pub mod sqlite {
 
     /// Every SQLite migration, in order. The first is the schema of the PostgreSQL
     /// migrations 1-4 at once (there is no earlier SQLite schema to migrate from); the
-    /// second is PostgreSQL's migration 5 (the namespace checks).
+    /// second is PostgreSQL's migration 5 (the namespace checks), the third PostgreSQL's 6
+    /// (classes).
     pub const MIGRATIONS: &[Migration] = &[
         Migration { version: 1, name: "0001_initial.sql", sql: include_str!("../migrations/sqlite/0001_initial.sql") },
         Migration {
@@ -229,6 +231,7 @@ pub mod sqlite {
             name: "0002_namespace_checks.sql",
             sql: include_str!("../migrations/sqlite/0002_namespace_checks.sql"),
         },
+        Migration { version: 3, name: "0003_classes.sql", sql: include_str!("../migrations/sqlite/0003_classes.sql") },
     ];
 
     const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (

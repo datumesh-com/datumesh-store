@@ -213,6 +213,20 @@ statements! {
         => [TEXT, TEXT];
     BindingAsof = "SELECT fn_hash, tx FROM name_bindings WHERE fn_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
         => [TEXT, TEXT];
+    // Whether a name is bound as a function (any binding), or as a class (any binding): the
+    // two kinds of one namespace of names (0.4.1).
+    NameBound = "SELECT EXISTS (SELECT 1 FROM name_bindings WHERE fn_name = $1)" => [TEXT];
+    ClassNameBound = "SELECT EXISTS (SELECT 1 FROM class_bindings WHERE class_name = $1)" => [TEXT];
+
+    // Classes (0.4.1): flattened class descriptors by class hash, and class-name bindings.
+    ClassPut = "INSERT INTO classes (class_hash, bytes) VALUES ($1, $2) ON CONFLICT (class_hash) DO NOTHING"
+        => [TEXT, BYTEA];
+    ClassGet = "SELECT bytes FROM classes WHERE class_hash = $1" => [TEXT];
+    ClassBindingLatest = "SELECT tx FROM class_bindings WHERE class_name = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
+    ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, tx_at, class_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
+        => [TEXT, TEXT, TEXT];
+    ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
+        => [TEXT, TEXT];
 
     // Manifests (0.3.1).
     ManifestPut = "INSERT INTO manifests (entry, slice_id, members_hash, fn_hash, members, bytes)

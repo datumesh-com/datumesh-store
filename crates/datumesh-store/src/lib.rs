@@ -63,6 +63,20 @@
 //! * Names: which function hash a fully qualified function name meant from a transaction
 //!   time on. Append-only, like versions. [`Store::resolve_binding`] gives the binding
 //!   answering as of A with when it began; [`Store::resolve_name`] its hash.
+//! * Classes (0.4.1, SPEC 16.1 to 16.3): a flattened class descriptor, checked by the core and
+//!   stored canonical under its class hash ([`Store::put_class`], [`Store::class`]). A class
+//!   name is bound over transaction time to a class hash, and binding it binds each method
+//!   `<class name>/<m>` to the method's function hash in the same transaction
+//!   ([`Store::bind_class`], [`Store::resolve_class`], [`Store::resolve_class_binding`]).
+//!   Class names and function names are one namespace: a name bound as one kind cannot be
+//!   bound as the other ([`Error::NameTaken`]).
+//! * Owner: a class's owner is the definer's check (SPEC 16.2 step 1), made when the class is
+//!   defined, not the store's. The store records what it is given; the HTTP service and the
+//!   engine enforce the owner rule. [`Store::put_class`] and [`Store::bind_class`] do not take a
+//!   key document or check the name against the steward.
+//! * Namespace suspension (since 0.4.1): new writes under a suspended namespace are refused
+//!   with [`Error::NamespaceSuspended`] (`put_class`: the steward's namespace; `bind_class`: the
+//!   host of the class name); reads are never refused.
 //!
 //! Instants are compared as text (fixed width, `COLLATE "C"`; SQLite's default collation
 //! is the same byte order), which is exact; on PostgreSQL each is also stored as
@@ -205,6 +219,17 @@ pub struct Namespace {
 /// The namespace after a check at `at`: a failed one (`threshold` is `Some`) adds to the
 /// consecutive failures and suspends at the threshold (an existing suspension keeps its
 /// time), a successful one (`None`) resets them and reinstates.
+/// The refusal of class descriptor bytes that are not the canonical form of the descriptor
+/// (`E_SCHEMA`, nothing stored): the class hash is the hash of the bytes stored, so only the
+/// canonical bytes are stored. Shared by both backends (since 0.4.1).
+pub(crate) fn not_canonical_class() -> Error {
+    Error::Invalid(datumesh_core::Error::new(
+        datumesh_core::ErrorCode::Schema,
+        "$",
+        "class descriptor is not in canonical form (JCS): put the canonical bytes",
+    ))
+}
+
 pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) {
     ns.last_checked_at = Some(at.to_string());
     match threshold {
