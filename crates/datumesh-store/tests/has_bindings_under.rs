@@ -26,7 +26,7 @@ fn a_class_binding_alone_makes_its_namespace_true(b: Backend) {
     assert!(!s.has_bindings_under("b.example/k").unwrap());
     let c = test_class();
     let hash = put_test_class(&s, &c);
-    s.bind_class("b.example/k/C", &hash, T1).unwrap();
+    s.bind_class("b.example/k/c", &hash, T1).unwrap();
     assert!(s.has_bindings_under("b.example/k").unwrap());
     assert!(!s.has_bindings_under("a.example/ns").unwrap());
 }
