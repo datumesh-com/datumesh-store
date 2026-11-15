@@ -2,6 +2,27 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.4.2 (unreleased; branch step-1.8b)
+
+Additive: the trait is sealed, and the new methods are required, with no default. `public-api.txt` gains 8 additions and no removals (`tools/public_api.sh`).
+
+### Added
+
+- `Store::computed_cells(slice, asof, limit)`, on both backends: the cells matching a slice (as
+  `slice_values` matches them: the fixed arguments, `fn_hash`, `ns`, `fn` and the number of
+  arguments) that have a computed version answering as of `asof` (`tx <= asof` and the receipt's
+  asof `<= asof`, as `computed_asof` answers). Ascending by cell id, at most `limit` (`slice_values`
+  takes no limit, so this one does; a `limit` of 0 gives none), each `Cell` with its arguments from
+  the typed-argument index. A cell with only a stored version is not returned.
+- `Store::has_bindings_under(namespace)`: whether any name binding or class binding has a name
+  starting with `namespace` and `/` (`"a.example/n"` is not a namespace of `a.example/ns/f`).
+- Migrations: PostgreSQL 0007 (`binding_audit`) and SQLite 0004 (`binding_audit`): the audit
+  column `written_at` on `name_bindings` and `class_bindings`. The database fills it at insert
+  (PostgreSQL `DEFAULT now()`, SQLite the insert statement's `strftime('%Y-%m-%dT%H:%M:%fZ','now')`).
+  Rows written before the migration are `NULL`. It is in no hash and read by no API. The
+  append-only triggers are unchanged. Declarations are key-document bytes in `namespaces`, not
+  rows, so they get no column.
+
 ## 0.4.1 (unreleased; branch step-1.5-namespace-validation, held for the spec-0.5.0 round)
 
 Additive: cargo-semver-checks 0.51.0 against 0.4.0 finds no semver update required (SEMVER_RESULT). `datumesh-store-cli` 0.4.1 follows the store version; its changes are the export and import of classes below.

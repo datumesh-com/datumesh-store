@@ -1247,6 +1247,39 @@ impl Store for SqliteStore {
         let p = Pattern::of(&v)?;
         self.run("slice_changed_after", |c| changed_after(&p, c, asof))
     }
+
+    fn computed_cells(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<Cell>> {
+        check_instant(asof, "asof")?;
+        let p = Pattern::of(&slice.to_value())?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("computed_cells", |c| {
+            let (d, _) = drive(&p, c, false)?;
+            let q = if d.is_some() { L::ComputedCellsDrive } else { L::ComputedCellsAll };
+            let mut binds = params(&p, asof, d);
+            binds.push((":limit", SqlValue::Integer(limit)));
+            let mut st = c.prepare_cached(q.sql()).db()?;
+            bind(&mut st, &binds)?;
+            let mut rows = st.raw_query();
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().db()? {
+                let args = args_of(&r.get::<_, String>(3).db()?)?;
+                out.push(Cell {
+                    args,
+                    fn_hash: r.get::<_, String>(2).db()?,
+                    fn_name: r.get::<_, String>(1).db()?,
+                    ns: r.get::<_, String>(0).db()?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn has_bindings_under(&self, namespace: &str) -> Result<bool> {
+        let prefix = format!("{namespace}/");
+        self.run("has_bindings_under", |c| {
+            c.prepare_cached(L::HasBindingsUnder.sql()).db()?.query_row([&prefix], |r| r.get(0)).db()
+        })
+    }
 }
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,

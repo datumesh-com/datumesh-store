@@ -133,6 +133,28 @@ macro_rules! changed_cand {
     };
 }
 
+/// The cells of a slice with a computed version answering as of `:asof` (tx and the receipt's
+/// asof both at or before it), ascending by cell id, at most `:limit`. Columns: (ns, fn,
+/// fn_hash, arguments).
+macro_rules! computed_cells {
+    ($from:expr, $where:expr) => {
+        concat!(
+            "SELECT c.ns, c.fn, c.fn_hash, (SELECT json_group_array(json_array(a.name, a.type, a.value))
+                                              FROM cell_args a WHERE a.cell_id = c.cell_id)
+              FROM ",
+            $from,
+            " WHERE ",
+            $where,
+            " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
+               AND EXISTS (SELECT 1 FROM computed_versions cv
+                            WHERE cv.cell_id = c.cell_id AND cv.tx <= :asof AND cv.asof <= :asof)
+               AND ",
+            slice_match!(),
+            " ORDER BY c.cell_id LIMIT :limit"
+        )
+    };
+}
+
 statements! {
     DescriptorGet = "SELECT bytes FROM descriptors WHERE fn_hash = ?1";
     DescriptorPut = "INSERT INTO descriptors (fn_hash, bytes) SELECT ?1, ?2
@@ -215,7 +237,8 @@ statements! {
                     ON CONFLICT (host) DO UPDATE SET keydoc = excluded.keydoc, validated_at = excluded.validated_at";
 
     NameLatest = "SELECT tx FROM name_bindings WHERE fn_name = ?1 ORDER BY tx DESC LIMIT 1";
-    NamePut = "INSERT INTO name_bindings (fn_name, tx, fn_hash) VALUES (?1, ?2, ?3)";
+    NamePut = "INSERT INTO name_bindings (fn_name, tx, fn_hash, written_at)
+               VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
     NameAsof = "SELECT fn_hash FROM name_bindings WHERE fn_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
     BindingAsof = "SELECT fn_hash, tx FROM name_bindings WHERE fn_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
     // Whether a name is bound as a function, or as a class (any binding): one namespace of names.
@@ -227,7 +250,8 @@ statements! {
                  WHERE NOT EXISTS (SELECT 1 FROM classes WHERE class_hash = ?1)";
     ClassGet = "SELECT bytes FROM classes WHERE class_hash = ?1";
     ClassBindingLatest = "SELECT tx FROM class_bindings WHERE class_name = ?1 ORDER BY tx DESC LIMIT 1";
-    ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, class_hash) VALUES (?1, ?2, ?3)";
+    ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, class_hash, written_at)
+                       VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
     ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
 
     ManifestExists = "SELECT EXISTS (SELECT 1 FROM manifests WHERE entry = ?1)";
@@ -276,6 +300,13 @@ statements! {
     // or from the slice's candidate cells, then each one's receipts by cell and asof.
     ChangedCandAll = changed_cand!(from_all!(), where_all!());
     ChangedCandDrive = changed_cand!(from_drive!(), where_drive!());
+    // computed_cells (0.4.2): from every cell of the function, or from a range of one argument.
+    ComputedCellsAll = computed_cells!(from_all!(), where_all!());
+    ComputedCellsDrive = computed_cells!(from_drive!(), where_drive!());
+    // has_bindings_under (0.4.2): a name binding or class binding under ?1 (a namespace and "/").
+    HasBindingsUnder = "SELECT EXISTS (SELECT 1 FROM name_bindings WHERE substr(fn_name, 1, length(?1)) = ?1)
+                           OR EXISTS (SELECT 1 FROM class_bindings WHERE substr(class_name, 1, length(?1)) = ?1)";
+
     // How many receipts of the function have an asof after A, and how many cells it has
     // (up to 10,001), to choose between the two.
     ProbeRecent = "SELECT count(*) FROM (SELECT 1 FROM receipts WHERE fn_hash = ?1 AND asof > ?2 LIMIT 10001)";

@@ -90,6 +90,28 @@ macro_rules! changed_cand {
     };
 }
 
+/// The cells of a slice of cells that have a computed version answering as of A ($5): one
+/// with tx <= A and its receipt's asof <= A (the computed versions' own asof). Ascending by
+/// cell id, at most $16; the candidates narrowed by `$drive`.
+macro_rules! computed_cells {
+    ($drive:expr) => {
+        concat!(
+            "SELECT c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
+                           WHERE a.cell_id = c.cell_id ORDER BY a.name)
+               FROM cells c
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
+                AND EXISTS (SELECT 1 FROM computed_versions cv
+                             WHERE cv.cell_id = c.cell_id AND cv.tx <= $5 AND cv.asof <= $5)
+                AND ",
+            slice_match!(),
+            " ",
+            $drive,
+            " ORDER BY c.cell_id LIMIT $16"
+        )
+    };
+}
+
 /// The candidates of a slice narrowed to a range of one argument ($12-$15: name, type, lo,
 /// hi) of the typed-argument index: of a number, and of any other type.
 macro_rules! drive_text {
@@ -278,6 +300,19 @@ statements! {
                                FROM versions v JOIN receipts r ON r.hash = v.receipt_hash JOIN cells c ON c.cell_id = v.cell_id
                               WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT, TEXT];
+    // computed_cells (0.4.2): the cells of a slice with a computed version as of A, $16 at most;
+    // the columns are the cell's namespace, function name, function hash and "name:type:value"
+    // of each argument (the key's arguments are not needed here: $11 is unused).
+    ComputedCellsAll = computed_cells!("") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+    ComputedCellsText = computed_cells!(drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+    ComputedCellsNum = computed_cells!(drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+
+    // has_bindings_under (0.4.2): whether a name binding or a class binding has the prefix $1
+    // (a namespace and "/").
+    HasBindingsUnder = "SELECT EXISTS (SELECT 1 FROM name_bindings WHERE starts_with(fn_name, $1))
+                          OR EXISTS (SELECT 1 FROM class_bindings WHERE starts_with(class_name, $1))"
+        => [TEXT];
+
     // Whether a matching cell has a stored version whose receipt's asof (never earlier than
     // its tx) is after A ($5), the slice's parameters as for its members ($11-$15 unused
     // here). From the function's receipts by asof, then each one's cell against the slice:

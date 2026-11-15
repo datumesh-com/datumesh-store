@@ -314,6 +314,8 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 ///     fn versions_between(&self, c: &str, f: &str, t: &str, a: &str) -> Result<Vec<SliceMember>> { self.0.versions_between(c, f, t, a) }
 ///     fn slice_values(&self, s: &Slice, a: &str) -> Result<Vec<SliceValue>> { self.0.slice_values(s, a) }
 ///     fn slice_changed_after(&self, s: &Slice, a: &str) -> Result<bool> { self.0.slice_changed_after(s, a) }
+///     fn computed_cells(&self, s: &Slice, a: &str, n: usize) -> Result<Vec<Cell>> { self.0.computed_cells(s, a, n) }
+///     fn has_bindings_under(&self, n: &str) -> Result<bool> { self.0.has_bindings_under(n) }
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
@@ -534,6 +536,16 @@ pub trait Store: Resolver + sealed::Sealed {
     /// the function's receipts with an asof after `asof` or the slice's candidate cells,
     /// whichever is fewer, and one query walks it, stopping at the first match. Since 0.3.2.
     fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool>;
+    /// The cells of `slice` (matched as [`slice_values`](Store::slice_values) matches them: the
+    /// fixed arguments, `fn_hash`, `ns`, `fn` and the number of arguments) that have a computed
+    /// version answering as of `asof`: one with `tx <= asof` whose receipt's asof is `<= asof`
+    /// (the rule of [`computed_asof`](Store::computed_asof)). Ascending by cell id, at most
+    /// `limit` (`slice_values` takes no limit), each with its arguments from the typed-argument
+    /// index. A cell with only a stored version is not returned. Since 0.4.2.
+    fn computed_cells(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<Cell>>;
+    /// Whether any name binding or class binding has a name starting with `namespace` and `/`
+    /// (so `"a.example/n"` is not a namespace of `"a.example/ns/f"`). Since 0.4.2.
+    fn has_bindings_under(&self, namespace: &str) -> Result<bool>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

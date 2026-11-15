@@ -51,6 +51,7 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0005_namespace_checks.sql"),
     },
     Migration { version: 6, name: "0006_classes.sql", sql: include_str!("../migrations/0006_classes.sql") },
+    Migration { version: 7, name: "0007_binding_audit.sql", sql: include_str!("../migrations/0007_binding_audit.sql") },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -223,7 +224,7 @@ pub mod sqlite {
     /// Every SQLite migration, in order. The first is the schema of the PostgreSQL
     /// migrations 1-4 at once (there is no earlier SQLite schema to migrate from); the
     /// second is PostgreSQL's migration 5 (the namespace checks), the third PostgreSQL's 6
-    /// (classes).
+    /// (classes), the fourth PostgreSQL's 7 (the audit column of the bindings).
     pub const MIGRATIONS: &[Migration] = &[
         Migration { version: 1, name: "0001_initial.sql", sql: include_str!("../migrations/sqlite/0001_initial.sql") },
         Migration {
@@ -232,6 +233,11 @@ pub mod sqlite {
             sql: include_str!("../migrations/sqlite/0002_namespace_checks.sql"),
         },
         Migration { version: 3, name: "0003_classes.sql", sql: include_str!("../migrations/sqlite/0003_classes.sql") },
+        Migration {
+            version: 4,
+            name: "0004_binding_audit.sql",
+            sql: include_str!("../migrations/sqlite/0004_binding_audit.sql"),
+        },
     ];
 
     const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (

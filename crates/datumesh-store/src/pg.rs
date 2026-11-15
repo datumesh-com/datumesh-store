@@ -143,27 +143,44 @@ fn member_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
     Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
 }
 
-/// A member's value and cell from a row of (tx, receipt_hash, asof, value_type, value, ns,
-/// fn, fn_hash, "name:type:value" of each argument, ...): the cell is rebuilt from the
-/// typed-argument index (`cell_args` holds every argument's type and lexical form).
-fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
+/// A cell's arguments from the "name:type:value" items of the typed-argument index
+/// (`cell_args` holds every argument's type and lexical form).
+fn cell_args(items: Vec<String>) -> Result<datumesh_core::Args> {
     let bad =
         |what: &str| Error::Invalid(datumesh_core::Error::new(ErrorCode::CanonType, "$", format!("a stored {what}")));
-    let scalar = |ty: &str, value: &str| -> Result<Scalar> {
-        let ty = Type::from_name(ty).ok_or_else(|| bad("type"))?;
-        Ok(Scalar::from_lexical(ty, value)?)
-    };
-    let (ty, value): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
     let mut args = datumesh_core::Args::new();
-    for a in r.try_get::<_, Vec<String>>(8).db()? {
+    for a in items {
         let mut parts = a.splitn(3, ':');
         let (Some(name), Some(t), Some(v)) = (parts.next(), parts.next(), parts.next()) else {
             return Err(bad("argument"));
         };
-        args.insert(name.to_string(), datumesh_core::Arg::Value(scalar(t, v)?));
+        let ty = Type::from_name(t).ok_or_else(|| bad("type"))?;
+        args.insert(name.to_string(), datumesh_core::Arg::Value(Scalar::from_lexical(ty, v)?));
     }
+    Ok(args)
+}
+
+/// A member's value and cell from a row of (tx, receipt_hash, asof, value_type, value, ns,
+/// fn, fn_hash, "name:type:value" of each argument, ...): the cell is rebuilt from the
+/// typed-argument index.
+fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
+    let bad =
+        |what: &str| Error::Invalid(datumesh_core::Error::new(ErrorCode::CanonType, "$", format!("a stored {what}")));
+    let (ty, value): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
+    let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
+    let args = cell_args(r.try_get::<_, Vec<String>>(8).db()?)?;
     let cell = Cell { args, fn_hash: r.try_get(7).db()?, fn_name: r.try_get(6).db()?, ns: r.try_get(5).db()? };
-    Ok(SliceValue { version: version_row(r, cell_id)?, value: scalar(&ty, &value)?, cell })
+    Ok(SliceValue { version: version_row(r, cell_id)?, value: Scalar::from_lexical(ty, &value)?, cell })
+}
+
+/// A cell from a row of (ns, fn, fn_hash, "name:type:value" of each argument).
+fn cell_row(r: &postgres::Row) -> Result<Cell> {
+    Ok(Cell {
+        args: cell_args(r.try_get::<_, Vec<String>>(3).db()?)?,
+        fn_hash: r.try_get(2).db()?,
+        fn_name: r.try_get(1).db()?,
+        ns: r.try_get(0).db()?,
+    })
 }
 
 fn get_bytes(c: &mut Conn, q: Q, key: &str) -> Result<Option<Vec<u8>>> {
@@ -744,6 +761,21 @@ impl Store for PgStore {
         self.run("slice_changed_after", |c| pattern.changed_after(c, asof))
     }
 
+    fn computed_cells(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<Cell>> {
+        check_instant(asof, "asof")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let pattern = Pattern::of(&slice.to_value())?;
+        self.run("computed_cells", |c| pattern.computed_cells(c, asof, limit))
+    }
+
+    fn has_bindings_under(&self, namespace: &str) -> Result<bool> {
+        let prefix = format!("{namespace}/");
+        self.run("has_bindings_under", |c| {
+            let st = c.stmt(Q::HasBindingsUnder)?;
+            c.client.query_one(&st, &[&prefix]).db()?.try_get(0).db()
+        })
+    }
+
     fn put_class(&self, bytes: &[u8]) -> Result<String> {
         // The core checks the descriptor (strict JSON, then 16.1); the bytes must be its
         // canonical form, since the class hash is the hash of the bytes stored.
@@ -914,6 +946,48 @@ impl Pattern {
     fn values(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceValue>> {
         let qs = [Q::SliceValuesAll, Q::SliceValuesText, Q::SliceValuesNum];
         self.rows(c, asof, qs, 9, value_row, |m| &m.version.cell_id)
+    }
+
+    /// The cells with a computed version answering as of `asof`, in cell id order, at most
+    /// `limit` (`computed_cells`); the candidates narrowed as the member queries narrow them.
+    fn computed_cells(&self, c: &mut Conn, asof: &str, limit: i64) -> Result<Vec<Cell>> {
+        let (drive, _) = self.drive(c, false)?;
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let (q, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::ComputedCellsAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::ComputedCellsNum } else { Q::ComputedCellsText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        let st = c.stmt(q)?;
+        let rows = c
+            .client
+            .query(
+                &st,
+                &[
+                    &self.fn_hash,
+                    &self.ns,
+                    &self.fn_name,
+                    &nargs,
+                    &asof,
+                    &names,
+                    &kinds,
+                    &types,
+                    &los,
+                    &his,
+                    &keys,
+                    &d_name,
+                    &d_ty,
+                    &d_lo,
+                    &d_hi,
+                    &limit,
+                ],
+            )
+            .db()?;
+        rows.iter().map(cell_row).collect()
     }
 
     /// The constraint columns of the member and change queries ($6-$10).
