@@ -76,21 +76,32 @@ fn limit_keeps_the_smaller_cell_ids(b: Backend) {
     assert_eq!(ids(&s.computed_cells(&sl, T4, 3).unwrap()), both);
 }
 
+/// A slice needs an open or ranged argument (core), so the narrowing is on a two-argument
+/// function: j fixed, k open. Cells (a,1) computed at 2026-01-02, (a,2) at 2026-01-03, (b,1) at
+/// 2026-01-02, and (c,1) with a stored version only.
 fn a_fixed_argument_in_the_slice_narrows_the_result(b: Backend) {
     let db = TestDb::migrated(b);
-    let (s, h, cells) = world(&db);
-    let fixed = |k: &str| {
+    let s = slice_store(&db);
+    let h = s.put_descriptor(&stored_descriptor(&[("j", Type::String), ("k", Type::Number)], "g")).unwrap();
+    let cell = |j: &str, k: &str| slice_cell("g", &h, &[("j", sc(Type::String, j)), ("k", sc(Type::Number, k))]);
+    let (a1, a2, b1, c1) = (cell("a", "1"), cell("a", "2"), cell("b", "1"), cell("c", "1"));
+    for (c, v, tx) in [(&a1, "10", T2), (&a2, "20", T3), (&b1, "30", T2)] {
+        let hash = s.put_receipt(&slice_receipt(c, v, tx, tx)).unwrap();
+        s.put_computed(&c.id(), tx, &hash).unwrap();
+    }
+    put_member(&s, &c1, "40", T2, T2);
+    let fixed = |j: &str| {
         slice(&format!(
-            r#"{{"args":{{"k":{{"type":"number","value":"{k}"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+            r#"{{"args":{{"j":{{"type":"string","value":"{j}"}},"k":"*"}},"fn":"g","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
         ))
     };
-    assert_eq!(ids(&s.computed_cells(&fixed("1"), T4, 100).unwrap()), [cells[0].id()]);
-    assert_eq!(ids(&s.computed_cells(&fixed("2"), T4, 100).unwrap()), [cells[1].id()]);
+    assert_eq!(ids(&s.computed_cells(&fixed("a"), T4, 100).unwrap()), sorted_ids(&[&a1, &a2]));
+    assert_eq!(ids(&s.computed_cells(&fixed("b"), T4, 100).unwrap()), [b1.id()]);
     // Narrowed to a cell that only has a stored version, or to none: nothing.
-    assert!(s.computed_cells(&fixed("3"), T4, 100).unwrap().is_empty());
-    assert!(s.computed_cells(&fixed("9"), T4, 100).unwrap().is_empty());
-    // Narrowed to a cell whose computed version is later than asof: nothing.
-    assert!(s.computed_cells(&fixed("2"), NOON_2, 100).unwrap().is_empty());
+    assert!(s.computed_cells(&fixed("c"), T4, 100).unwrap().is_empty());
+    assert!(s.computed_cells(&fixed("z"), T4, 100).unwrap().is_empty());
+    // A computed version later than asof does not answer.
+    assert_eq!(ids(&s.computed_cells(&fixed("a"), NOON_2, 100).unwrap()), [a1.id()]);
 }
 
 backends!(
