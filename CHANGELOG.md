@@ -2,7 +2,7 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.4.2 (unreleased; branch step-1.8b)
+## 0.4.2
 
 Additive: the trait is sealed, and the new methods are required, with no default. `public-api.txt` gains 8 additions and no removals (`tools/public_api.sh`).
 
