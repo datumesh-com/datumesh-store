@@ -832,3 +832,46 @@ pub fn put_vector_world(s: &(impl AsStore + ?Sized), v: &Value) -> Vec<(String, 
     }
     failed
 }
+
+/// A real class (made with the core's `define_class`) for the tests that only need some
+/// class to bind: `rates.example.org/fx_pair`, with methods `rate` and `spot`.
+pub struct TestClass {
+    /// The flattened descriptor's canonical bytes.
+    pub bytes: Vec<u8>,
+    /// The class hash.
+    pub hash: String,
+    /// The descriptors of its method functions.
+    pub functions: Vec<Vec<u8>>,
+}
+
+pub fn test_class() -> TestClass {
+    let host = "rates.example.org";
+    let key = r#"{"key_normalisation":"upper_ascii","type":"string","valid":false}"#;
+    let method = |tag: &str| {
+        jcs(format!(
+            r#"{{"code":{{"body":"{tag}","lang":"stored"}},"inputs":[],"signature":{{"args":{{"base":{key},"date":{{"type":"date","valid":true}},"quote":{key}}},"order":["base","quote","date"],"returns":{{"type":"number","unit":"1"}}}}}}"#
+        )
+        .as_bytes())
+    };
+    let (rate, spot) = (method("rate v1"), method("spot"));
+    let text = format!(
+        r#"{{"steward":{{"process":"https://{host}/classes/change","namespace":"{host}"}},"order":["base","quote"],"methods":{{"rate":"{}","spot":"{}"}},"keys":{{"quote":{{"type":"string","key_normalisation":"upper_ascii"}},"base":{{"type":"string","key_normalisation":"upper_ascii"}}}}}}"#,
+        fn_hash_of(&rate),
+        fn_hash_of(&spot)
+    );
+    let mut env = datumesh_core::ClassEnv::new(host);
+    for f in [&rate, &spot] {
+        env.insert_function(datumesh_core::FunctionDescriptor::from_json(f).unwrap());
+    }
+    let flat = datumesh_core::define_class("rates.example.org/fx_pair", text.as_bytes(), &env).unwrap();
+    TestClass { bytes: flat.canonical(), hash: flat.hash(), functions: vec![rate, spot] }
+}
+
+/// Stores `c` and its method functions; returns the class hash.
+pub fn put_test_class(s: &(impl AsStore + ?Sized), c: &TestClass) -> String {
+    let s = s.st();
+    for f in &c.functions {
+        s.put_descriptor(f).unwrap();
+    }
+    s.put_class(&c.bytes).unwrap()
+}

@@ -299,7 +299,8 @@ fn the_class_migration_is_additive_and_keeps_function_bindings(b: Backend) {
         Backend::Pg => (migrate::MIGRATIONS[..5].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..2].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(all, old.len() + 1, "exactly one migration for classes, on each backend");
+    // Since 0.4.2 the audit column (CONTRACT-1.8b S3) is one more migration after classes.
+    assert_eq!(all, old.len() + 2, "one migration for classes and one for the audit column, on each backend");
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) STRICT",
@@ -335,7 +336,7 @@ fn the_class_migration_is_additive_and_keeps_function_bindings(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(datumesh_store::SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, [all as u32], "only the class migration is applied");
+    assert_eq!(applied, [all as u32 - 1, all as u32], "the class migration and the audit migration are applied");
 
     // What was there is there, and is a function binding.
     assert_eq!(bound_fn(&s, &format!("{HOST}/rate"), END), Some((h.clone(), T1.to_string())));

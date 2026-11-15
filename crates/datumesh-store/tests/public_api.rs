@@ -222,3 +222,21 @@ fn the_api_has_classes_since_0_4_1() {
         assert!(has(item), "missing: {item}");
     }
 }
+
+/// 0.4.2: `computed_cells` and `has_bindings_under`, additively (`public-api.txt` is
+/// regenerated with the implementation).
+#[test]
+fn the_api_has_computed_cells_and_has_bindings_under_since_0_4_2() {
+    let api = api();
+    let has = |item: &str| api.lines().any(|l| l == item);
+    for owner in ["Store", "PgStore", "SqliteStore"] {
+        for item in [
+            format!("pub fn datumesh_store::{owner}::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>"),
+            format!("pub fn datumesh_store::{owner}::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>"),
+        ] {
+            assert!(has(&item), "missing: {item}");
+        }
+    }
+    // Additions only: the 0.3.2 slice methods are still there.
+    assert!(has("pub fn datumesh_store::Store::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>"));
+}
