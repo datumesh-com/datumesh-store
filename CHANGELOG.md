@@ -14,6 +14,10 @@ Additive: three methods and one type; nothing is removed. `public-api.txt` gains
   - PostgreSQL: one transaction, all or nothing. The round trips do not grow with the items in the normal case (the stored receipts of the call with one `= ANY`, the key documents of the signer hosts, the version locks in one statement in item order, the latest tx of the cells, then one multi-row insert each for receipts and versions; edges only for receipts with inputs). Signatures are verified on up to `available_parallelism()` threads. Calls of up to 10,000 items are the size it is written for.
   - SQLite: the default method, which loops over `put_receipt` and `put_version` and stops at the first error. It is not atomic: the items before a failing one stay stored, as they would after the same loop.
 
+### Changed
+
+- The slice statements (members, values, changed-since and computed cells) check each value-bound argument with an index-only probe of `cell_args_value`, and a driven slice's candidates are a materialized CTE joined to `cells` by primary key (PostgreSQL). The rows are the same; no schema change and no new index. SQLite is unchanged.
+
 ## 0.4.2
 
 Additive: the trait is sealed, and the new methods are required, with no default. `public-api.txt` gains 8 additions and no removals (`tools/public_api.sh`).

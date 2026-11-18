@@ -30,34 +30,58 @@ macro_rules! statements {
     };
 }
 
-/// Whether cell `c` meets every constraint of a slice ($6-$10: name, kind open / value /
-/// range, type, lo, hi; a value's lexical form is its lo).
+/// The value-bound constraints ($6-$10: name, kind open / value / range, type, lo, hi; a
+/// value's lexical form is its lo) of the cell `$cell` (a column reference): each one an
+/// index-only probe of `cell_args_value` (fn_hash, name, type, value, cell_id) with the
+/// function hash $1.
+macro_rules! value_probes {
+    ($cell:literal) => {
+        concat!(
+            "NOT EXISTS (
+            SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS k(name, kind, type, lo, hi)
+             WHERE k.kind = 'value' AND NOT EXISTS (
+                 SELECT 1 FROM cell_args e
+                  WHERE e.fn_hash = $1 AND e.name = k.name AND e.type = k.type AND e.value = k.lo
+                    AND e.cell_id = ",
+            $cell,
+            "))"
+        )
+    };
+}
+
+/// Whether cell `c` meets every constraint of a slice: the value-bound ones by `value_probes!`,
+/// the open and range ones by a scan of the cell's arguments.
 macro_rules! slice_match {
     () => {
-        "NOT EXISTS (
+        concat!(
+            value_probes!("c.cell_id"),
+            " AND NOT EXISTS (
             SELECT 1 FROM unnest($6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS k(name, kind, type, lo, hi)
-             WHERE NOT EXISTS (
+             WHERE k.kind <> 'value' AND NOT EXISTS (
                  SELECT 1 FROM cell_args a
                   WHERE a.cell_id = c.cell_id AND a.name = k.name
                     AND CASE WHEN k.kind = 'open' THEN true
-                             WHEN k.kind = 'value' THEN a.type = k.type AND a.value = k.lo
                              WHEN k.type = 'number' THEN a.type = 'number' AND a.num BETWEEN k.lo::numeric AND k.hi::numeric
                              ELSE a.type = k.type AND a.value BETWEEN k.lo AND k.hi END))"
+        )
     };
 }
 
 /// The statement of the members of a slice of cells: the columns `$outer` of the version
-/// answering (`$inner` of the receipt), the cell id, and its key; the candidates narrowed by
-/// `$drive`.
+/// answering (`$inner` of the receipt), the cell id, and its key; the candidates from `$with`
+/// (a CTE, or nothing) and `$from`.
 macro_rules! slice_members {
-    ($inner:literal, $outer:literal, $drive:expr) => {
+    ($with:expr, $from:expr, $inner:literal, $outer:literal) => {
         concat!(
+            $with,
             "SELECT m.tx, m.receipt_hash, m.asof, ",
             $outer,
             ", c.cell_id,
                     ARRAY(SELECT a.type || ':' || a.value FROM cell_args a
                            WHERE a.cell_id = c.cell_id AND a.name = ANY($11::text[]) ORDER BY a.name)
-               FROM cells c
+               ",
+            $from,
+            "
               CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, ",
             $inner,
             "
@@ -65,26 +89,25 @@ macro_rules! slice_members {
                                    WHERE v.cell_id = c.cell_id AND v.tx <= $5 AND r.asof <= $5
                                    ORDER BY v.tx DESC LIMIT 1) m
               WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND ",
-            slice_match!(),
-            " ",
-            $drive
+            slice_match!()
         )
     };
 }
 
-/// Whether a candidate cell of a slice (narrowed by `$drive`) has a stored version whose
+/// Whether a candidate cell of a slice (from `$with` and `$from`) has a stored version whose
 /// receipt's asof is after A.
 macro_rules! changed_cand {
-    ($drive:expr) => {
+    ($with:expr, $from:expr) => {
         concat!(
-            "SELECT true FROM cells c
+            $with,
+            "SELECT true ",
+            $from,
+            "
               WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
                 AND EXISTS (SELECT 1 FROM receipts r WHERE r.cell_id = c.cell_id AND r.asof > $5
                                AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash))
                 AND ",
             slice_match!(),
-            " ",
-            $drive,
             " LIMIT 1"
         )
     };
@@ -92,39 +115,70 @@ macro_rules! changed_cand {
 
 /// The cells of a slice of cells that have a computed version answering as of A ($5): one
 /// with tx <= A and its receipt's asof <= A (the computed versions' own asof). Ascending by
-/// cell id, at most $16; the candidates narrowed by `$drive`.
+/// cell id, at most $16; the candidates from `$with` and `$from`.
 macro_rules! computed_cells {
-    ($drive:expr) => {
+    ($with:expr, $from:expr) => {
         concat!(
+            $with,
             "SELECT c.ns, c.fn, c.fn_hash,
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
                            WHERE a.cell_id = c.cell_id ORDER BY a.name)
-               FROM cells c
+               ",
+            $from,
+            "
               WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4
                 AND EXISTS (SELECT 1 FROM computed_versions cv
                              WHERE cv.cell_id = c.cell_id AND cv.tx <= $5 AND cv.asof <= $5)
                 AND ",
             slice_match!(),
-            " ",
-            $drive,
             " ORDER BY c.cell_id LIMIT $16"
         )
     };
 }
 
-/// The candidates of a slice narrowed to a range of one argument ($12-$15: name, type, lo,
-/// hi) of the typed-argument index: of a number, and of any other type.
+// The candidates of a slice: all the function's cells (`no_with!` and `from_all!`), or the
+// cells of a driving argument's range ($12-$15: name, type, lo, hi) as the materialized CTE
+// `cand`, which already applies the value-bound constraints by index probes, and then joined
+// to `cells` by primary key (`from_drive!`). A text range is scanned in `cell_args_value`, a
+// number's in `cell_args_num`.
+macro_rules! no_with {
+    () => {
+        ""
+    };
+}
+macro_rules! from_all {
+    () => {
+        "FROM cells c"
+    };
+}
+macro_rules! from_drive {
+    () => {
+        "FROM cand k JOIN cells c ON c.cell_id = k.cell_id"
+    };
+}
 macro_rules! drive_text {
     () => {
-        "AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
-                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = $13 AND a.value BETWEEN $14 AND $15)"
+        concat!(
+            "WITH cand AS MATERIALIZED (
+            SELECT a.cell_id FROM cell_args a
+             WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = $13 AND a.value BETWEEN $14 AND $15
+               AND ",
+            value_probes!("a.cell_id"),
+            ") "
+        )
     };
 }
 macro_rules! drive_num {
     () => {
-        "AND $13 = 'number' AND c.cell_id IN (SELECT a.cell_id FROM cell_args a
-                            WHERE a.fn_hash = $1 AND a.name = $12 AND a.type = 'number'
-                              AND a.num BETWEEN $14::numeric AND $15::numeric)"
+        concat!(
+            "WITH cand AS MATERIALIZED (
+            SELECT a.cell_id FROM cell_args a
+             WHERE $13 = 'number' AND a.fn_hash = $1 AND a.name = $12 AND a.type = 'number'
+               AND a.num BETWEEN $14::numeric AND $15::numeric
+               AND ",
+            value_probes!("a.cell_id"),
+            ") "
+        )
     };
 }
 
@@ -272,18 +326,18 @@ statements! {
     // answering as of A and the "type:value" of its key arguments ($11, in name order).
     // Candidates come from all the function's cells, or from a range scan of one argument
     // ($12-$15: name, type, lo, hi) of the typed-argument index.
-    SliceMembersAll = slice_members!("r.bytes", "m.bytes", "") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceMembersText = slice_members!("r.bytes", "m.bytes", drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceMembersNum = slice_members!("r.bytes", "m.bytes", drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersAll = slice_members!(no_with!(), from_all!(), "r.bytes", "m.bytes") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersText = slice_members!(drive_text!(), from_drive!(), "r.bytes", "m.bytes") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceMembersNum = slice_members!(drive_num!(), from_drive!(), "r.bytes", "m.bytes") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // The same with the receipt's value and the member's cell from the index (0.3.2): (tx,
     // receipt_hash, asof, value_type, value, ns, fn, fn_hash, "name:type:value" of each
     // argument by name, cell_id, key).
-    SliceValuesAll = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", "") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceValuesText = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    SliceValuesNum = slice_members!("r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)", drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceValuesAll = slice_members!(no_with!(), from_all!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceValuesText = slice_members!(drive_text!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceValuesNum = slice_members!(drive_num!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbeText = "SELECT count(*) FROM (SELECT 1 FROM cell_args a
                        WHERE a.fn_hash = $1 AND a.name = $2 AND a.type = $3 AND a.value BETWEEN $4 AND $5 LIMIT 10001) x"
@@ -303,9 +357,9 @@ statements! {
     // computed_cells (0.4.2): the cells of a slice with a computed version as of A, $16 at most;
     // the columns are the cell's namespace, function name, function hash and "name:type:value"
     // of each argument (the key's arguments are not needed here: $11 is unused).
-    ComputedCellsAll = computed_cells!("") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    ComputedCellsText = computed_cells!(drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    ComputedCellsNum = computed_cells!(drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+    ComputedCellsAll = computed_cells!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+    ComputedCellsText = computed_cells!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
+    ComputedCellsNum = computed_cells!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
 
     // has_bindings_under (0.4.2): whether a name binding or a class binding has the prefix $1
     // (a namespace and "/").
@@ -324,9 +378,9 @@ statements! {
         " LIMIT 1"
     ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // or from the slice's candidate cells, then each one's receipts by cell and asof.
-    ChangedCandAll = changed_cand!("") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    ChangedCandText = changed_cand!(drive_text!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    ChangedCandNum = changed_cand!(drive_num!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    ChangedCandAll = changed_cand!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    ChangedCandText = changed_cand!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    ChangedCandNum = changed_cand!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // How many receipts of the function have an asof after A, and how many cells it has (up
     // to 10,001), to choose between the two.
     // (Ordered as the indexes are, so that a probe is an index scan of at most 10,001 entries
