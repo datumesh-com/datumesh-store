@@ -2,6 +2,18 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.4.3
+
+Additive: three methods and one type; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). No change to any receipt, hash or stored value: the same rows as calling `put_receipt` and `put_version` one by one.
+
+### Added
+
+- `Store::latest_many(cell_ids)`: `latest` of each id, one entry per input in input order (duplicates allowed; empty input, empty result). The first malformed id is the error, as `latest` gives it. PostgreSQL answers up to 10,000 ids per statement.
+- `Store::receipts_many(hashes)`: `receipt` of each hash, in input order, as owned bytes (`None` for a missing or malformed hash). PostgreSQL: one statement per 10,000 hashes.
+- `Store::put_cells(items)` with `CellWrite` (exported at the root): for each item in order, `put_receipt` of its receipt and, when it has a version, `put_version` of that cell, tx and the receipt's hash. Returns the receipt hashes in order, and every check and error is the one of those two calls, for the first item that fails.
+  - PostgreSQL: one transaction, all or nothing. The round trips do not grow with the items in the normal case (the stored receipts of the call with one `= ANY`, the key documents of the signer hosts, the version locks in one statement in item order, the latest tx of the cells, then one multi-row insert each for receipts and versions; edges only for receipts with inputs). Signatures are verified on up to `available_parallelism()` threads. Calls of up to 10,000 items are the size it is written for.
+  - SQLite: the default method, which loops over `put_receipt` and `put_version` and stops at the first error. It is not atomic: the items before a failing one stay stored, as they would after the same loop.
+
 ## 0.4.2
 
 Additive: the trait is sealed, and the new methods are required, with no default. `public-api.txt` gains 8 additions and no removals (`tools/public_api.sh`).

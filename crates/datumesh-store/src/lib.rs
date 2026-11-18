@@ -370,21 +370,29 @@ pub trait Store: Resolver + sealed::Sealed {
     /// [`latest`](Store::latest) of each of `cell_ids`, in input order (duplicates allowed;
     /// empty input, empty result). The first malformed id is the error. Since 0.4.3.
     fn latest_many(&self, cell_ids: &[&str]) -> Result<Vec<Option<Version>>> {
-        let _ = cell_ids;
-        todo!("latest_many")
+        cell_ids.iter().map(|id| self.latest(id)).collect()
     }
     /// [`receipt`](Resolver::receipt) of each of `hashes`, in input order, as owned bytes.
     /// Since 0.4.3.
     fn receipts_many(&self, hashes: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
-        let _ = hashes;
-        todo!("receipts_many")
+        Ok(hashes.iter().map(|h| self.receipt(h).map(|b| b.into_owned())).collect())
     }
     /// For each item in order, [`put_receipt`](Store::put_receipt) and then, when the item
     /// has a `version`, [`put_version`](Store::put_version); returns the receipt hashes.
-    /// All or nothing on PostgreSQL; SQLite loops and need not be atomic. Since 0.4.3.
+    /// All or nothing on PostgreSQL (one transaction; calls of up to 10,000 items are the
+    /// size it is written for). SQLite (and this default) loops, stops at the first error,
+    /// and need not be atomic: the items before a failing one stay stored there. Since 0.4.3.
     fn put_cells(&self, items: &[CellWrite<'_>]) -> Result<Vec<String>> {
-        let _ = items;
-        todo!("put_cells")
+        items
+            .iter()
+            .map(|w| {
+                let hash = self.put_receipt(w.receipt)?;
+                if let Some((cell_id, tx)) = w.version {
+                    self.put_version(cell_id, tx, &hash)?;
+                }
+                Ok(hash)
+            })
+            .collect()
     }
     /// The stored receipts that list `receipt_hash` among their inputs, by hash. Only as
     /// an input of its own: a receipt read as a member of a slice is found through its

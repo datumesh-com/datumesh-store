@@ -1,13 +1,16 @@
 //! `PgStore`: the store on PostgreSQL.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
-use crate::{not_canonical_class, Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
+use crate::{
+    not_canonical_class, Binding, CellWrite, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version,
+};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys, Manifest,
@@ -316,6 +319,285 @@ impl PgStore {
     }
 }
 
+/// Items per statement of `latest_many` and `receipts_many` (longer inputs are split).
+const MANY: usize = 10_000;
+
+/// One item of a `put_cells` call, parsed before its transaction: the receipt's canonical
+/// bytes and the columns `put_receipt` stores, with its edges.
+struct Prepared {
+    canonical: Vec<u8>,
+    hash: String,
+    cell_id: String,
+    tx: String,
+    asof: String,
+    fn_hash: String,
+    publisher: String,
+    host: String,
+    entries: Vec<String>,
+    inputs: Vec<String>,
+}
+
+fn prepare(bytes: &[u8]) -> Result<Prepared> {
+    // The steps `put_receipt` takes before its query, in its order.
+    let r = Receipt::from_json(bytes)?;
+    let canonical = json::parse(bytes)?.to_jcs();
+    // Receipt hashes are edges; slice entries (spec-0.4.0) slice edges.
+    let (entries, inputs): (Vec<String>, Vec<String>) =
+        r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
+    Ok(Prepared {
+        canonical,
+        hash: r.hash().to_string(),
+        cell_id: r.cell().id(),
+        tx: r.tx().to_string(),
+        asof: r.asof().to_string(),
+        fn_hash: r.cell().fn_hash.clone(),
+        publisher: r.publisher().to_string(),
+        host: r.signer_host().to_string(),
+        entries,
+        inputs,
+    })
+}
+
+/// The receipt's verdict against the keys of its signer host, as `put_receipt` gives it:
+/// `None` when it verifies.
+fn verdict(bytes: &[u8], keys: &Keys) -> Option<datumesh_core::Error> {
+    let out = verify(bytes, keys, None, None);
+    if out.ok {
+        return None;
+    }
+    Some(
+        out.error()
+            .unwrap_or_else(|| datumesh_core::Error::new(ErrorCode::Signature, "$", "the receipt did not verify")),
+    )
+}
+
+/// `f` over `items` on up to `available_parallelism()` threads; the results in item order.
+fn parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let size = items.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items
+            .chunks(size)
+            .map(|part| {
+                let f = &f;
+                s.spawn(move || part.iter().map(f).collect::<Vec<R>>())
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+    })
+}
+
+/// A signer host's namespace as `put_receipt` and `put_version` read it: its key document
+/// (the keys it verifies with) and whether it is suspended, and since when.
+struct HostState {
+    keys: Keys,
+    suspended_at: Option<String>,
+}
+
+/// `put_cells` on one connection, in one transaction: the items in order, with the checks
+/// and the errors of `put_receipt` and `put_version` (see `Store::put_cells`).
+fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Prepared>>) -> Result<Vec<String>> {
+    let version_cells = || {
+        items
+            .iter()
+            .filter_map(|w| w.version)
+            .filter(|(cell, tx)| check_hex(cell, 64, "cell_id").is_ok() && check_instant(tx, "tx").is_ok())
+    };
+    let st_lock = c.stmt(Q::VersionLocksMany)?;
+    let st_get = c.stmt(Q::ReceiptsGetMany)?;
+    let st_ns = c.stmt(Q::NamespacesGetMany)?;
+    let st_latest = c.stmt(Q::VersionsLatestTxMany)?;
+    let st_put = c.stmt(Q::ReceiptsPutMany)?;
+    let st_edges = c.stmt(Q::EdgesPutMany)?;
+    let st_slice_edges = c.stmt(Q::SliceEdgesPutMany)?;
+    let st_versions = c.stmt(Q::VersionsPutMany)?;
+    let mut t = c.client.transaction().db()?;
+
+    // The version locks, in item order (as put_version takes them; one statement).
+    let mut locked: Vec<&str> = Vec::new();
+    for (cell, _) in version_cells() {
+        if !locked.contains(&cell) {
+            locked.push(cell);
+        }
+    }
+    if !locked.is_empty() {
+        t.execute(&st_lock, &[&locked]).db()?;
+    }
+
+    // What the store holds for the call: the receipts (by hash), the namespaces of the signer
+    // hosts and the latest tx of the version cells, all read after the locks.
+    let parsed: Vec<&Prepared> = prepared.iter().filter_map(|p| p.as_ref().ok()).collect();
+    let mut hashes: Vec<&str> = parsed.iter().map(|p| p.hash.as_str()).collect();
+    hashes.sort_unstable();
+    hashes.dedup();
+    let mut stored: HashMap<String, Vec<u8>> = HashMap::new();
+    if !hashes.is_empty() {
+        for row in t.query(&st_get, &[&hashes]).db()? {
+            stored.insert(row.try_get(0).db()?, row.try_get(1).db()?);
+        }
+    }
+    let mut hosts: Vec<&str> = parsed.iter().map(|p| p.host.as_str()).collect();
+    hosts.sort_unstable();
+    hosts.dedup();
+    let mut namespaces: HashMap<String, HostState> = HashMap::new();
+    if !hosts.is_empty() {
+        for row in t.query(&st_ns, &[&hosts]).db()? {
+            let host: String = row.try_get(0).db()?;
+            let doc: Vec<u8> = row.try_get(1).db()?;
+            let suspended_at: Option<String> = row.try_get(2).db()?;
+            let mut keys = Keys::new();
+            keys.insert_response(&host, 200, Some(&doc));
+            namespaces.insert(host, HostState { keys, suspended_at });
+        }
+    }
+    let mut cells: Vec<&str> = version_cells().map(|(cell, _)| cell).collect();
+    cells.sort_unstable();
+    cells.dedup();
+    let mut latest: HashMap<String, String> = HashMap::new();
+    if !cells.is_empty() {
+        for row in t.query(&st_latest, &[&cells]).db()? {
+            latest.insert(row.try_get(0).db()?, row.try_get(1).db()?);
+        }
+    }
+
+    // The signatures, on threads: every item not already stored with the same bytes (the
+    // others are not checked, as put_receipt's idempotence says). A namespace's keys are
+    // those of the stored key document; none stored is a host without keys.
+    let empty = Keys::new();
+    let keys_of = |host: &str| namespaces.get(host).map_or(&empty, |h| &h.keys);
+    let jobs: Vec<usize> = (0..items.len())
+        .filter(|&i| match &prepared[i] {
+            Ok(p) => stored.get(&p.hash) != Some(&p.canonical),
+            Err(_) => false,
+        })
+        .collect();
+    let mut verdicts: Vec<Option<Option<datumesh_core::Error>>> = vec![None; items.len()];
+    let checked = parallel(&jobs, |&i| {
+        let host = prepared[i].as_ref().map_or("", |p| p.host.as_str());
+        verdict(items[i].receipt, keys_of(host))
+    });
+    for (i, v) in jobs.into_iter().zip(checked) {
+        verdicts[i] = Some(v);
+    }
+
+    // In item order, as the loop of put_receipt and put_version would run them, against the
+    // state of the store plus the items before. The first failure is the call's error.
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
+    let mut new: Vec<Prepared> = Vec::new();
+    let mut versions: Vec<(&str, &str, String)> = Vec::new();
+    for (i, pr) in prepared.into_iter().enumerate() {
+        let p = pr?;
+        let host_state = namespaces.get(&p.host);
+        let suspended = |host: &str| -> Result<()> {
+            match host_state.and_then(|h| h.suspended_at.as_ref()) {
+                // No new writes under a suspended namespace.
+                Some(since) => Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since.clone() }),
+                None => Ok(()),
+            }
+        };
+        // put_receipt: the stored copy with the same bytes is the receipt (no checks).
+        let is_stored = stored.get(&p.hash).is_some_and(|b| *b == p.canonical);
+        if !is_stored {
+            suspended(&p.host)?;
+            match verdicts[i].take() {
+                Some(Some(e)) => return Err(Error::Invalid(e)),
+                Some(None) => {}
+                None => unreachable!("an item not stored is checked"),
+            }
+            if stored.contains_key(&p.hash) {
+                return Err(Error::Conflict { hash: p.hash.clone() });
+            }
+            stored.insert(p.hash.clone(), p.canonical.clone());
+        }
+        // put_version, for the item's version.
+        if let Some((cell, tx)) = items[i].version {
+            check_hex(cell, 64, "cell_id")?;
+            check_instant(tx, "tx")?;
+            suspended(&p.host)?;
+            if p.cell_id != cell {
+                return Err(Error::Mismatch { what: "cell_id", expected: cell.to_string(), found: p.cell_id.clone() });
+            }
+            if p.tx != tx {
+                return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: p.tx.clone() });
+            }
+            if let Some(l) = latest.get(cell) {
+                if tx <= l.as_str() {
+                    return Err(Error::NotLater {
+                        what: "version",
+                        key: cell.to_string(),
+                        given: tx.to_string(),
+                        latest: l.clone(),
+                    });
+                }
+            }
+            latest.insert(cell.to_string(), tx.to_string());
+            versions.push((cell, tx, p.hash.clone()));
+        }
+        out.push(p.hash.clone());
+        if !is_stored {
+            new.push(p);
+        }
+    }
+
+    // The writes. A receipt another transaction stored meanwhile must hold the same bytes.
+    if !new.is_empty() {
+        let hashes: Vec<&str> = new.iter().map(|p| p.hash.as_str()).collect();
+        let bytes: Vec<&[u8]> = new.iter().map(|p| p.canonical.as_slice()).collect();
+        let cells: Vec<&str> = new.iter().map(|p| p.cell_id.as_str()).collect();
+        let txs: Vec<&str> = new.iter().map(|p| p.tx.as_str()).collect();
+        let asofs: Vec<&str> = new.iter().map(|p| p.asof.as_str()).collect();
+        let fns: Vec<&str> = new.iter().map(|p| p.fn_hash.as_str()).collect();
+        let pubs: Vec<&str> = new.iter().map(|p| p.publisher.as_str()).collect();
+        let rows = t.query(&st_put, &[&hashes, &bytes, &cells, &txs, &asofs, &fns, &pubs]).db()?;
+        let mut got: HashSet<String> = HashSet::new();
+        for row in &rows {
+            got.insert(row.try_get(0).db()?);
+        }
+        let missing: Vec<&str> = hashes.iter().copied().filter(|h| !got.contains(*h)).collect();
+        if !missing.is_empty() {
+            let mut held: HashMap<String, Vec<u8>> = HashMap::new();
+            for row in t.query(&st_get, &[&missing]).db()? {
+                held.insert(row.try_get(0).db()?, row.try_get(1).db()?);
+            }
+            for p in new.iter().filter(|p| missing.contains(&p.hash.as_str())) {
+                if held.get(&p.hash) != Some(&p.canonical) {
+                    return Err(Error::Conflict { hash: p.hash.clone() });
+                }
+            }
+        }
+        let edges: Vec<(&str, &str)> =
+            new.iter().flat_map(|p| p.inputs.iter().map(move |i| (p.hash.as_str(), i.as_str()))).collect();
+        if !edges.is_empty() {
+            let (r, i): (Vec<&str>, Vec<&str>) = edges.into_iter().unzip();
+            t.execute(&st_edges, &[&r, &i]).db()?;
+        }
+        let slice_edges: Vec<(&str, &str)> =
+            new.iter().flat_map(|p| p.entries.iter().map(move |e| (p.hash.as_str(), e.as_str()))).collect();
+        if !slice_edges.is_empty() {
+            let (r, e): (Vec<&str>, Vec<&str>) = slice_edges.into_iter().unzip();
+            t.execute(&st_slice_edges, &[&r, &e]).db()?;
+        }
+    }
+    if !versions.is_empty() {
+        let cells: Vec<&str> = versions.iter().map(|v| v.0).collect();
+        let txs: Vec<&str> = versions.iter().map(|v| v.1).collect();
+        let hashes: Vec<&str> = versions.iter().map(|v| v.2.as_str()).collect();
+        t.execute(&st_versions, &[&cells, &txs, &hashes]).db()?;
+    }
+    t.commit().db()?;
+    Ok(out)
+}
+
+/// The version of `cell_id` in a row of `VersionLatestMany` (tx, receipt hash, asof), `None`
+/// when the cell has none.
+fn latest_row(r: &postgres::Row, cell_id: &str) -> Result<Option<Version>> {
+    let Some(tx) = r.try_get::<_, Option<String>>(0).db()? else { return Ok(None) };
+    Ok(Some(Version { cell_id: cell_id.to_string(), tx, receipt_hash: r.try_get(1).db()?, asof: r.try_get(2).db()? }))
+}
+
 impl Store for PgStore {
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
         // spec-0.4.0's descriptor: `signature.order` and argument `extent` allowed.
@@ -487,6 +769,55 @@ impl Store for PgStore {
             let rows = c.client.query(&st, &[&cell_id]).db()?;
             Ok(PgStore::version_rows(&rows, cell_id)?.pop())
         })
+    }
+
+    fn latest_many(&self, cell_ids: &[&str]) -> Result<Vec<Option<Version>>> {
+        for id in cell_ids {
+            check_hex(id, 64, "cell_id")?;
+        }
+        let mut out = Vec::with_capacity(cell_ids.len());
+        for part in cell_ids.chunks(MANY) {
+            let versions = self.run("latest_many", |c| {
+                let st = c.stmt(Q::VersionLatestMany)?;
+                let rows = c.client.query(&st, &[&part]).db()?;
+                rows.iter().zip(part).map(|(r, id)| latest_row(r, id)).collect::<Result<Vec<_>>>()
+            })?;
+            out.extend(versions);
+        }
+        Ok(out)
+    }
+
+    fn receipts_many(&self, hashes: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut out = Vec::with_capacity(hashes.len());
+        for part in hashes.chunks(MANY) {
+            // A malformed hash has no receipt (as `receipt` answers): it is not sent.
+            let valid: Vec<&str> = part.iter().copied().filter(|h| is_hash(h)).collect();
+            let found: Vec<Option<Vec<u8>>> = if valid.is_empty() {
+                Vec::new()
+            } else {
+                self.run("receipts_many", |c| {
+                    let st = c.stmt(Q::ReceiptsMany)?;
+                    let rows = c.client.query(&st, &[&valid]).db()?;
+                    rows.iter().map(|r| r.try_get::<_, Option<Vec<u8>>>(0).db()).collect::<Result<Vec<_>>>()
+                })?
+            };
+            let mut found = found.into_iter();
+            for h in part {
+                out.push(if is_hash(h) { found.next().flatten() } else { None });
+            }
+        }
+        Ok(out)
+    }
+
+    fn put_cells(&self, items: &[CellWrite<'_>]) -> Result<Vec<String>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Parsing (and so the first malformed receipt's error) is in item order below.
+        let prepared = parallel(items, |w| prepare(w.receipt));
+        let hashes = self.run("put_cells", |c| put_cells_in(c, items, prepared))?;
+        tracing::debug!(target: "datumesh_store", items = items.len(), "put_cells");
+        Ok(hashes)
     }
 
     fn dependents(&self, receipt_hash: &str) -> Result<Vec<String>> {

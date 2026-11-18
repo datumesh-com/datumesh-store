@@ -340,4 +340,43 @@ statements! {
     VersionsChangedAfter = "SELECT EXISTS (SELECT 1 FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                              WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND r.asof > $4)"
         => [TEXT, TEXT, TEXT, TEXT];
+
+    // Batched reads (0.4.3). One row per input, in input order (`ord`): latest_many's version
+    // of each cell (its tx, receipt hash and the receipt's asof), receipts_many's bytes.
+    VersionLatestMany = "SELECT l.tx, l.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = l.receipt_hash)
+                         FROM unnest($1::text[]) WITH ORDINALITY AS u(id, ord)
+                         LEFT JOIN LATERAL (SELECT v.tx, v.receipt_hash FROM versions v
+                                             WHERE v.cell_id = u.id ORDER BY v.tx DESC LIMIT 1) l ON true
+                         ORDER BY u.ord"
+        => [TEXT_ARRAY];
+    ReceiptsMany = "SELECT r.bytes FROM unnest($1::text[]) WITH ORDINALITY AS u(h, ord)
+                    LEFT JOIN receipts r ON r.hash = u.h ORDER BY u.ord"
+        => [TEXT_ARRAY];
+
+    // put_cells (0.4.3), one transaction: the version locks of the call's cells in item order
+    // (one statement); the stored receipts, namespaces and latest tx of the call's hashes,
+    // signer hosts and cells; then the inserts (receipts, edges, slice edges, versions), each
+    // one statement with arrays.
+    VersionLocksMany = "SELECT datumesh_lock('versions', id) FROM unnest($1::text[]) WITH ORDINALITY AS u(id, ord)
+                        ORDER BY ord"
+        => [TEXT_ARRAY];
+    ReceiptsGetMany = "SELECT hash, bytes FROM receipts WHERE hash = ANY($1::text[])" => [TEXT_ARRAY];
+    NamespacesGetMany = "SELECT host, keydoc, suspended_at FROM namespaces WHERE host = ANY($1::text[])" => [TEXT_ARRAY];
+    VersionsLatestTxMany = "SELECT cell_id, max(tx) FROM versions WHERE cell_id = ANY($1::text[]) GROUP BY cell_id"
+        => [TEXT_ARRAY];
+    ReceiptsPutMany = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
+                       SELECT h, b, c, t, datumesh_instant(t), s, datumesh_instant(s), f, p
+                         FROM unnest($1::text[], $2::bytea[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+                              AS x(h, b, c, t, s, f, p)
+                       ON CONFLICT (hash) DO NOTHING RETURNING hash"
+        => [TEXT_ARRAY, BYTEA_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY];
+    EdgesPutMany = "INSERT INTO edges (receipt_hash, input_hash, kind)
+                    SELECT r, i, 'receipt' FROM unnest($1::text[], $2::text[]) AS x(r, i) ON CONFLICT DO NOTHING"
+        => [TEXT_ARRAY, TEXT_ARRAY];
+    SliceEdgesPutMany = "INSERT INTO slice_edges (receipt_hash, entry)
+                         SELECT r, e FROM unnest($1::text[], $2::text[]) AS x(r, e) ON CONFLICT DO NOTHING"
+        => [TEXT_ARRAY, TEXT_ARRAY];
+    VersionsPutMany = "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash)
+                       SELECT c, t, datumesh_instant(t), r FROM unnest($1::text[], $2::text[], $3::text[]) AS x(c, t, r)"
+        => [TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY];
 }
