@@ -142,6 +142,24 @@ pub struct Version {
     pub asof: String,
 }
 
+/// One cell write of [`Store::put_cells`]: a receipt and, optionally, the version it
+/// becomes. Since 0.4.3.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellWrite<'a> {
+    /// The receipt's JSON bytes, as for `put_receipt`.
+    pub receipt: &'a [u8],
+    /// `Some((cell_id, tx))`: also `put_version(cell_id, tx, <this receipt's hash>)`.
+    pub version: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> CellWrite<'a> {
+    /// A cell write of `receipt` and, when `version` is `Some((cell_id, tx))`, its version.
+    pub fn new(receipt: &'a [u8], version: Option<(&'a str, &'a str)>) -> Self {
+        CellWrite { receipt, version }
+    }
+}
+
 /// A member of a slice ([`Store::slice_members`], [`Store::versions_between`]): a stored
 /// version and the bytes of its receipt (as [`receipt`](Resolver::receipt) returns them).
 /// Since 0.3.1.
@@ -349,6 +367,25 @@ pub trait Store: Resolver + sealed::Sealed {
     fn versions(&self, cell_id: &str, from: &str, to: &str) -> Result<Vec<Version>>;
     /// The cell's latest version.
     fn latest(&self, cell_id: &str) -> Result<Option<Version>>;
+    /// [`latest`](Store::latest) of each of `cell_ids`, in input order (duplicates allowed;
+    /// empty input, empty result). The first malformed id is the error. Since 0.4.3.
+    fn latest_many(&self, cell_ids: &[&str]) -> Result<Vec<Option<Version>>> {
+        let _ = cell_ids;
+        todo!("latest_many")
+    }
+    /// [`receipt`](Resolver::receipt) of each of `hashes`, in input order, as owned bytes.
+    /// Since 0.4.3.
+    fn receipts_many(&self, hashes: &[&str]) -> Result<Vec<Option<Vec<u8>>>> {
+        let _ = hashes;
+        todo!("receipts_many")
+    }
+    /// For each item in order, [`put_receipt`](Store::put_receipt) and then, when the item
+    /// has a `version`, [`put_version`](Store::put_version); returns the receipt hashes.
+    /// All or nothing on PostgreSQL; SQLite loops and need not be atomic. Since 0.4.3.
+    fn put_cells(&self, items: &[CellWrite<'_>]) -> Result<Vec<String>> {
+        let _ = items;
+        todo!("put_cells")
+    }
     /// The stored receipts that list `receipt_hash` among their inputs, by hash. Only as
     /// an input of its own: a receipt read as a member of a slice is found through its
     /// manifests ([`member_manifests`](Store::member_manifests), then
