@@ -60,7 +60,9 @@ fn rows_from_before_the_migration_have_null_and_nothing_else_changes(b: Backend)
         Backend::Pg => (migrate::MIGRATIONS[..6].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..3].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(all, old.len() + 1, "exactly one migration for the audit column, on each backend");
+    // On PostgreSQL, 0007 is the audit column and 0008 (the cell index, CONTRACT-perf S6) follows it.
+    let extra = if b == Backend::Pg { 2 } else { 1 };
+    assert_eq!(all, old.len() + extra, "the audit column (and on PostgreSQL the cell index), on each backend");
     if b == Backend::Pg {
         assert_eq!(migrate::MIGRATIONS[6].version, 7);
         assert_eq!(migrate::MIGRATIONS[6].name, "0007_binding_audit.sql");
@@ -111,7 +113,8 @@ fn rows_from_before_the_migration_have_null_and_nothing_else_changes(b: Backend)
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, [all as u32], "only the audit migration is applied");
+    let expect: Vec<u32> = if b == Backend::Pg { vec![7, 8] } else { vec![all as u32] };
+    assert_eq!(applied, expect, "only the audit migration (and on PostgreSQL the cell index) is applied");
 
     // The old rows have NULL, not the time of the migration.
     assert_eq!(written(&db, "name_bindings"), [None]);

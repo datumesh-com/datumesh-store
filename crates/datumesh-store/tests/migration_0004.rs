@@ -95,8 +95,8 @@ fn migration_4_backfills_receipt_values() {
 
     let s = db.bare_store();
     // Since the namespace checks, migration 5 follows; since the classes, migration 6; since
-    // 0.4.2, the audit column, migration 7.
-    assert_eq!(migrate::apply(&s).unwrap(), [4, 5, 6, 7]);
+    // 0.4.2, the audit column, migration 7; since 0.4.3, the cell index, migration 8.
+    assert_eq!(migrate::apply(&s).unwrap(), [4, 5, 6, 7, 8]);
     assert_values_are_the_cores(&mut c, &all);
 
     let scratch = PgDb::empty();

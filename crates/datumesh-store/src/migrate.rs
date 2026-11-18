@@ -52,6 +52,11 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     Migration { version: 6, name: "0006_classes.sql", sql: include_str!("../migrations/0006_classes.sql") },
     Migration { version: 7, name: "0007_binding_audit.sql", sql: include_str!("../migrations/0007_binding_audit.sql") },
+    Migration {
+        version: 8,
+        name: "0008_index_cell_per_statement.sql",
+        sql: include_str!("../migrations/0008_index_cell_per_statement.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (

@@ -17,6 +17,7 @@ Additive: three methods and one type; nothing is removed. `public-api.txt` gains
 ### Changed
 
 - The slice statements (members, values, changed-since and computed cells) check each value-bound argument with an index-only probe of `cell_args_value`, and a driven slice's candidates are a materialized CTE joined to `cells` by primary key (PostgreSQL). The rows are the same; no schema change and no new index. SQLite is unchanged.
+- PostgreSQL migration 8 (`0008_index_cell_per_statement.sql`): the cell index of a stored receipt runs once per statement, not once per receipt. It makes the same `cells` and `cell_args` rows; no backfill, no change to any stored value. SQLite is unchanged.
 
 ## 0.4.2
 
