@@ -83,6 +83,10 @@ pub enum Error {
     PoolTimeout,
     /// A migration could not be applied or checked.
     Migration(String),
+    /// The call needs a capability this store does not have: the vector calls
+    /// (`vector_find`, `put_embeddings`) where [`Store::vector_available`](crate::Store::vector_available)
+    /// is false (SQLite, or PostgreSQL without the `vector` extension). Since 0.5.0.
+    Unsupported(String),
     /// A connection option is unusable: a root certificate bundle
     /// ([`PoolOptions::tls_root_certificates_pem`](crate::PoolOptions::tls_root_certificates_pem))
     /// with no certificate, or one that does not parse.
@@ -217,6 +221,7 @@ impl fmt::Display for Error {
             Error::PoolTimeout => f.write_str("no database connection became free in time"),
             Error::Migration(m) => write!(f, "migration: {m}"),
             Error::Config(m) => write!(f, "configuration: {m}"),
+            Error::Unsupported(m) => write!(f, "not supported here: {m}"),
         }
     }
 }

@@ -2,6 +2,25 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.5.0
+
+Additive: the catalogue (Build 2, Part 2, R1). Ten methods, and the types they take and return; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). Migrations 9 (PostgreSQL) and 5 (SQLite) add tables; no existing table or stored value changes.
+
+### Added
+
+- Tables (`CONTRACT-build2-part2-read` R1). `catalog_entries`: one row per (kind, name), with label, description, arguments, examples, source (publisher or operator) and signer. `key_values`: the dictionary of a key of an owner, with a label, aliases (the publisher's) and `n_cells`. `find_misses`: query text and time, no other column. On PostgreSQL, `embeddings` (model, ref kind, ref id, `vector(384)`, an HNSW index on cosine distance), made only where the `vector` extension is available (`pg_available_extensions`), with `CREATE EXTENSION IF NOT EXISTS vector`. Trigram indexes (`pg_trgm`) where that extension is available. SQLite has the same tables without vectors.
+- `Store::upsert_catalog(entries)`: insert or replace by (kind, name), all or nothing, with the bounds checked first (names by the core's rules, a label of at most 120 bytes, a description of 1 to 1024 bytes). An operator's entry never replaces a publisher's. Returns the ids.
+- `Store::upsert_key_values(owner, key, values)`: adds and replaces values (label and aliases); does not prune, and keeps `n_cells`. Returns the ids.
+- `Store::refresh_value_counts()`: sets each value's `n_cells` to the number of cells of the owner's function with that value for the key.
+- `Store::text_find(query, limit)`: entries and values matching every word of the query, case-insensitively and literally (`%`, `_` and `\` are characters). A word scores 1.0 as a whole field, 0.8 as a word of a field, 0.5 inside a field; the score is the mean over the words, so it lies in (0, 1]. Best first, ties by name.
+- `Store::vector_find(model, vec, limit)` and `Store::put_embeddings(model, items)`: cosine search over the embeddings of one model (score = 1 minus the cosine distance) and storage of them, on PostgreSQL with the `vector` extension. A vector has 384 finite values, not all zero. A reference to an entry or value that is not stored is refused. Changing an entry's text or a value's label drops its embedding.
+- `Store::pending_embeddings(model, limit)`: the entries and values with no embedding for the model, with the text to embed.
+- `Store::vector_available()`: whether the `embeddings` table exists, looked at when the store is opened.
+- `Store::log_miss(query)`: records a search that found nothing (trimmed, at most 512 bytes on a character boundary; a blank query records nothing). The newest `FIND_MISSES_CAP` (100,000) rows are kept.
+- `Store::catalog_summary()`: every entry with its label and cell count, and every dictionary with its number of values and its first 50 by value.
+- `Error::Unsupported`: a vector call where `vector_available()` is false (SQLite, or PostgreSQL without the extension).
+- Types at the root: `CatalogEntry`, `CatalogKind`, `CatalogSource`, `KeyValue`, `EmbedRef`, `Embedding`, `PendingEmbedding`, `Hit` (non-exhaustive), `Summary`, `SummaryEntry`, `Dictionary`, `DictionaryValue`, and `FIND_MISSES_CAP`.
+
 ## 0.4.3
 
 Additive: three methods and one type; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). No change to any receipt, hash or stored value: the same rows as calling `put_receipt` and `put_version` one by one.

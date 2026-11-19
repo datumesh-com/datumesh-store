@@ -29,13 +29,14 @@ use std::collections::BTreeMap;
 use common::*;
 use datumesh_core::Type;
 use datumesh_store::{
-    migrate, CatalogEntry, CatalogKind, CatalogSource, Embedding, EmbedRef, Error, Hit, KeyValue, FIND_MISSES_CAP,
+    migrate, CatalogEntry, CatalogKind, CatalogSource, EmbedRef, Embedding, Error, Hit, KeyValue, FIND_MISSES_CAP,
 };
 
 const OWNER: &str = "scripture.example.org/verse";
 const CLASS_NAME: &str = "scripture.example.org/passage";
 const T1: &str = "2024-03-15T16:00:00.000000Z";
 const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+#[allow(dead_code)] // (no test in this file uses the second hash; kept for the entry tests' symmetry)
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn entry(kind: CatalogKind, name: &str, label: &str, description: &str) -> CatalogEntry {
@@ -57,22 +58,25 @@ fn function(name: &str, label: &str, description: &str) -> CatalogEntry {
 }
 
 fn kv(value: &str, label: &str, aliases: &[&str]) -> KeyValue {
-    KeyValue { value: value.to_string(), label: label.to_string(), aliases: aliases.iter().map(|a| a.to_string()).collect() }
+    KeyValue {
+        value: value.to_string(),
+        label: label.to_string(),
+        aliases: aliases.iter().map(|a| a.to_string()).collect(),
+    }
 }
 
 fn table_exists(db: &TestDb, table: &str) -> bool {
-    let sql = db.pick(
-        &format!("SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '{table}'"),
-        &format!("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'"),
-    );
+    // (The format! results are bound first: `db.pick` borrows them.)
+    let pg = format!("SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = '{table}'");
+    let lite = format!("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '{table}'");
+    let sql = db.pick(&pg, &lite);
     db.int(sql) == 1
 }
 
 fn columns(db: &TestDb, table: &str) -> Vec<String> {
-    let sql = db.pick(
-        &format!("SELECT column_name::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}' ORDER BY column_name"),
-        &format!("SELECT name FROM pragma_table_info('{table}') ORDER BY name"),
-    );
+    let pg = format!("SELECT column_name::text FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '{table}' ORDER BY column_name");
+    let lite = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY name");
+    let sql = db.pick(&pg, &lite);
     db.texts(sql).into_iter().map(|r| r[0].clone()).collect()
 }
 
@@ -259,7 +263,7 @@ fn an_operator_entry_never_replaces_a_publisher_entry(b: Backend) {
     // The operator's entry for the same name is not applied; the call is not an error and
     // answers the existing row's id.
     let o = function(OWNER, "Operator label", "Operator text about verses.");
-    assert_eq!(s.upsert_catalog(&[o.clone()]).unwrap(), id);
+    assert_eq!(s.upsert_catalog(std::slice::from_ref(&o)).unwrap(), id);
     let hits = s.text_find("publisher", 10).unwrap();
     assert_eq!(names(&hits), [OWNER]);
     assert!(s.text_find("operator", 10).unwrap().is_empty());
@@ -291,8 +295,12 @@ fn world(s: &TStore) {
         entry(CatalogKind::Class, CLASS_NAME, "Passage", "A passage of a book: the verse functions share its keys."),
     ])
     .unwrap();
-    s.upsert_key_values(OWNER, "book", &[kv("Gen", "Genesis", &["1Mo"]), kv("2Chr", "2 Chronicles", &["Second Chronicles"])])
-        .unwrap();
+    s.upsert_key_values(
+        OWNER,
+        "book",
+        &[kv("Gen", "Genesis", &["1Mo"]), kv("2Chr", "2 Chronicles", &["Second Chronicles"])],
+    )
+    .unwrap();
 }
 
 fn text_find_needs_every_word_in_name_label_description_or_args(b: Backend) {
@@ -307,7 +315,7 @@ fn text_find_needs_every_word_in_name_label_description_or_args(b: Backend) {
     assert_eq!(names(&s.text_find("fx_rate daily", 10).unwrap()), ["rates.example.org/fx_rate"]); // name + description
     assert_eq!(names(&s.text_find("exchange currency", 10).unwrap()), ["rates.example.org/fx_rate"]); // label + description
     assert_eq!(names(&s.text_find("converts quantity", 10).unwrap()), ["calc.example.net/convert"]); // description + args
-    // Every word must be found.
+                                                                                                     // Every word must be found.
     assert!(s.text_find("daily zebra", 10).unwrap().is_empty());
     // Case-insensitive.
     assert_eq!(names(&s.text_find("EXCHANGE RATE", 10).unwrap()), ["rates.example.org/fx_rate"]);
@@ -337,7 +345,10 @@ fn text_find_finds_dictionary_values_by_value_label_and_alias(b: Backend) {
         assert_eq!(v.len(), 1, "{q}: {hits:?}");
         match v[0] {
             Hit::Value { owner, key, value, label, .. } => {
-                assert_eq!((owner.as_str(), key.as_str(), value.as_str(), label.as_str()), (OWNER, "book", "Gen", "Genesis"));
+                assert_eq!(
+                    (owner.as_str(), key.as_str(), value.as_str(), label.as_str()),
+                    (OWNER, "book", "Gen", "Genesis")
+                );
             }
             _ => unreachable!(),
         }
@@ -371,8 +382,9 @@ fn text_find_ranks_a_whole_match_first_and_scores_fall_in_zero_to_one(b: Backend
 fn text_find_honours_the_limit(b: Backend) {
     let db = TestDb::migrated(b);
     let s = db.store();
-    let many: Vec<CatalogEntry> =
-        (0..12).map(|i| function(&format!("x.example.org/f{i:02}"), "Common label", &format!("Common text {i}."))).collect();
+    let many: Vec<CatalogEntry> = (0..12)
+        .map(|i| function(&format!("x.example.org/f{i:02}"), "Common label", &format!("Common text {i}.")))
+        .collect();
     s.upsert_catalog(&many).unwrap();
     assert_eq!(s.text_find("common", 5).unwrap().len(), 5);
     assert_eq!(s.text_find("common", 50).unwrap().len(), 12);
@@ -393,10 +405,22 @@ fn key_values_upsert_replaces_label_and_aliases_and_keeps_counts(b: Backend) {
     let again = s.upsert_key_values(OWNER, "book", &[kv("Gen", "Genesis (renamed)", &["Bereshit"])]).unwrap();
     assert_eq!(again, vec![ids[0]], "the same row");
     assert_eq!(db.count("key_values"), 2, "Exo is kept: an upsert adds and replaces, it does not prune");
-    assert_eq!(db.int("SELECT n_cells FROM key_values WHERE value = 'Gen'"), 7, "the count is the store's, not the dictionary's");
-    assert!(s.text_find("bereshit", 10).unwrap().iter().any(|h| matches!(h, Hit::Value { value, .. } if value == "Gen")));
+    assert_eq!(
+        db.int("SELECT n_cells FROM key_values WHERE value = 'Gen'"),
+        7,
+        "the count is the store's, not the dictionary's"
+    );
+    assert!(s
+        .text_find("bereshit", 10)
+        .unwrap()
+        .iter()
+        .any(|h| matches!(h, Hit::Value { value, .. } if value == "Gen")));
     assert!(s.text_find("1Mo", 10).unwrap().is_empty(), "the old alias is gone");
-    assert!(s.text_find("renamed", 10).unwrap().iter().any(|h| matches!(h, Hit::Value { value, .. } if value == "Gen")));
+    assert!(s
+        .text_find("renamed", 10)
+        .unwrap()
+        .iter()
+        .any(|h| matches!(h, Hit::Value { value, .. } if value == "Gen")));
 }
 
 fn key_values_are_per_owner_and_key(b: Backend) {
@@ -414,17 +438,21 @@ fn key_values_are_per_owner_and_key(b: Backend) {
 fn refresh_value_counts_counts_the_cells_of_the_owners_function(b: Backend) {
     let db = TestDb::migrated(b);
     let s = slice_store(&db);
-    let h = s.put_descriptor(&stored_descriptor(&[("book", Type::String), ("chapter", Type::Number)], "verse")).unwrap();
+    let h =
+        s.put_descriptor(&stored_descriptor(&[("book", Type::String), ("chapter", Type::Number)], "verse")).unwrap();
     let mut e = function(OWNER, "Verse", "A verse.");
     e.hash = Some(h.clone());
     s.upsert_catalog(&[e]).unwrap();
-    let cell = |book: &str, ch: &str| slice_cell("verse", &h, &[("book", sc(Type::String, book)), ("chapter", sc(Type::Number, ch))]);
+    let cell = |book: &str, ch: &str| {
+        slice_cell("verse", &h, &[("book", sc(Type::String, book)), ("chapter", sc(Type::Number, ch))])
+    };
     for (book, ch) in [("John", "1"), ("John", "2"), ("John", "3"), ("Gen", "1")] {
         put_member(&s, &cell(book, ch), "1", T1, T1);
     }
     // A second version of a cell is not another cell.
     put_member(&s, &cell("Gen", "1"), "2", "2024-03-16T16:00:00.000000Z", "2024-03-16T16:00:00.000000Z");
-    s.upsert_key_values(OWNER, "book", &[kv("John", "John", &[]), kv("Gen", "Genesis", &[]), kv("Exo", "Exodus", &[])]).unwrap();
+    s.upsert_key_values(OWNER, "book", &[kv("John", "John", &[]), kv("Gen", "Genesis", &[]), kv("Exo", "Exodus", &[])])
+        .unwrap();
     // A dictionary of an owner with no entry has nothing to count.
     s.upsert_key_values("nobody.example.org/f", "book", &[kv("John", "John", &[])]).unwrap();
 
@@ -535,12 +563,20 @@ fn the_summary_lists_entries_with_labels_and_cell_counts_and_small_dictionaries(
         let cell = slice_cell("verse", &h, &[("book", sc(Type::String, &format!("{book}{i}")))]);
         put_member(&s, &cell, "1", T1, T1);
     }
-    s.upsert_key_values(OWNER, "book", &[kv("John0", "John (a)", &[]), kv("John1", "John (b)", &[]), kv("Gen2", "Genesis", &[])]).unwrap();
+    s.upsert_key_values(
+        OWNER,
+        "book",
+        &[kv("John0", "John (a)", &[]), kv("John1", "John (b)", &[]), kv("Gen2", "Genesis", &[])],
+    )
+    .unwrap();
     s.refresh_value_counts().unwrap();
 
     let sum = s.catalog_summary().unwrap();
     let find = |kind: CatalogKind, name: &str| {
-        sum.entries.iter().find(|e| e.kind == kind && e.name == name).unwrap_or_else(|| panic!("{name} in {:?}", sum.entries))
+        sum.entries
+            .iter()
+            .find(|e| e.kind == kind && e.name == name)
+            .unwrap_or_else(|| panic!("{name} in {:?}", sum.entries))
     };
     let f = find(CatalogKind::Function, OWNER);
     assert_eq!((f.label.as_str(), f.n_cells), ("Verse of a book", 3));
@@ -552,7 +588,8 @@ fn the_summary_lists_entries_with_labels_and_cell_counts_and_small_dictionaries(
     assert_eq!(sum.dictionaries.len(), 1);
     let d = &sum.dictionaries[0];
     assert_eq!((d.owner.as_str(), d.key.as_str(), d.n_values), (OWNER, "book", 3));
-    let vals: Vec<(&str, &str, i64)> = d.values.iter().map(|v| (v.value.as_str(), v.label.as_str(), v.n_cells)).collect();
+    let vals: Vec<(&str, &str, i64)> =
+        d.values.iter().map(|v| (v.value.as_str(), v.label.as_str(), v.n_cells)).collect();
     assert_eq!(vals, [("Gen2", "Genesis", 1), ("John0", "John (a)", 1), ("John1", "John (b)", 1)], "ordered by value");
 }
 

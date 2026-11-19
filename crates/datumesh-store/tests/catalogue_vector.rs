@@ -111,8 +111,9 @@ fn the_migration_is_repeatable_and_the_store_reports_vectors() {
     let Some(url) = url() else { return };
     let db = migrated(&url);
     assert!(datumesh_store::migrate::apply(&db.bare_store()).unwrap().is_empty());
-    // The live schema equals what the migrations make in a scratch database of the same server.
-    let scratch = migrated(&url);
+    // The live schema equals what the migrations make in a scratch database of the same server
+    // (`migrate::check` takes an empty one: the caller creates it, and it applies the migrations).
+    let scratch = PgDb::empty_on(&url);
     let problems = datumesh_store::migrate::check(&db.bare_store(), &scratch.bare_store()).unwrap();
     assert!(problems.is_empty(), "{problems:?}");
 }
@@ -123,7 +124,10 @@ fn vector_find_orders_by_cosine_similarity_over_entries_and_values() {
     let db = migrated(&url);
     let s = db.bare_store();
     let e = s
-        .upsert_catalog(&[entry("a.example.org/near", "Near", "Near text."), entry("a.example.org/far", "Far", "Far text.")])
+        .upsert_catalog(&[
+            entry("a.example.org/near", "Near", "Near text."),
+            entry("a.example.org/far", "Far", "Far text."),
+        ])
         .unwrap();
     let v = s.upsert_key_values(OWNER, "book", &[kv("Gen", "Genesis")]).unwrap();
     s.put_embeddings(
@@ -142,7 +146,7 @@ fn vector_find_orders_by_cosine_similarity_over_entries_and_values() {
     );
     let sc: Vec<f64> = hits.iter().map(hit_score).collect();
     assert!((sc[0] - 1.0).abs() < 1e-4, "same direction: {sc:?}");
-    assert!((sc[1] - 0.7071).abs() < 1e-3, "45 degrees: {sc:?}");
+    assert!((sc[1] - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-3, "45 degrees: {sc:?}");
     assert!(sc[2].abs() < 1e-4, "orthogonal: {sc:?}");
     // Entries carry their fields, values theirs.
     match &hits[1] {
@@ -173,7 +177,9 @@ fn put_embeddings_upserts_and_refuses_a_reference_that_is_not_there() {
     let db = migrated(&url);
     let s = db.bare_store();
     let e = s.upsert_catalog(&[entry("a.example.org/f", "F", "Text.")]).unwrap();
-    let put = |v: Vec<f32>| s.put_embeddings(MODEL, &[Embedding { ref_kind: EmbedRef::Entry, ref_id: e[0], vec: v }]).unwrap();
+    let put = |v: Vec<f32>| {
+        s.put_embeddings(MODEL, &[Embedding { ref_kind: EmbedRef::Entry, ref_id: e[0], vec: v }]).unwrap()
+    };
     put(axis(0));
     put(axis(1));
     let n: i64 = db.client().query_one("SELECT count(*) FROM embeddings", &[]).unwrap().get(0);
@@ -193,11 +199,20 @@ fn pending_embeddings_lists_what_has_none_for_the_model_and_is_idempotent() {
     let Some(url) = url() else { return };
     let db = migrated(&url);
     let s = db.bare_store();
-    let e = s.upsert_catalog(&[entry("a.example.org/f", "Label F", "Text of F."), entry("a.example.org/g", "G", "Text of G.")]).unwrap();
+    let e = s
+        .upsert_catalog(&[
+            entry("a.example.org/f", "Label F", "Text of F."),
+            entry("a.example.org/g", "G", "Text of G."),
+        ])
+        .unwrap();
     let v = s.upsert_key_values(OWNER, "book", &[kv("Gen", "Genesis"), kv("Exo", "")]).unwrap();
     let pend = |model: &str| -> Vec<PendingEmbedding> { s.pending_embeddings(model, 100).unwrap() };
     let text = |p: &[PendingEmbedding], kind: EmbedRef, id: i64| -> String {
-        p.iter().find(|x| x.ref_kind == kind && x.ref_id == id).unwrap_or_else(|| panic!("{kind:?} {id} pending")).text.clone()
+        p.iter()
+            .find(|x| x.ref_kind == kind && x.ref_id == id)
+            .unwrap_or_else(|| panic!("{kind:?} {id} pending"))
+            .text
+            .clone()
     };
     let p = pend(MODEL);
     assert_eq!(p.len(), 4);
@@ -206,7 +221,14 @@ fn pending_embeddings_lists_what_has_none_for_the_model_and_is_idempotent() {
     assert_eq!(text(&p, EmbedRef::Value, v[1]), "Exo", "the value when there is no label");
     assert_eq!(s.pending_embeddings(MODEL, 3).unwrap().len(), 3);
 
-    s.put_embeddings(MODEL, &[Embedding { ref_kind: EmbedRef::Entry, ref_id: e[0], vec: axis(0) }, Embedding { ref_kind: EmbedRef::Value, ref_id: v[0], vec: axis(1) }]).unwrap();
+    s.put_embeddings(
+        MODEL,
+        &[
+            Embedding { ref_kind: EmbedRef::Entry, ref_id: e[0], vec: axis(0) },
+            Embedding { ref_kind: EmbedRef::Value, ref_id: v[0], vec: axis(1) },
+        ],
+    )
+    .unwrap();
     assert_eq!(pend(MODEL).len(), 2);
     assert_eq!(pend("another-model").len(), 4, "per model");
     // The same text upserted again keeps its embedding.

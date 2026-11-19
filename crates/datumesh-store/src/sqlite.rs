@@ -8,10 +8,18 @@ use std::time::{Duration, Instant};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
+use crate::catalogue::{
+    aliases_json, args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, entry_fields,
+    entry_from_columns, invalid, miss_text, parse_aliases, rank, Words, SUMMARY_VALUES,
+};
 use crate::error::{Db, Error, Result};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
-use crate::{not_canonical_class, Binding, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version};
+use crate::{
+    not_canonical_class, Binding, CatalogEntry, CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding, Hit,
+    KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, Version,
+    FIND_MISSES_CAP,
+};
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -1280,6 +1288,210 @@ impl Store for SqliteStore {
             c.prepare_cached(L::HasBindingsUnder.sql()).db()?.query_row([&prefix], |r| r.get(0)).db()
         })
     }
+
+    fn upsert_catalog(&self, entries: &[CatalogEntry]) -> Result<Vec<i64>> {
+        for e in entries {
+            check_catalog_entry(e)?;
+        }
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.write("upsert_catalog", |c| {
+            let mut ids = Vec::with_capacity(entries.len());
+            for e in entries {
+                let args = args_json(&e.args);
+                let examples = canonical_examples(&e.examples)?;
+                let updated: Option<i64> = c
+                    .prepare_cached(
+                        "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                         ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
+                             description = excluded.description, args = excluded.args, examples = excluded.examples,
+                             source = excluded.source, signed_by = excluded.signed_by, updated_at = excluded.updated_at
+                         WHERE catalog_entries.source = 'operator' OR excluded.source = 'publisher'
+                         RETURNING id",
+                    )
+                    .db()?
+                    .query_row(
+                        rusqlite::params![e.kind.as_str(), e.name, e.hash, e.label, e.description, args, examples, e.source.as_str(), e.signed_by],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .db()?;
+                let id = match updated {
+                    Some(id) => id,
+                    // An operator's entry over a publisher's: kept as it is.
+                    None => c
+                        .prepare_cached("SELECT id FROM catalog_entries WHERE kind = ?1 AND name = ?2")
+                        .db()?
+                        .query_row([e.kind.as_str(), e.name.as_str()], |r| r.get(0))
+                        .db()?,
+                };
+                ids.push(id);
+            }
+            Ok(ids)
+        })
+    }
+
+    fn upsert_key_values(&self, owner: &str, key: &str, values: &[KeyValue]) -> Result<Vec<i64>> {
+        check_key_values(owner, key, values)?;
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.write("upsert_key_values", |c| {
+            let mut ids = Vec::with_capacity(values.len());
+            for v in values {
+                let aliases = aliases_json(&v.aliases);
+                let id: i64 = c
+                    .prepare_cached(
+                        "INSERT INTO key_values (owner, key, value, label, aliases) VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT (owner, key, value) DO UPDATE SET label = excluded.label, aliases = excluded.aliases
+                         RETURNING id",
+                    )
+                    .db()?
+                    .query_row(rusqlite::params![owner, key, v.value, v.label, aliases], |r| r.get(0))
+                    .db()?;
+                ids.push(id);
+            }
+            Ok(ids)
+        })
+    }
+
+    fn refresh_value_counts(&self) -> Result<u64> {
+        self.write("refresh_value_counts", |c| {
+            let n = c
+                .prepare_cached(
+                    "UPDATE key_values SET n_cells = COALESCE((
+                         SELECT count(*) FROM catalog_entries e JOIN cell_args a
+                           ON a.fn_hash = e.hash AND a.name = key_values.key AND a.value = key_values.value
+                          WHERE e.kind = 'function' AND e.name = key_values.owner), 0)",
+                )
+                .db()?
+                .execute([])
+                .db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn text_find(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        let Some(words) = Words::new(query) else { return Ok(Vec::new()) };
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let entry_where = like_where_sqlite(&words, &["name", "label", "description", "args"]);
+        let value_where = like_where_sqlite(&words, &["value", "label", "aliases"]);
+        self.run("text_find", |c| {
+            let mut hits = Vec::new();
+            let sql = format!(
+                "SELECT id, kind, name, hash, label, description, args, examples, source, signed_by FROM catalog_entries WHERE 1 = 1{}",
+                entry_where.0
+            );
+            let rows: Vec<EntryRow> = {
+                let mut st = c.prepare(&sql).db()?;
+                let mapped = st.query_map(rusqlite::params_from_iter(entry_where.1.iter()), entry_columns).db()?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+            };
+            for (id, kind, name, hash, label, description, args, examples, source, signed_by) in rows {
+                let entry = entry_from_columns(&kind, name, hash, label, description, &args, &examples, &source, signed_by)?;
+                let score = words.score(&entry_fields(&entry));
+                if let Some(score) = score {
+                    hits.push(Hit::Entry { id, entry, score });
+                }
+            }
+            let sql = format!("SELECT id, owner, key, value, label, aliases FROM key_values WHERE 1 = 1{}", value_where.0);
+            let rows: Vec<ValueRow> = {
+                let mut st = c.prepare(&sql).db()?;
+                let mapped = st.query_map(rusqlite::params_from_iter(value_where.1.iter()), value_columns_of).db()?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+            };
+            for (id, owner, key, value, label, aliases_text) in rows {
+                let aliases = parse_aliases(&aliases_text)?;
+                let score = {
+                    let mut fields: Vec<&str> = vec![&value, &label];
+                    fields.extend(aliases.iter().map(String::as_str));
+                    words.score(&fields)
+                };
+                if let Some(score) = score {
+                    hits.push(Hit::Value { id, owner, key, value, label, aliases, score });
+                }
+            }
+            Ok(rank(hits, limit))
+        })
+    }
+
+    fn vector_find(&self, _model: &str, _vec: &[f32], _limit: usize) -> Result<Vec<Hit>> {
+        Err(unsupported_vectors())
+    }
+
+    fn put_embeddings(&self, _model: &str, _items: &[Embedding]) -> Result<()> {
+        Err(unsupported_vectors())
+    }
+
+    fn pending_embeddings(&self, _model: &str, _limit: usize) -> Result<Vec<PendingEmbedding>> {
+        Ok(Vec::new())
+    }
+
+    fn vector_available(&self) -> bool {
+        false
+    }
+
+    fn log_miss(&self, query: &str) -> Result<()> {
+        let Some(q) = miss_text(query) else { return Ok(()) };
+        self.write("log_miss", |c| {
+            c.prepare_cached("INSERT INTO find_misses (query) VALUES (?1)").db()?.execute([q]).db()?;
+            // Keep the newest FIND_MISSES_CAP rows: prune the oldest beyond that.
+            c.prepare_cached(
+                "DELETE FROM find_misses WHERE rowid IN (SELECT rowid FROM find_misses ORDER BY at
+                     LIMIT max((SELECT count(*) FROM find_misses) - ?1, 0))",
+            )
+            .db()?
+            .execute([as_i64(FIND_MISSES_CAP)])
+            .db()?;
+            Ok(())
+        })
+    }
+
+    fn catalog_summary(&self) -> Result<Summary> {
+        self.run("catalog_summary", |c| {
+            let rows: Vec<(String, String, String, i64)> = {
+                let mut st = c
+                    .prepare(
+                        "SELECT kind, name, label, CASE WHEN kind = 'function'
+                             THEN (SELECT count(*) FROM cells x WHERE x.fn_hash = e.hash) ELSE 0 END
+                           FROM catalog_entries e ORDER BY kind, name",
+                    )
+                    .db()?;
+                let mapped = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).db()?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+            };
+            let mut entries = Vec::with_capacity(rows.len());
+            for (kind, name, label, n_cells) in rows {
+                let kind = CatalogKind::parse(&kind).ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?;
+                entries.push(SummaryEntry { kind, name, label, n_cells });
+            }
+            let groups: Vec<(String, String, i64)> = {
+                let mut st = c.prepare("SELECT owner, key, count(*) FROM key_values GROUP BY owner, key ORDER BY owner, key").db()?;
+                let mapped = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).db()?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+            };
+            let mut dictionaries = Vec::with_capacity(groups.len());
+            for (owner, key, n_values) in groups {
+                let values: Vec<DictionaryValue> = {
+                    let mut st = c
+                        .prepare("SELECT value, label, n_cells FROM key_values WHERE owner = ?1 AND key = ?2 ORDER BY value LIMIT ?3")
+                        .db()?;
+                    let mapped = st
+                        .query_map(rusqlite::params![owner, key, as_i64(SUMMARY_VALUES)], |r| {
+                            Ok(DictionaryValue { value: r.get(0)?, label: r.get(1)?, n_cells: r.get(2)? })
+                        })
+                        .db()?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+                };
+                dictionaries.push(Dictionary { owner, key, n_values, values });
+            }
+            Ok(Summary { entries, dictionaries })
+        })
+    }
 }
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,
@@ -1460,6 +1672,45 @@ fn changed_after(p: &Pattern, c: &Connection, asof: &str) -> Result<bool> {
     bind(&mut st, &params(p, asof, d))?;
     let mut rows = st.raw_query();
     Ok(rows.next().db()?.is_some())
+}
+
+/// The columns of an entry row, as `entry_from_columns` takes them, with the id first.
+type EntryRow = (i64, String, String, Option<String>, String, String, String, String, String, Option<String>);
+
+fn entry_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+}
+
+/// A dictionary value's row: id, owner, key, value, label, aliases (JSON).
+type ValueRow = (i64, String, String, String, String, String);
+
+fn value_columns_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueRow> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+}
+
+/// The `AND (...)` prefilter of a text search over `fields` (SQL expressions): one clause per
+/// word the SQL can match exactly (ASCII, no `"`, `\` or control characters: SQLite's LIKE
+/// folds ASCII only, and JSON text escapes those), with its parameters numbered from ?1.
+fn like_where_sqlite(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
+    let mut sql = String::new();
+    let mut params = Vec::new();
+    for i in 0..words.len() {
+        if let Some(p) = words.pattern(i, sqlite_safe) {
+            params.push(p);
+            let n = params.len();
+            let ors: Vec<String> = fields.iter().map(|f| format!("{f} LIKE ?{n} ESCAPE '!'")).collect();
+            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+        }
+    }
+    (sql, params)
+}
+
+fn sqlite_safe(word: &str) -> bool {
+    word.is_ascii() && !word.chars().any(|c| c == '"' || c == '\\' || c.is_control())
+}
+
+fn unsupported_vectors() -> Error {
+    Error::Unsupported("vectors need PostgreSQL with the vector extension; SQLite has none".into())
 }
 
 #[cfg(test)]

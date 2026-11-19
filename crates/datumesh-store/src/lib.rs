@@ -106,6 +106,7 @@ use std::borrow::Cow;
 pub use datumesh_core::Resolver;
 use datumesh_core::{Cell, Scalar, Slice};
 
+mod catalogue;
 mod error;
 pub mod migrate;
 mod pg;
@@ -119,6 +120,10 @@ mod sqlite;
 mod sqlite_sql;
 mod tls;
 
+pub use catalogue::{
+    CatalogEntry, CatalogKind, CatalogSource, Dictionary, DictionaryValue, EmbedRef, Embedding, Hit, KeyValue,
+    PendingEmbedding, Summary, SummaryEntry, FIND_MISSES_CAP,
+};
 pub use error::{DatabaseError, Error, Result};
 pub use pg::PgStore;
 pub use pool::PoolOptions;
@@ -287,7 +292,7 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 /// use std::borrow::Cow;
 /// use datumesh_core::{Cell, Scalar};
 /// use datumesh_core::Slice;
-/// use datumesh_store::{Binding, ClassBinding, Namespace, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Version};
+/// use datumesh_store::{Binding, CatalogEntry, ClassBinding, Embedding, Hit, KeyValue, Namespace, PendingEmbedding, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Summary, Version};
 ///
 /// struct Wrapper(PgStore);
 /// impl Resolver for Wrapper {
@@ -334,6 +339,16 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 ///     fn slice_changed_after(&self, s: &Slice, a: &str) -> Result<bool> { self.0.slice_changed_after(s, a) }
 ///     fn computed_cells(&self, s: &Slice, a: &str, n: usize) -> Result<Vec<Cell>> { self.0.computed_cells(s, a, n) }
 ///     fn has_bindings_under(&self, n: &str) -> Result<bool> { self.0.has_bindings_under(n) }
+///     fn upsert_catalog(&self, e: &[CatalogEntry]) -> Result<Vec<i64>> { self.0.upsert_catalog(e) }
+///     fn upsert_key_values(&self, o: &str, k: &str, v: &[KeyValue]) -> Result<Vec<i64>> { self.0.upsert_key_values(o, k, v) }
+///     fn refresh_value_counts(&self) -> Result<u64> { self.0.refresh_value_counts() }
+///     fn text_find(&self, q: &str, l: usize) -> Result<Vec<Hit>> { self.0.text_find(q, l) }
+///     fn vector_find(&self, m: &str, v: &[f32], l: usize) -> Result<Vec<Hit>> { self.0.vector_find(m, v, l) }
+///     fn put_embeddings(&self, m: &str, i: &[Embedding]) -> Result<()> { self.0.put_embeddings(m, i) }
+///     fn pending_embeddings(&self, m: &str, l: usize) -> Result<Vec<PendingEmbedding>> { self.0.pending_embeddings(m, l) }
+///     fn vector_available(&self) -> bool { self.0.vector_available() }
+///     fn log_miss(&self, q: &str) -> Result<()> { self.0.log_miss(q) }
+///     fn catalog_summary(&self) -> Result<Summary> { self.0.catalog_summary() }
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
@@ -591,6 +606,56 @@ pub trait Store: Resolver + sealed::Sealed {
     /// Whether any name binding or class binding has a name starting with `namespace` and `/`
     /// (so `"a.example/n"` is not a namespace of `"a.example/ns/f"`). Since 0.4.2.
     fn has_bindings_under(&self, namespace: &str) -> Result<bool>;
+
+    /// Inserts or replaces catalogue entries, keyed by (kind, name); returns each entry's id,
+    /// in order. All or nothing: every entry is checked first (the name by the core's rules,
+    /// `hash` as 64 hex digits, the bounds of [`CatalogEntry`]) and refused with
+    /// [`Error::Invalid`] before anything is written. An operator's entry never replaces a
+    /// publisher's: that entry is kept, and the call still answers its id. A publisher's
+    /// replaces either. Replacing an entry's label or description drops its embedding.
+    /// Since 0.5.0.
+    fn upsert_catalog(&self, entries: &[CatalogEntry]) -> Result<Vec<i64>>;
+    /// Inserts or replaces the values of `key` of `owner` (a function or class name): each
+    /// value's label and aliases are replaced, and its `n_cells` is kept. Values not in
+    /// `values` stay (an upsert adds and replaces, it does not prune). Returns each value's
+    /// id, in order. Replacing a value's label drops its embedding. Since 0.5.0.
+    fn upsert_key_values(&self, owner: &str, key: &str, values: &[KeyValue]) -> Result<Vec<i64>>;
+    /// Sets every dictionary value's `n_cells` to the number of cells of the function named
+    /// by its owner that have that value for the key; returns the number of rows refreshed
+    /// (every value, changed or not). Since 0.5.0.
+    fn refresh_value_counts(&self) -> Result<u64>;
+    /// The entries and dictionary values that match every word of `query` (split on white
+    /// space; a word matches case-insensitively, literally, in any field of the entry or
+    /// value, and scores 1.0 as a whole field, 0.8 as one of a field's words, 0.5 inside a
+    /// field; a score is the mean over the words, in (0, 1]). Best first, ties by name; at
+    /// most `limit`. A blank query finds nothing. Since 0.5.0.
+    fn text_find(&self, query: &str, limit: usize) -> Result<Vec<Hit>>;
+    /// The entries and values nearest to `vec` by cosine similarity, among those with an
+    /// embedding for `model`: each score is 1 minus the cosine distance (1.0 for the same
+    /// direction), best first, at most `limit`. `vec` has 384 finite values, not all zero
+    /// ([`Error::Invalid`] otherwise). [`Error::Unsupported`] where
+    /// [`vector_available`](Store::vector_available) is false. Since 0.5.0.
+    fn vector_find(&self, model: &str, vec: &[f32], limit: usize) -> Result<Vec<Hit>>;
+    /// Stores embeddings for `model`, one per (kind, id, model): an existing one is replaced.
+    /// All or nothing; a reference to an entry or value that is not stored is
+    /// [`Error::NotFound`], and a vector is checked as [`vector_find`](Store::vector_find)
+    /// checks it. [`Error::Unsupported`] where `vector_available` is false. Since 0.5.0.
+    fn put_embeddings(&self, model: &str, items: &[Embedding]) -> Result<()>;
+    /// Up to `limit` entries and values with no embedding for `model`, with the text to embed
+    /// (see [`PendingEmbedding`]). Empty where `vector_available` is false (nothing can be
+    /// stored there). Since 0.5.0.
+    fn pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingEmbedding>>;
+    /// Whether vectors can be stored and searched by this store: PostgreSQL with the `vector`
+    /// extension, where the migration made the `embeddings` table. Looked at when the store
+    /// is opened (migrate before opening, as the schema is then in place). Since 0.5.0.
+    fn vector_available(&self) -> bool;
+    /// Records a find that found nothing: the query's text (trimmed, at most 512 bytes; a
+    /// blank query records nothing) and the time. The store keeps at most
+    /// [`FIND_MISSES_CAP`] rows, pruning the oldest. Since 0.5.0.
+    fn log_miss(&self, query: &str) -> Result<()>;
+    /// The catalogue as an operator reads it: every entry with its label and its cell count,
+    /// and every dictionary with its first 50 values (by value) and how many it has. Since 0.5.0.
+    fn catalog_summary(&self) -> Result<Summary>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

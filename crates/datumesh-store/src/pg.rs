@@ -3,13 +3,19 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+use crate::catalogue::{
+    args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, check_model, entry_fields,
+    entry_from_columns, entry_text, invalid, miss_text, rank, value_text, vector_literal, Words, SUMMARY_VALUES,
+};
 use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
 use crate::{
-    not_canonical_class, Binding, CellWrite, ClassBinding, Namespace, SliceMember, SliceValue, Store, Version,
+    not_canonical_class, Binding, CatalogEntry, CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue,
+    EmbedRef, Embedding, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary,
+    SummaryEntry, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -26,6 +32,9 @@ use datumesh_core::{
 /// `tracing` (target `datumesh_store`, level `error`).
 pub struct PgStore {
     pool: Pool,
+    /// Whether the `embeddings` table exists (the `vector` extension was available when the
+    /// schema was migrated), looked at when the store was opened.
+    vectors: bool,
 }
 
 impl std::fmt::Debug for PgStore {
@@ -62,9 +71,22 @@ impl PgStore {
 
     /// A store on `pool`, after opening one connection.
     pub(crate) fn from_pool(pool: Pool) -> Result<PgStore> {
-        let store = PgStore { pool };
-        drop(store.pool.get()?);
+        let mut store = PgStore { pool, vectors: false };
+        let vectors: bool = {
+            let mut c = store.pool.get()?;
+            c.client.query_one("SELECT to_regclass('embeddings') IS NOT NULL", &[]).db()?.try_get(0).db()?
+        };
+        store.vectors = vectors;
         Ok(store)
+    }
+
+    /// `Ok` where vectors are stored and searched; otherwise [`Error::Unsupported`].
+    fn vectors_or_unsupported(&self) -> Result<()> {
+        if self.vectors {
+            Ok(())
+        } else {
+            Err(Error::Unsupported("vectors need PostgreSQL with the vector extension (migration 9)".into()))
+        }
     }
 
     /// A pooled connection, held until dropped (migrations hold one throughout).
@@ -1264,6 +1286,343 @@ impl Store for PgStore {
             })
         })
     }
+
+    fn upsert_catalog(&self, entries: &[CatalogEntry]) -> Result<Vec<i64>> {
+        for e in entries {
+            check_catalog_entry(e)?;
+        }
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run("upsert_catalog", |c| {
+            let mut t = c.client.transaction().db()?;
+            let mut ids = Vec::with_capacity(entries.len());
+            for e in entries {
+                let kind = e.kind.as_str();
+                let args = args_json(&e.args);
+                let examples = canonical_examples(&e.examples)?;
+                let before = t
+                    .query_opt("SELECT label, description FROM catalog_entries WHERE kind = $1 AND name = $2", &[&kind, &e.name])
+                    .db()?
+                    .map(|r| -> Result<(String, String)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) })
+                    .transpose()?;
+                let updated = t
+                    .query_opt(
+                        "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                         ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
+                             description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
+                             source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, updated_at = now()
+                         WHERE catalog_entries.source = 'operator' OR EXCLUDED.source = 'publisher'
+                         RETURNING id",
+                        &[&kind, &e.name, &e.hash, &e.label, &e.description, &args, &examples, &e.source.as_str(), &e.signed_by],
+                    )
+                    .db()?;
+                let id: i64 = match updated {
+                    Some(row) => {
+                        let id: i64 = row.try_get(0).db()?;
+                        // A new text drops the embedding (the old one is of other words).
+                        if let Some((label, description)) = before {
+                            if self.vectors && entry_text(&label, &description) != entry_text(&e.label, &e.description) {
+                                t.execute("DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id = $1", &[&id]).db()?;
+                            }
+                        }
+                        id
+                    }
+                    // An operator's entry over a publisher's: kept as it is.
+                    None => t
+                        .query_one("SELECT id FROM catalog_entries WHERE kind = $1 AND name = $2", &[&kind, &e.name])
+                        .db()?
+                        .try_get(0)
+                        .db()?,
+                };
+                ids.push(id);
+            }
+            t.commit().db()?;
+            Ok(ids)
+        })
+    }
+
+    fn upsert_key_values(&self, owner: &str, key: &str, values: &[KeyValue]) -> Result<Vec<i64>> {
+        check_key_values(owner, key, values)?;
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.run("upsert_key_values", |c| {
+            let mut t = c.client.transaction().db()?;
+            let mut ids = Vec::with_capacity(values.len());
+            for v in values {
+                let before = t
+                    .query_opt("SELECT label, value FROM key_values WHERE owner = $1 AND key = $2 AND value = $3", &[&owner, &key, &v.value])
+                    .db()?
+                    .map(|r| -> Result<(String, String)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) })
+                    .transpose()?;
+                let id: i64 = t
+                    .query_one(
+                        "INSERT INTO key_values (owner, key, value, label, aliases) VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (owner, key, value) DO UPDATE SET label = EXCLUDED.label, aliases = EXCLUDED.aliases
+                         RETURNING id",
+                        &[&owner, &key, &v.value, &v.label, &v.aliases],
+                    )
+                    .db()?
+                    .try_get(0)
+                    .db()?;
+                if let Some((label, value)) = before {
+                    if self.vectors && value_text(&label, &value) != value_text(&v.label, &v.value) {
+                        t.execute("DELETE FROM embeddings WHERE ref_kind = 'value' AND ref_id = $1", &[&id]).db()?;
+                    }
+                }
+                ids.push(id);
+            }
+            t.commit().db()?;
+            Ok(ids)
+        })
+    }
+
+    fn refresh_value_counts(&self) -> Result<u64> {
+        self.run("refresh_value_counts", |c| {
+            c.client
+                .execute(
+                    "WITH counts AS (
+                         SELECT e.name AS owner, a.name AS key, a.value AS value, count(*) AS n
+                           FROM catalog_entries e JOIN cell_args a ON a.fn_hash = e.hash
+                          WHERE e.kind = 'function'
+                          GROUP BY e.name, a.name, a.value)
+                     UPDATE key_values kv SET n_cells = x.n
+                       FROM (SELECT v.id, COALESCE(c.n, 0) AS n
+                               FROM key_values v
+                               LEFT JOIN counts c ON c.owner = v.owner AND c.key = v.key AND c.value = v.value) x
+                      WHERE x.id = kv.id",
+                    &[],
+                )
+                .db()
+        })
+    }
+
+    fn text_find(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
+        let Some(words) = Words::new(query) else { return Ok(Vec::new()) };
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let entry_where = like_where(&words, &["name", "label", "description", "args"]);
+        let value_where = like_where(&words, &["value", "label", "array_to_string(aliases, ' ')"]);
+        self.run("text_find", |c| {
+            let mut hits = Vec::new();
+            let refs = as_refs(&entry_where.1);
+            for r in c.client.query(&format!("SELECT id, kind, name, hash, label, description, args, examples, source, signed_by FROM catalog_entries WHERE TRUE{}", entry_where.0), &refs).db()? {
+                let entry = entry_from_columns(
+                    &r.try_get::<_, String>(1).db()?,
+                    r.try_get(2).db()?,
+                    r.try_get(3).db()?,
+                    r.try_get(4).db()?,
+                    r.try_get(5).db()?,
+                    &r.try_get::<_, String>(6).db()?,
+                    &r.try_get::<_, String>(7).db()?,
+                    &r.try_get::<_, String>(8).db()?,
+                    r.try_get(9).db()?,
+                )?;
+                let score = words.score(&entry_fields(&entry));
+                if let Some(score) = score {
+                    hits.push(Hit::Entry { id: r.try_get(0).db()?, entry, score });
+                }
+            }
+            let refs = as_refs(&value_where.1);
+            for r in c.client.query(&format!("SELECT id, owner, key, value, label, aliases FROM key_values WHERE TRUE{}", value_where.0), &refs).db()? {
+                let aliases: Vec<String> = r.try_get(5).db()?;
+                let (value, label): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
+                let score = {
+                    let mut fields: Vec<&str> = vec![&value, &label];
+                    fields.extend(aliases.iter().map(String::as_str));
+                    words.score(&fields)
+                };
+                if let Some(score) = score {
+                    hits.push(Hit::Value { id: r.try_get(0).db()?, owner: r.try_get(1).db()?, key: r.try_get(2).db()?, value, label, aliases, score });
+                }
+            }
+            Ok(rank(hits, limit))
+        })
+    }
+
+    fn vector_find(&self, model: &str, vec: &[f32], limit: usize) -> Result<Vec<Hit>> {
+        self.vectors_or_unsupported()?;
+        let lit = vector_literal(vec)?;
+        check_model(model)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.run("vector_find", |c| {
+            let near = c
+                .client
+                .query(
+                    "SELECT ref_kind, ref_id, (vec <=> $2::text::vector)::float8 FROM embeddings
+                      WHERE model = $1 ORDER BY vec <=> $2::text::vector LIMIT $3",
+                    &[&model, &lit, &as_i64(limit)],
+                )
+                .db()?;
+            let mut order = Vec::with_capacity(near.len());
+            for r in &near {
+                order.push((r.try_get::<_, String>(0).db()?, r.try_get::<_, i64>(1).db()?, r.try_get::<_, f64>(2).db()?));
+            }
+            let entry_ids: Vec<i64> = order.iter().filter(|o| o.0 == "entry").map(|o| o.1).collect();
+            let value_ids: Vec<i64> = order.iter().filter(|o| o.0 == "value").map(|o| o.1).collect();
+            let mut entries = HashMap::new();
+            for r in c.client.query("SELECT id, kind, name, hash, label, description, args, examples, source, signed_by FROM catalog_entries WHERE id = ANY($1)", &[&entry_ids]).db()? {
+                let entry = entry_from_columns(
+                    &r.try_get::<_, String>(1).db()?,
+                    r.try_get(2).db()?,
+                    r.try_get(3).db()?,
+                    r.try_get(4).db()?,
+                    r.try_get(5).db()?,
+                    &r.try_get::<_, String>(6).db()?,
+                    &r.try_get::<_, String>(7).db()?,
+                    &r.try_get::<_, String>(8).db()?,
+                    r.try_get(9).db()?,
+                )?;
+                entries.insert(r.try_get::<_, i64>(0).db()?, entry);
+            }
+            let mut values = HashMap::new();
+            for r in c.client.query("SELECT id, owner, key, value, label, aliases FROM key_values WHERE id = ANY($1)", &[&value_ids]).db()? {
+                values.insert(
+                    r.try_get::<_, i64>(0).db()?,
+                    (r.try_get::<_, String>(1).db()?, r.try_get::<_, String>(2).db()?, r.try_get::<_, String>(3).db()?, r.try_get::<_, String>(4).db()?, r.try_get::<_, Vec<String>>(5).db()?),
+                );
+            }
+            let mut hits = Vec::with_capacity(order.len());
+            for (kind, id, dist) in order {
+                let score = 1.0 - dist;
+                if kind == "entry" {
+                    if let Some(entry) = entries.remove(&id) {
+                        hits.push(Hit::Entry { id, entry, score });
+                    }
+                } else if let Some((owner, key, value, label, aliases)) = values.remove(&id) {
+                    hits.push(Hit::Value { id, owner, key, value, label, aliases, score });
+                }
+            }
+            Ok(hits)
+        })
+    }
+
+    fn put_embeddings(&self, model: &str, items: &[Embedding]) -> Result<()> {
+        self.vectors_or_unsupported()?;
+        check_model(model)?;
+        let lits: Vec<String> = items.iter().map(|i| vector_literal(&i.vec)).collect::<Result<_>>()?;
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.run("put_embeddings", |c| {
+            let mut t = c.client.transaction().db()?;
+            for (item, lit) in items.iter().zip(&lits) {
+                let (exists, what) = match item.ref_kind {
+                    EmbedRef::Entry => ("SELECT 1 FROM catalog_entries WHERE id = $1", "catalog entry"),
+                    EmbedRef::Value => ("SELECT 1 FROM key_values WHERE id = $1", "dictionary value"),
+                };
+                if t.query_opt(exists, &[&item.ref_id]).db()?.is_none() {
+                    return Err(Error::NotFound { what, key: item.ref_id.to_string() });
+                }
+                t.execute(
+                    "INSERT INTO embeddings (ref_kind, ref_id, model, vec) VALUES ($1, $2, $3, $4::text::vector)
+                     ON CONFLICT (ref_kind, ref_id, model) DO UPDATE SET vec = EXCLUDED.vec",
+                    &[&item.ref_kind.as_str(), &item.ref_id, &model, lit],
+                )
+                .db()?;
+            }
+            t.commit().db()?;
+            Ok(())
+        })
+    }
+
+    fn pending_embeddings(&self, model: &str, limit: usize) -> Result<Vec<PendingEmbedding>> {
+        if !self.vectors {
+            return Ok(Vec::new());
+        }
+        check_model(model)?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        self.run("pending_embeddings", |c| {
+            let rows = c
+                .client
+                .query(
+                    "SELECT k, id, t FROM (
+                         SELECT 'entry' AS k, e.id AS id,
+                                CASE WHEN e.label = '' THEN e.description ELSE e.label || '. ' || e.description END AS t
+                           FROM catalog_entries e
+                          WHERE NOT EXISTS (SELECT 1 FROM embeddings m WHERE m.ref_kind = 'entry' AND m.ref_id = e.id AND m.model = $1)
+                         UNION ALL
+                         SELECT 'value', v.id, CASE WHEN v.label = '' THEN v.value ELSE v.label END
+                           FROM key_values v
+                          WHERE NOT EXISTS (SELECT 1 FROM embeddings m WHERE m.ref_kind = 'value' AND m.ref_id = v.id AND m.model = $1)
+                     ) x
+                     ORDER BY CASE k WHEN 'entry' THEN 0 ELSE 1 END, id LIMIT $2",
+                    &[&model, &as_i64(limit)],
+                )
+                .db()?;
+            rows.iter()
+                .map(|r| {
+                    let ref_kind = match r.try_get::<_, String>(0).db()?.as_str() {
+                        "entry" => EmbedRef::Entry,
+                        _ => EmbedRef::Value,
+                    };
+                    Ok(PendingEmbedding { ref_kind, ref_id: r.try_get(1).db()?, text: r.try_get(2).db()? })
+                })
+                .collect()
+        })
+    }
+
+    fn vector_available(&self) -> bool {
+        self.vectors
+    }
+
+    fn log_miss(&self, query: &str) -> Result<()> {
+        let Some(q) = miss_text(query) else { return Ok(()) };
+        self.run("log_miss", |c| {
+            let mut t = c.client.transaction().db()?;
+            t.execute("INSERT INTO find_misses (query) VALUES ($1)", &[&q]).db()?;
+            // Keep the newest FIND_MISSES_CAP rows: prune the oldest beyond that.
+            t.execute(
+                "DELETE FROM find_misses WHERE ctid IN (SELECT ctid FROM find_misses ORDER BY at
+                     LIMIT GREATEST((SELECT count(*) FROM find_misses) - $1, 0))",
+                &[&as_i64(FIND_MISSES_CAP)],
+            )
+            .db()?;
+            t.commit().db()?;
+            Ok(())
+        })
+    }
+
+    fn catalog_summary(&self) -> Result<Summary> {
+        self.run("catalog_summary", |c| {
+            let mut entries = Vec::new();
+            for r in c.client.query(
+                "SELECT e.kind, e.name, e.label,
+                        CASE WHEN e.kind = 'function' THEN (SELECT count(*) FROM cells x WHERE x.fn_hash = e.hash) ELSE 0 END
+                   FROM catalog_entries e ORDER BY e.kind COLLATE \"C\", e.name COLLATE \"C\"",
+                &[],
+            ).db()? {
+                let kind = CatalogKind::parse(&r.try_get::<_, String>(0).db()?)
+                    .ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?;
+                entries.push(SummaryEntry { kind, name: r.try_get(1).db()?, label: r.try_get(2).db()?, n_cells: r.try_get(3).db()? });
+            }
+            let mut dictionaries = Vec::new();
+            let groups = c.client.query(
+                "SELECT owner, key, count(*) FROM key_values GROUP BY owner, key ORDER BY owner COLLATE \"C\", key COLLATE \"C\"",
+                &[],
+            ).db()?;
+            for g in groups {
+                let (owner, key): (String, String) = (g.try_get(0).db()?, g.try_get(1).db()?);
+                let mut values = Vec::new();
+                for r in c.client.query(
+                    "SELECT value, label, n_cells FROM key_values WHERE owner = $1 AND key = $2
+                      ORDER BY value COLLATE \"C\" LIMIT $3",
+                    &[&owner, &key, &as_i64(SUMMARY_VALUES)],
+                ).db()? {
+                    values.push(DictionaryValue { value: r.try_get(0).db()?, label: r.try_get(1).db()?, n_cells: r.try_get(2).db()? });
+                }
+                dictionaries.push(Dictionary { owner, key, n_values: g.try_get(2).db()?, values });
+            }
+            Ok(Summary { entries, dictionaries })
+        })
+    }
 }
 
 impl Pattern {
@@ -1446,4 +1805,32 @@ impl Pattern {
         out.sort_by(|(a, ma), (b, mb)| cmp_keys(a, b).then_with(|| cell_of(ma).cmp(cell_of(mb))));
         Ok(out.into_iter().map(|(_, m)| m).collect())
     }
+}
+
+/// Whether a word can be matched by the SQL prefilter exactly: JSON text escapes `"` and `\`
+/// and control characters, and a word with them is matched in Rust only.
+fn pg_safe(word: &str) -> bool {
+    !word.chars().any(|c| c == '"' || c == '\\' || c.is_control())
+}
+
+/// The `AND (...)` prefilter of a text search over `fields` (SQL expressions of text): one
+/// clause per word the SQL can match, each word a LIKE pattern over lower-cased fields, and
+/// the parameters they take (numbered from $1).
+fn like_where(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
+    let mut sql = String::new();
+    let mut params = Vec::new();
+    for i in 0..words.len() {
+        if let Some(p) = words.pattern(i, pg_safe) {
+            params.push(p);
+            let n = params.len();
+            let ors: Vec<String> = fields.iter().map(|f| format!("lower({f}) LIKE ${n} ESCAPE '!'")).collect();
+            sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
+        }
+    }
+    (sql, params)
+}
+
+/// Parameters for a query built at run time.
+fn as_refs(params: &[String]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
+    params.iter().map(|p| p as &(dyn postgres::types::ToSql + Sync)).collect()
 }

@@ -306,7 +306,10 @@ fn the_class_migration_is_additive_and_keeps_function_bindings(b: Backend) {
         Backend::Pg => 3,
         Backend::Sqlite => 2,
     };
-    assert!(all >= old.len() + extra, "classes (later migrations may follow), the audit column (and on PostgreSQL the cell index), on each backend");
+    assert!(
+        all >= old.len() + extra,
+        "classes (later migrations may follow), the audit column (and on PostgreSQL the cell index), on each backend"
+    );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) STRICT",
