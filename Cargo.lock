@@ -168,12 +168,13 @@ dependencies = [
 
 [[package]]
 name = "datumesh-store"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "datumesh-core",
  "postgres",
  "rusqlite",
  "rustls",
+ "tokio",
  "tokio-postgres-rustls",
  "tracing",
  "webpki-roots",

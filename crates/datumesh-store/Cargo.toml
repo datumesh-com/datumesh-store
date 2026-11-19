@@ -31,3 +31,5 @@ sqlite = ["dep:rusqlite"]
 [dev-dependencies]
 datumesh-core = { workspace = true, features = ["testkit", "sign"] }
 rusqlite.workspace = true
+# The runtime of the PgStore drop test (a PgStore dropped on a runtime thread).
+tokio = { version = "1", features = ["rt"] }
