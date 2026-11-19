@@ -16,9 +16,9 @@ use crate::error::{Db, Error, Result};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
 use crate::{
-    not_canonical_class, Binding, CatalogEntry, CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding, Hit,
-    KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, Version,
-    FIND_MISSES_CAP,
+    not_canonical_class, Binding, CatalogEntry, CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding,
+    FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry,
+    Version, FIND_MISSES_CAP,
 };
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
@@ -639,12 +639,19 @@ impl Store for SqliteStore {
         let d = FunctionDescriptor::from_json(bytes)?;
         let hash = d.hash();
         let canonical = d.canonical();
+        // The descriptor (once) and its inputs' index (0.5.1), in one write transaction.
         self.run("put_descriptor", |c| {
-            if exists(c, L::DescriptorExists, &hash)? {
-                return Ok(());
+            let fresh = !exists(c, L::DescriptorExists, &hash)?;
+            if fresh || !d.inputs.is_empty() {
+                self.locked_write(c, |c| {
+                    exec(c, L::DescriptorPut, rusqlite::params![hash, canonical])?;
+                    for input in &d.inputs {
+                        exec(c, L::DescriptorInputPut, rusqlite::params![hash, input])?;
+                    }
+                    Ok(())
+                })?;
+                self.bound_wal(c);
             }
-            self.locked_write(c, |c| exec(c, L::DescriptorPut, rusqlite::params![hash, canonical]).map(|_| ()))?;
-            self.bound_wal(c);
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", fn_hash = %hash, "put_descriptor");
@@ -1451,6 +1458,73 @@ impl Store for SqliteStore {
         })
     }
 
+    fn put_function_test(&self, test: &FunctionTest) -> Result<bool> {
+        let (total, covered) = crate::functions::check_test(test)?;
+        self.write("put_function_test", |c| {
+            let n = exec(
+                c,
+                L::FunctionTestPut,
+                rusqlite::params![
+                    &test.fn_hash,
+                    &test.case,
+                    &test.test_json,
+                    &test.signed_by,
+                    &test.last_run_at,
+                    &test.last_result,
+                    &test.last_detail,
+                    total,
+                    covered
+                ],
+            )?;
+            Ok(n == 1)
+        })
+    }
+
+    fn function_tests(&self, fn_hash: &str) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("function_tests", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestsOf.sql()).db()?;
+            let rows = st.query_map([fn_hash], function_test_row).db()?;
+            rows.collect::<rusqlite::Result<Vec<FunctionTest>>>().db()
+        })
+    }
+
+    fn record_function_test(
+        &self,
+        fn_hash: &str,
+        case: &str,
+        run_at: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<bool> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        crate::functions::check_case(case)?;
+        check_instant(run_at, "run_at")?;
+        crate::functions::check_result(result)?;
+        self.write("record_function_test", |c| {
+            let n = exec(c, L::FunctionTestRecord, rusqlite::params![run_at, result, detail, fn_hash, case])?;
+            Ok(n == 1)
+        })
+    }
+
+    fn set_function_branches(&self, fn_hash: &str, total: u32, covered: u32) -> Result<()> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let (total, covered) = crate::functions::branch_counts(total, covered)?;
+        self.write("set_function_branches", |c| {
+            exec(c, L::FunctionBranches, rusqlite::params![fn_hash, total, covered]).map(|_| ())
+        })
+    }
+
+    fn function_readers(&self, name: &str) -> Result<Vec<String>> {
+        check_function_name(name, "name")?;
+        self.run("function_readers", |c| get_strings(c, L::FunctionReaders, name))
+    }
+
+    fn bound_names(&self, fn_hash: &str) -> Result<Vec<String>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("bound_names", |c| get_strings(c, L::BoundNames, fn_hash))
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let rows: Vec<(String, String, String, i64)> = {
@@ -1711,6 +1785,21 @@ fn sqlite_safe(word: &str) -> bool {
 
 fn unsupported_vectors() -> Error {
     Error::Unsupported("vectors need PostgreSQL with the vector extension; SQLite has none".into())
+}
+
+/// A function test row of `function_tests`, in the column order of `FunctionTestsOf`.
+fn function_test_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FunctionTest> {
+    Ok(FunctionTest {
+        fn_hash: r.get(0)?,
+        case: r.get(1)?,
+        test_json: r.get(2)?,
+        signed_by: r.get(3)?,
+        last_run_at: r.get(4)?,
+        last_result: r.get(5)?,
+        last_detail: r.get(6)?,
+        branches_total: r.get(7)?,
+        branches_covered: r.get(8)?,
+    })
 }
 
 #[cfg(test)]

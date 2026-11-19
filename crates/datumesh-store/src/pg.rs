@@ -14,8 +14,8 @@ use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, C
 use crate::sql::Q;
 use crate::{
     not_canonical_class, Binding, CatalogEntry, CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue,
-    EmbedRef, Embedding, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary,
-    SummaryEntry, Version, FIND_MISSES_CAP,
+    EmbedRef, Embedding, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store,
+    Summary, SummaryEntry, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -626,9 +626,16 @@ impl Store for PgStore {
         let d = FunctionDescriptor::from_json(bytes)?;
         let hash = d.hash();
         let canonical = d.canonical();
+        // The descriptor and its inputs' index (0.5.1), in one transaction.
         self.run("put_descriptor", |c| {
             let st = c.stmt(Q::DescriptorPut)?;
-            c.client.execute(&st, &[&hash, &canonical]).db()?;
+            let inputs_put = c.stmt(Q::DescriptorInputsPut)?;
+            let mut t = c.client.transaction().db()?;
+            t.execute(&st, &[&hash, &canonical]).db()?;
+            if !d.inputs.is_empty() {
+                t.execute(&inputs_put, &[&hash, &d.inputs]).db()?;
+            }
+            t.commit().db()?;
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", fn_hash = %hash, "put_descriptor");
@@ -1590,6 +1597,79 @@ impl Store for PgStore {
         })
     }
 
+    fn put_function_test(&self, test: &FunctionTest) -> Result<bool> {
+        let (total, covered) = crate::functions::check_test(test)?;
+        self.run("put_function_test", |c| {
+            let st = c.stmt(Q::FunctionTestPut)?;
+            let n = c
+                .client
+                .execute(
+                    &st,
+                    &[
+                        &test.fn_hash,
+                        &test.case,
+                        &test.test_json,
+                        &test.signed_by,
+                        &test.last_run_at,
+                        &test.last_result,
+                        &test.last_detail,
+                        &total,
+                        &covered,
+                    ],
+                )
+                .db()?;
+            Ok(n == 1)
+        })
+    }
+
+    fn function_tests(&self, fn_hash: &str) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("function_tests", |c| {
+            let st = c.stmt(Q::FunctionTestsOf)?;
+            let rows = c.client.query(&st, &[&fn_hash]).db()?;
+            rows.iter().map(function_test_row).collect()
+        })
+    }
+
+    fn record_function_test(
+        &self,
+        fn_hash: &str,
+        case: &str,
+        run_at: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<bool> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        crate::functions::check_case(case)?;
+        check_instant(run_at, "run_at")?;
+        crate::functions::check_result(result)?;
+        self.run("record_function_test", |c| {
+            let st = c.stmt(Q::FunctionTestRecord)?;
+            let n = c.client.execute(&st, &[&run_at, &result, &detail, &fn_hash, &case]).db()?;
+            Ok(n == 1)
+        })
+    }
+
+    fn set_function_branches(&self, fn_hash: &str, total: u32, covered: u32) -> Result<()> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let (total, covered) = crate::functions::branch_counts(total, covered)?;
+        self.run("set_function_branches", |c| {
+            let st = c.stmt(Q::FunctionBranches)?;
+            c.client.execute(&st, &[&fn_hash, &total, &covered]).db()?;
+            Ok(())
+        })
+    }
+
+    fn function_readers(&self, name: &str) -> Result<Vec<String>> {
+        check_function_name(name, "name")?;
+        self.run("function_readers", |c| get_strings(c, Q::FunctionReaders, name))
+    }
+
+    fn bound_names(&self, fn_hash: &str) -> Result<Vec<String>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("bound_names", |c| get_strings(c, Q::BoundNames, fn_hash))
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let mut entries = Vec::new();
@@ -1833,4 +1913,22 @@ fn like_where(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
 /// Parameters for a query built at run time.
 fn as_refs(params: &[String]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
     params.iter().map(|p| p as &(dyn postgres::types::ToSql + Sync)).collect()
+}
+
+/// A function test row of `function_tests`, in the column order of `FunctionTestsOf`.
+fn function_test_row(r: &postgres::Row) -> Result<FunctionTest> {
+    // The branch counts are `integer` with a check of at least zero: an `as` is exact.
+    let total: i32 = r.try_get(7).db()?;
+    let covered: i32 = r.try_get(8).db()?;
+    Ok(FunctionTest {
+        fn_hash: r.try_get(0).db()?,
+        case: r.try_get(1).db()?,
+        test_json: r.try_get(2).db()?,
+        signed_by: r.try_get(3).db()?,
+        last_run_at: r.try_get(4).db()?,
+        last_result: r.try_get(5).db()?,
+        last_detail: r.try_get(6).db()?,
+        branches_total: total as u32,
+        branches_covered: covered as u32,
+    })
 }

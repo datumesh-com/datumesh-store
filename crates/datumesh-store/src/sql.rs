@@ -189,6 +189,24 @@ statements! {
     DescriptorPut = "INSERT INTO descriptors (fn_hash, bytes) VALUES ($1, $2) ON CONFLICT (fn_hash) DO NOTHING"
         => [TEXT, BYTEA];
     DescriptorExists = "SELECT EXISTS (SELECT 1 FROM descriptors WHERE fn_hash = $1)" => [TEXT];
+    // The inputs of a descriptor, indexed by name (0.5.1; migration 10).
+    DescriptorInputsPut = "INSERT INTO descriptor_inputs (fn_hash, input_name)
+                             SELECT $1, i FROM unnest($2::text[]) AS i ON CONFLICT DO NOTHING" => [TEXT, TEXT_ARRAY];
+    FunctionReaders = "SELECT fn_hash FROM descriptor_inputs WHERE input_name = $1 ORDER BY fn_hash" => [TEXT];
+    BoundNames = "SELECT DISTINCT fn_name FROM name_bindings WHERE fn_hash = $1 ORDER BY fn_name" => [TEXT];
+
+    // Function tests (0.5.1; migration 10): one row per (fn_hash, case).
+    FunctionTestPut = r#"INSERT INTO function_tests (fn_hash, "case", test_json, signed_by, last_run_at, last_result,
+                           last_detail, branches_total, branches_covered)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (fn_hash, "case") DO NOTHING"#
+        => [TEXT, TEXT, BYTEA, TEXT, TEXT, TEXT, TEXT, INT4, INT4];
+    FunctionTestsOf = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
+                           branches_total, branches_covered FROM function_tests WHERE fn_hash = $1 ORDER BY "case""#
+        => [TEXT];
+    FunctionTestRecord = r#"UPDATE function_tests SET last_run_at = $1, last_result = $2, last_detail = $3
+                            WHERE fn_hash = $4 AND "case" = $5"# => [TEXT, TEXT, TEXT, TEXT, TEXT];
+    FunctionBranches = "UPDATE function_tests SET branches_total = $2, branches_covered = $3 WHERE fn_hash = $1"
+        => [TEXT, INT4, INT4];
 
     ReceiptGet = "SELECT bytes FROM receipts WHERE hash = $1" => [TEXT];
     ReceiptMeta = "SELECT cell_id, tx, asof FROM receipts WHERE hash = $1" => [TEXT];

@@ -2,6 +2,26 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.5.1
+
+Additive, and one fix: function tests, the index of descriptor inputs and the names bound to a function (Build 2, Part 3, calculus). Six methods and one type; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). Migrations 10 (PostgreSQL) and 6 (SQLite) add a table, two indexes and the descriptor-inputs table; the migrations also back-fill the inputs index from the descriptors already stored. No existing table or stored value changes.
+
+### Added
+
+- Table `function_tests`: one row per (function hash, case), with the canonical test line, the signer, the last run (instant, result, detail) and the branch counts of the function. Append-friendly: no trigger.
+- Table `descriptor_inputs`: one row per fully qualified name in a descriptor's `inputs`, with an index on the name. `put_descriptor` writes it in the descriptor's transaction (both backends; a descriptor with no inputs indexes nothing). The migrations back-fill it from the descriptors stored before 0.5.1, from their JSON. An index on `name_bindings (fn_hash, fn_name)` serves `bound_names`.
+- `FunctionTest` (at the root, non-exhaustive) with `FunctionTest::new(fn_hash, case, test_json, signed_by)`.
+- `Store::put_function_test(test)`: inserts a test, once per (fn_hash, case). `Ok(true)` when inserted; `Ok(false)` and no change when the row exists (the first writer's signer and test line stay).
+- `Store::function_tests(fn_hash)`: the tests of a function, ordered by case.
+- `Store::record_function_test(fn_hash, case, run_at, result, detail)`: sets the last run of an existing test. `Ok(false)` when there is no such test. `result` is `pass`, `fail` or `error`; any other value is `Error::Invalid`.
+- `Store::set_function_branches(fn_hash, total, covered)`: sets the branch counts on every test of the function (a no-op when there are none). `covered` above `total` is `Error::Invalid`.
+- `Store::function_readers(name)`: the function hashes of the stored descriptors whose `inputs` contain `name`, distinct, ascending.
+- `Store::bound_names(fn_hash)`: every name ever bound to the hash, distinct, ascending. A name since bound to another hash still lists this one.
+
+### Fixed
+
+- Dropping a `PgStore` on a thread that is inside a tokio runtime (an async task, a `block_on`) panicked: the sync client runs a runtime of its own, which cannot be dropped there. The pool now closes its connections on a detached thread, which nothing joins; a connection the pool discards is closed the same way.
+
 ## 0.5.0
 
 Additive: the catalogue (Build 2, Part 2, R1). Ten methods, and the types they take and return; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). Migrations 9 (PostgreSQL) and 5 (SQLite) add tables; no existing table or stored value changes.

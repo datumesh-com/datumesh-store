@@ -108,6 +108,7 @@ use datumesh_core::{Cell, Scalar, Slice};
 
 mod catalogue;
 mod error;
+mod functions;
 pub mod migrate;
 mod pg;
 pub mod pg_unstable;
@@ -215,6 +216,51 @@ pub struct ClassBinding {
     pub tx: String,
 }
 
+/// A function test: a canonical test line of a function, stored once per (function hash,
+/// case) ([`Store::put_function_test`]). The run fields are set by
+/// [`Store::record_function_test`]; the branch counts by [`Store::set_function_branches`],
+/// which keeps them equal on every test of the function. Since 0.5.1.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionTest {
+    /// The function hash the test is of (64 lowercase hex digits).
+    pub fn_hash: String,
+    /// The case: 16 lowercase hex digits. Tests of a function are ordered by it.
+    pub case: String,
+    /// The test line, canonical (JCS) JSON.
+    pub test_json: Vec<u8>,
+    /// The host or key id that wrote the test. The first writer's: a later one changes nothing.
+    pub signed_by: String,
+    /// When the test last ran (an instant), if it has.
+    pub last_run_at: Option<String>,
+    /// The result of the last run: `pass`, `fail` or `error`.
+    pub last_result: Option<String>,
+    /// The detail of the last run.
+    pub last_detail: Option<String>,
+    /// The branches of the function (the same on every test of the function).
+    pub branches_total: u32,
+    /// The branches the function's tests cover (the same on every test of the function).
+    pub branches_covered: u32,
+}
+
+impl FunctionTest {
+    /// A test that has not run, with no branch counts: the run fields are `None` and the
+    /// counts zero. Since 0.5.1.
+    pub fn new(fn_hash: &str, case: &str, test_json: &[u8], signed_by: &str) -> FunctionTest {
+        FunctionTest {
+            fn_hash: fn_hash.to_string(),
+            case: case.to_string(),
+            test_json: test_json.to_vec(),
+            signed_by: signed_by.to_string(),
+            last_run_at: None,
+            last_result: None,
+            last_detail: None,
+            branches_total: 0,
+            branches_covered: 0,
+        }
+    }
+}
+
 /// A namespace's host and its key document.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -292,7 +338,7 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 /// use std::borrow::Cow;
 /// use datumesh_core::{Cell, Scalar};
 /// use datumesh_core::Slice;
-/// use datumesh_store::{Binding, CatalogEntry, ClassBinding, Embedding, Hit, KeyValue, Namespace, PendingEmbedding, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Summary, Version};
+/// use datumesh_store::{Binding, CatalogEntry, ClassBinding, Embedding, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, PgStore, Resolver, Result, SliceMember, SliceValue, Store, Summary, Version};
 ///
 /// struct Wrapper(PgStore);
 /// impl Resolver for Wrapper {
@@ -349,6 +395,12 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 ///     fn vector_available(&self) -> bool { self.0.vector_available() }
 ///     fn log_miss(&self, q: &str) -> Result<()> { self.0.log_miss(q) }
 ///     fn catalog_summary(&self) -> Result<Summary> { self.0.catalog_summary() }
+///     fn put_function_test(&self, t: &FunctionTest) -> Result<bool> { self.0.put_function_test(t) }
+///     fn function_tests(&self, f: &str) -> Result<Vec<FunctionTest>> { self.0.function_tests(f) }
+///     fn record_function_test(&self, f: &str, c: &str, r: &str, res: &str, d: &str) -> Result<bool> { self.0.record_function_test(f, c, r, res, d) }
+///     fn set_function_branches(&self, f: &str, t: u32, c: u32) -> Result<()> { self.0.set_function_branches(f, t, c) }
+///     fn function_readers(&self, n: &str) -> Result<Vec<String>> { self.0.function_readers(n) }
+///     fn bound_names(&self, f: &str) -> Result<Vec<String>> { self.0.bound_names(f) }
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
@@ -656,6 +708,36 @@ pub trait Store: Resolver + sealed::Sealed {
     /// The catalogue as an operator reads it: every entry with its label and its cell count,
     /// and every dictionary with its first 50 values (by value) and how many it has. Since 0.5.0.
     fn catalog_summary(&self) -> Result<Summary>;
+
+    /// Stores a function test, if its (fn_hash, case) has none: `Ok(true)` when the row is
+    /// inserted, `Ok(false)` when one exists, in which case nothing changes (the first
+    /// writer's `signed_by` and `test_json` stay). The test is checked first: a 64-digit
+    /// hash, a 16-digit case, a canonical `test_json`, a signer of 1 to 256 bytes, an instant
+    /// and result if it carries them, and branch counts with covered not above total, each
+    /// at most `i32::MAX`; a failing check is [`Error::Invalid`] and nothing is stored.
+    /// Since 0.5.1.
+    fn put_function_test(&self, test: &FunctionTest) -> Result<bool>;
+    /// Every test of `fn_hash`, ordered by case ascending; empty when there are none. Since 0.5.1.
+    fn function_tests(&self, fn_hash: &str) -> Result<Vec<FunctionTest>>;
+    /// Records a run of the test (`fn_hash`, `case`): sets its `last_run_at` (the instant
+    /// `run_at`), `last_result` and `last_detail`. `Ok(true)` when the test exists; `Ok(false)`
+    /// when it does not, and nothing is inserted. `result` must be `pass`, `fail` or `error`:
+    /// any other value is [`Error::Invalid`], and nothing changes. Since 0.5.1.
+    fn record_function_test(&self, fn_hash: &str, case: &str, run_at: &str, result: &str, detail: &str)
+        -> Result<bool>;
+    /// Sets `branches_total` and `branches_covered` on every test of `fn_hash`. A function
+    /// with no tests is a no-op, not an error. `covered` above `total` is [`Error::Invalid`].
+    /// Since 0.5.1.
+    fn set_function_branches(&self, fn_hash: &str, total: u32, covered: u32) -> Result<()>;
+    /// The function hashes of the stored descriptors whose `inputs` contain `name` (a fully
+    /// qualified function name), distinct, ascending. Answered from the index of descriptor
+    /// inputs, which [`put_descriptor`](Store::put_descriptor) fills; the migration that
+    /// introduced the index filled it from the descriptors stored before. Since 0.5.1.
+    fn function_readers(&self, name: &str) -> Result<Vec<String>>;
+    /// Every fully qualified name ever bound (by [`bind_name`](Store::bind_name)) to
+    /// `fn_hash`, distinct, ascending. A name since bound to another hash still lists this
+    /// one. Since 0.5.1.
+    fn bound_names(&self, fn_hash: &str) -> Result<Vec<String>>;
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

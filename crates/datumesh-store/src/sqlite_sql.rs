@@ -160,6 +160,20 @@ statements! {
     DescriptorPut = "INSERT INTO descriptors (fn_hash, bytes) SELECT ?1, ?2
                       WHERE NOT EXISTS (SELECT 1 FROM descriptors WHERE fn_hash = ?1)";
     DescriptorExists = "SELECT EXISTS (SELECT 1 FROM descriptors WHERE fn_hash = ?1)";
+    // The inputs of a descriptor, indexed by name (0.5.1; migration 6).
+    DescriptorInputPut = "INSERT INTO descriptor_inputs (fn_hash, input_name) VALUES (?1, ?2) ON CONFLICT DO NOTHING";
+    FunctionReaders = "SELECT fn_hash FROM descriptor_inputs WHERE input_name = ?1 ORDER BY fn_hash";
+    BoundNames = "SELECT DISTINCT fn_name FROM name_bindings WHERE fn_hash = ?1 ORDER BY fn_name";
+
+    // Function tests (0.5.1; migration 6): one row per (fn_hash, case).
+    FunctionTestPut = r#"INSERT INTO function_tests (fn_hash, "case", test_json, signed_by, last_run_at, last_result,
+                           last_detail, branches_total, branches_covered)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT (fn_hash, "case") DO NOTHING"#;
+    FunctionTestsOf = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
+                           branches_total, branches_covered FROM function_tests WHERE fn_hash = ?1 ORDER BY "case""#;
+    FunctionTestRecord = r#"UPDATE function_tests SET last_run_at = ?1, last_result = ?2, last_detail = ?3
+                            WHERE fn_hash = ?4 AND "case" = ?5"#;
+    FunctionBranches = "UPDATE function_tests SET branches_total = ?2, branches_covered = ?3 WHERE fn_hash = ?1";
 
     ReceiptGet = "SELECT bytes FROM receipts WHERE hash = ?1";
     ReceiptMeta = "SELECT cell_id, tx, asof FROM receipts WHERE hash = ?1";

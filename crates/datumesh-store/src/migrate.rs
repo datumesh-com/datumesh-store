@@ -58,6 +58,11 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0008_index_cell_per_statement.sql"),
     },
     Migration { version: 9, name: "0009_catalogue.sql", sql: include_str!("../migrations/0009_catalogue.sql") },
+    Migration {
+        version: 10,
+        name: "0010_function_tests.sql",
+        sql: include_str!("../migrations/0010_function_tests.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -248,6 +253,11 @@ pub mod sqlite {
             version: 5,
             name: "0005_catalogue.sql",
             sql: include_str!("../migrations/sqlite/0005_catalogue.sql"),
+        },
+        Migration {
+            version: 6,
+            name: "0006_function_tests.sql",
+            sql: include_str!("../migrations/sqlite/0006_function_tests.sql"),
         },
     ];
 

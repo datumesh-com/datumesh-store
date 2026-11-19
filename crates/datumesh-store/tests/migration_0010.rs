@@ -59,7 +59,7 @@ fn the_inputs_of_descriptors_stored_before_0_5_1_are_indexed(b: Backend) {
     assert_eq!(applied, [all as u32], "only the 0.5.1 migration is applied");
 
     let s = db.bare_store();
-    assert_eq!(s.function_readers(NAME).unwrap(), [hw.clone()]);
+    assert_eq!(s.function_readers(NAME).unwrap(), vec![hw.clone()]);
     assert_eq!(db.count("descriptor_inputs"), 1);
     assert_eq!(db.count("function_tests"), 0);
     // A descriptor stored after the migration is indexed by put_descriptor.

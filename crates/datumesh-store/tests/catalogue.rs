@@ -116,8 +116,8 @@ fn migrations_are_registered(b: Backend) {
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
     };
     match b {
-        Backend::Pg => assert_eq!((last.version, last.name), (9, "0009_catalogue.sql")),
-        Backend::Sqlite => assert_eq!((last.version, last.name), (5, "0005_catalogue.sql")),
+        Backend::Pg => assert_eq!((last.version, last.name), (10, "0010_function_tests.sql")),
+        Backend::Sqlite => assert_eq!((last.version, last.name), (6, "0006_function_tests.sql")),
     }
 }
 

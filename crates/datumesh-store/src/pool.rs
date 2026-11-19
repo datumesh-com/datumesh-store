@@ -155,6 +155,7 @@ impl Pool {
             while let Some(conn) = state.idle.pop() {
                 if conn.client.is_closed() {
                     state.open -= 1;
+                    close_detached(vec![conn]);
                     continue;
                 }
                 return Ok(Pooled { pool: self, conn: Some(conn) });
@@ -189,11 +190,35 @@ impl Pool {
         let mut state = self.lock();
         if conn.client.is_closed() {
             state.open -= 1;
+            close_detached(vec![conn]);
         } else {
             state.idle.push(conn);
         }
         drop(state);
         self.freed.notify_one();
+    }
+}
+
+/// Drops connections on a thread of their own, which nobody joins. A sync client runs a
+/// runtime of its own, and dropping a runtime on a thread that is inside another runtime (an
+/// async task, a `block_on`) panics: so a store dropped there, or a connection the pool
+/// discards there, is closed off the calling thread. If the thread cannot be started, the
+/// connections are dropped on the calling thread (the only case where that happens).
+pub(crate) fn close_detached(conns: Vec<Conn>) {
+    if conns.is_empty() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("datumesh-store-close".into()).spawn(move || drop(conns));
+    if let Err(e) = spawned {
+        tracing::warn!(target: "datumesh_store", error = %e, "no thread to close connections on");
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        // Nothing is checked out (a Pooled borrows the pool), so every connection is idle.
+        let idle = std::mem::take(&mut self.state.get_mut().unwrap_or_else(|e| e.into_inner()).idle);
+        close_detached(idle);
     }
 }
 

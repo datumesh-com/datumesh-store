@@ -13,7 +13,7 @@ mod common;
 
 use common::*;
 use datumesh_core::json;
-use datumesh_store::{Error, FunctionTest, PgStore, Store};
+use datumesh_store::{Error, FunctionTest, PgStore};
 
 const CASE_A: &str = "00000000000000a1";
 const CASE_B: &str = "00000000000000b2";
@@ -152,7 +152,7 @@ fn function_readers_follow_the_descriptors_inputs(b: Backend) {
     let mut both = vec![h_with.clone(), h_other.clone()];
     both.sort();
     assert_eq!(s.function_readers(NAME).unwrap(), both);
-    assert_eq!(s.function_readers(NAME2).unwrap(), [h_with.clone()]);
+    assert_eq!(s.function_readers(NAME2).unwrap(), vec![h_with.clone()]);
     // The function without inputs reads nothing, and nothing reads it by its name.
     assert!(s.function_readers("rates.example.org/nothing").unwrap().is_empty());
     assert!(!s.function_readers(NAME).unwrap().contains(&h_plain));

@@ -247,6 +247,26 @@ pub fn datumesh_store::Embedding::eq(&self, &Self) -> bool
 impl core::fmt::Debug for datumesh_store::Embedding
 pub fn datumesh_store::Embedding::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for datumesh_store::Embedding
+#[non_exhaustive] pub struct datumesh_store::FunctionTest
+pub datumesh_store::FunctionTest::branches_covered: u32
+pub datumesh_store::FunctionTest::branches_total: u32
+pub datumesh_store::FunctionTest::case: alloc::string::String
+pub datumesh_store::FunctionTest::fn_hash: alloc::string::String
+pub datumesh_store::FunctionTest::last_detail: core::option::Option<alloc::string::String>
+pub datumesh_store::FunctionTest::last_result: core::option::Option<alloc::string::String>
+pub datumesh_store::FunctionTest::last_run_at: core::option::Option<alloc::string::String>
+pub datumesh_store::FunctionTest::signed_by: alloc::string::String
+pub datumesh_store::FunctionTest::test_json: alloc::vec::Vec<u8>
+impl datumesh_store::FunctionTest
+pub fn datumesh_store::FunctionTest::new(&str, &str, &[u8], &str) -> datumesh_store::FunctionTest
+impl core::clone::Clone for datumesh_store::FunctionTest
+pub fn datumesh_store::FunctionTest::clone(&self) -> Self
+impl core::cmp::Eq for datumesh_store::FunctionTest
+impl core::cmp::PartialEq for datumesh_store::FunctionTest
+pub fn datumesh_store::FunctionTest::eq(&self, &Self) -> bool
+impl core::fmt::Debug for datumesh_store::FunctionTest
+pub fn datumesh_store::FunctionTest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for datumesh_store::FunctionTest
 pub struct datumesh_store::KeyValue
 pub datumesh_store::KeyValue::aliases: alloc::vec::Vec<alloc::string::String>
 pub datumesh_store::KeyValue::label: alloc::string::String
@@ -304,6 +324,7 @@ impl datumesh_store::Store for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
+pub fn datumesh_store::PgStore::bound_names(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::PgStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
@@ -311,6 +332,8 @@ pub fn datumesh_store::PgStore::computed_asof(&self, &str, &str) -> datumesh_sto
 pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::function_tests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FunctionTest>>
 pub fn datumesh_store::PgStore::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
@@ -326,11 +349,13 @@ pub fn datumesh_store::PgStore::put_class(&self, &[u8]) -> datumesh_store::Resul
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_embeddings(&self, &str, &[datumesh_store::Embedding]) -> datumesh_store::Result<()>
+pub fn datumesh_store::PgStore::put_function_test(&self, &datumesh_store::FunctionTest) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::receipts_many(&self, &[&str]) -> datumesh_store::Result<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<u8>>>>
+pub fn datumesh_store::PgStore::record_function_test(&self, &str, &str, &str, &str, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::refresh_value_counts(&self) -> datumesh_store::Result<u64>
@@ -338,6 +363,7 @@ pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_s
 pub fn datumesh_store::PgStore::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::PgStore::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::PgStore::set_function_branches(&self, &str, u32, u32) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
@@ -432,6 +458,7 @@ impl datumesh_store::Store for datumesh_store::SqliteStore
 pub fn datumesh_store::SqliteStore::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
+pub fn datumesh_store::SqliteStore::bound_names(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::SqliteStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
@@ -439,6 +466,8 @@ pub fn datumesh_store::SqliteStore::computed_asof(&self, &str, &str) -> datumesh
 pub fn datumesh_store::SqliteStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
 pub fn datumesh_store::SqliteStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::function_tests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FunctionTest>>
 pub fn datumesh_store::SqliteStore::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
@@ -454,11 +483,13 @@ pub fn datumesh_store::SqliteStore::put_class(&self, &[u8]) -> datumesh_store::R
 pub fn datumesh_store::SqliteStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_embeddings(&self, &str, &[datumesh_store::Embedding]) -> datumesh_store::Result<()>
+pub fn datumesh_store::SqliteStore::put_function_test(&self, &datumesh_store::FunctionTest) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::receipts_many(&self, &[&str]) -> datumesh_store::Result<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<u8>>>>
+pub fn datumesh_store::SqliteStore::record_function_test(&self, &str, &str, &str, &str, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::refresh_value_counts(&self) -> datumesh_store::Result<u64>
@@ -466,6 +497,7 @@ pub fn datumesh_store::SqliteStore::resolve_binding(&self, &str, &str) -> datume
 pub fn datumesh_store::SqliteStore::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>
 pub fn datumesh_store::SqliteStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::set_function_branches(&self, &str, u32, u32) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
@@ -525,6 +557,7 @@ pub trait datumesh_store::Store: datumesh_core::verify::Resolver + datumesh_stor
 pub fn datumesh_store::Store::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
+pub fn datumesh_store::Store::bound_names(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::Store::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
@@ -532,6 +565,8 @@ pub fn datumesh_store::Store::computed_asof(&self, &str, &str) -> datumesh_store
 pub fn datumesh_store::Store::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::Store::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
 pub fn datumesh_store::Store::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::Store::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::Store::function_tests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FunctionTest>>
 pub fn datumesh_store::Store::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::Store::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
@@ -547,11 +582,13 @@ pub fn datumesh_store::Store::put_class(&self, &[u8]) -> datumesh_store::Result<
 pub fn datumesh_store::Store::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_embeddings(&self, &str, &[datumesh_store::Embedding]) -> datumesh_store::Result<()>
+pub fn datumesh_store::Store::put_function_test(&self, &datumesh_store::FunctionTest) -> datumesh_store::Result<bool>
 pub fn datumesh_store::Store::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::Store::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::receipts_many(&self, &[&str]) -> datumesh_store::Result<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<u8>>>>
+pub fn datumesh_store::Store::record_function_test(&self, &str, &str, &str, &str, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::Store::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::Store::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::Store::refresh_value_counts(&self) -> datumesh_store::Result<u64>
@@ -559,6 +596,7 @@ pub fn datumesh_store::Store::resolve_binding(&self, &str, &str) -> datumesh_sto
 pub fn datumesh_store::Store::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::Store::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>
 pub fn datumesh_store::Store::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::Store::set_function_branches(&self, &str, u32, u32) -> datumesh_store::Result<()>
 pub fn datumesh_store::Store::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::Store::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
@@ -578,6 +616,7 @@ impl datumesh_store::Store for datumesh_store::PgStore
 pub fn datumesh_store::PgStore::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
+pub fn datumesh_store::PgStore::bound_names(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::PgStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
@@ -585,6 +624,8 @@ pub fn datumesh_store::PgStore::computed_asof(&self, &str, &str) -> datumesh_sto
 pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::PgStore::function_tests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FunctionTest>>
 pub fn datumesh_store::PgStore::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
@@ -600,11 +641,13 @@ pub fn datumesh_store::PgStore::put_class(&self, &[u8]) -> datumesh_store::Resul
 pub fn datumesh_store::PgStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_embeddings(&self, &str, &[datumesh_store::Embedding]) -> datumesh_store::Result<()>
+pub fn datumesh_store::PgStore::put_function_test(&self, &datumesh_store::FunctionTest) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::PgStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::receipts_many(&self, &[&str]) -> datumesh_store::Result<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<u8>>>>
+pub fn datumesh_store::PgStore::record_function_test(&self, &str, &str, &str, &str, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::PgStore::refresh_value_counts(&self) -> datumesh_store::Result<u64>
@@ -612,6 +655,7 @@ pub fn datumesh_store::PgStore::resolve_binding(&self, &str, &str) -> datumesh_s
 pub fn datumesh_store::PgStore::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::PgStore::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>
 pub fn datumesh_store::PgStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::PgStore::set_function_branches(&self, &str, u32, u32) -> datumesh_store::Result<()>
 pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
@@ -631,6 +675,7 @@ impl datumesh_store::Store for datumesh_store::SqliteStore
 pub fn datumesh_store::SqliteStore::bind_class(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::bind_name(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::blob(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::borrow::Cow<'_, [u8]>>>
+pub fn datumesh_store::SqliteStore::bound_names(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::SqliteStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
@@ -638,6 +683,8 @@ pub fn datumesh_store::SqliteStore::computed_asof(&self, &str, &str) -> datumesh
 pub fn datumesh_store::SqliteStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
 pub fn datumesh_store::SqliteStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::function_tests(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FunctionTest>>
 pub fn datumesh_store::SqliteStore::has_bindings_under(&self, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::inputs(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::latest(&self, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
@@ -653,11 +700,13 @@ pub fn datumesh_store::SqliteStore::put_class(&self, &[u8]) -> datumesh_store::R
 pub fn datumesh_store::SqliteStore::put_computed(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_descriptor(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_embeddings(&self, &str, &[datumesh_store::Embedding]) -> datumesh_store::Result<()>
+pub fn datumesh_store::SqliteStore::put_function_test(&self, &datumesh_store::FunctionTest) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::put_manifest(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_namespace(&self, &str, &[u8], &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::put_receipt(&self, &[u8]) -> datumesh_store::Result<alloc::string::String>
 pub fn datumesh_store::SqliteStore::put_version(&self, &str, &str, &str) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::receipts_many(&self, &[&str]) -> datumesh_store::Result<alloc::vec::Vec<core::option::Option<alloc::vec::Vec<u8>>>>
+pub fn datumesh_store::SqliteStore::record_function_test(&self, &str, &str, &str, &str, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::record_namespace_failure(&self, &str, &str, u32) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::record_namespace_success(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Namespace>>
 pub fn datumesh_store::SqliteStore::refresh_value_counts(&self) -> datumesh_store::Result<u64>
@@ -665,6 +714,7 @@ pub fn datumesh_store::SqliteStore::resolve_binding(&self, &str, &str) -> datume
 pub fn datumesh_store::SqliteStore::resolve_class(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>
 pub fn datumesh_store::SqliteStore::resolve_name(&self, &str, &str) -> datumesh_store::Result<core::option::Option<alloc::string::String>>
+pub fn datumesh_store::SqliteStore::set_function_branches(&self, &str, u32, u32) -> datumesh_store::Result<()>
 pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<bool>
 pub fn datumesh_store::SqliteStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
