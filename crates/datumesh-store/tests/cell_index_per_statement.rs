@@ -174,16 +174,16 @@ fn per_statement_trigger_makes_the_rows_of_the_per_row_trigger() {
     let (da, db) = (PgDb::migrated(), PgDb::migrated());
 
     // Migration 0008 is registered as version 8 and installs the statement trigger.
-    let last = migrate::MIGRATIONS.last().unwrap();
+    let last = &migrate::MIGRATIONS[7];
     assert_eq!((last.version, last.name), (8, "0008_index_cell_per_statement.sql"));
     assert_eq!(
         triggers(&da).iter().filter(|t| t.starts_with("receipts_index_cell")).collect::<Vec<_>>(),
         ["receipts_index_cells"]
     );
     assert!(is_statement_trigger(&da, "receipts_index_cells"));
-    assert_eq!(
-        rows(&da, "SELECT version::text FROM datumesh_schema_migrations ORDER BY version").last().map(String::as_str),
-        Some("8")
+    assert!(
+        rows(&da, "SELECT version::text FROM datumesh_schema_migrations WHERE version = 8").len() == 1,
+        "version 8 is recorded"
     );
 
     // B: the per-row trigger of 0.4.2 instead.

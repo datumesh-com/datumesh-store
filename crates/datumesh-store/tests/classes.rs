@@ -306,7 +306,7 @@ fn the_class_migration_is_additive_and_keeps_function_bindings(b: Backend) {
         Backend::Pg => 3,
         Backend::Sqlite => 2,
     };
-    assert_eq!(all, old.len() + extra, "classes, the audit column (and on PostgreSQL the cell index), on each backend");
+    assert!(all >= old.len() + extra, "classes (later migrations may follow), the audit column (and on PostgreSQL the cell index), on each backend");
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) STRICT",
@@ -342,10 +342,8 @@ fn the_class_migration_is_additive_and_keeps_function_bindings(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(datumesh_store::SqliteOptions::new())).unwrap(),
     };
-    let expect: Vec<u32> = match b {
-        Backend::Pg => vec![all as u32 - 2, all as u32 - 1, all as u32],
-        Backend::Sqlite => vec![all as u32 - 1, all as u32],
-    };
+    // Every migration after the old ones (later releases add more).
+    let expect: Vec<u32> = ((old.len() as u32 + 1)..=all as u32).collect();
     assert_eq!(applied, expect, "the class migration, the audit migration and (PostgreSQL) the cell index are applied");
 
     // What was there is there, and is a function binding.
