@@ -383,12 +383,14 @@ pub(crate) fn canonical_examples(text: &str) -> Result<String> {
 }
 
 /// The aliases as canonical JSON (an array of strings), for SQLite.
+#[cfg(feature = "sqlite")]
 pub(crate) fn aliases_json(aliases: &[String]) -> String {
     let items: Vec<json::Value> = aliases.iter().map(|a| json::Value::String(a.clone())).collect();
     String::from_utf8(json::Value::Array(items).to_jcs()).unwrap_or_default()
 }
 
 /// The aliases from their stored JSON, for SQLite.
+#[cfg(feature = "sqlite")]
 pub(crate) fn parse_aliases(text: &str) -> Result<Vec<String>> {
     let v = json::parse(text.as_bytes())?;
     let items = match &v {
