@@ -42,9 +42,11 @@ fn hash(c: char) -> String {
 }
 
 fn line(c: &str) -> Vec<u8> {
-    json::parse(format!(r#"{{"args":{{"base":{{"type":"string","value":"EUR"}}}},"case":"{c}","expect":"1"}}"#).as_bytes())
-        .unwrap()
-        .to_jcs()
+    json::parse(
+        format!(r#"{{"args":{{"base":{{"type":"string","value":"EUR"}}}},"case":"{c}","expect":"1"}}"#).as_bytes(),
+    )
+    .unwrap()
+    .to_jcs()
 }
 
 fn put(s: &TStore, h: &str, n: u32) {
@@ -120,8 +122,13 @@ fn unnamed_function_tests_are_ordered_by_hash_and_case_with_limit(b: Backend) {
     }
     let all = s.unnamed_function_tests(100).unwrap();
     let got: Vec<(String, String)> = all.iter().map(|t| (t.fn_hash.clone(), t.case.clone())).collect();
-    let want: Vec<(String, String)> =
-        vec![(h1.clone(), case(1)), (h1.clone(), case(2)), (h1.clone(), case(3)), (h2.clone(), case(0)), (h2.clone(), case(1))];
+    let want: Vec<(String, String)> = vec![
+        (h1.clone(), case(1)),
+        (h1.clone(), case(2)),
+        (h1.clone(), case(3)),
+        (h2.clone(), case(0)),
+        (h2.clone(), case(1)),
+    ];
     assert_eq!(got, want);
     // The rows are whole rows.
     assert_eq!(all[0], FunctionTest::new(&h1, &case(1), &line(&case(1)), "rates.example.org"));

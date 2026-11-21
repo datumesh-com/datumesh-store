@@ -15,7 +15,7 @@ use crate::sql::Q;
 use crate::{
     not_canonical_class, Binding, CatalogEntry, CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue,
     EmbedRef, Embedding, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store,
-    Summary, SummaryEntry, Version, FIND_MISSES_CAP,
+    Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -1670,6 +1670,185 @@ impl Store for PgStore {
         self.run("bound_names", |c| get_strings(c, Q::BoundNames, fn_hash))
     }
 
+    fn name_function_tests(&self, fn_hash: &str, names: &[(String, String)]) -> Result<u64> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        for (case, name) in names {
+            crate::functions::check_case(case)?;
+            check_function_name(name, "name")?;
+        }
+        if names.is_empty() {
+            return Ok(0);
+        }
+        let cases: Vec<String> = names.iter().map(|(c, _)| c.clone()).collect();
+        let fn_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
+        self.run("name_function_tests", |c| {
+            let st = c.stmt(Q::FunctionTestName)?;
+            c.client.execute(&st, &[&fn_hash, &cases, &fn_names]).db()
+        })
+    }
+
+    fn unnamed_function_tests(&self, limit: usize) -> Result<Vec<FunctionTest>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("unnamed_function_tests", |c| {
+            let st = c.stmt(Q::FunctionTestsUnnamed)?;
+            let rows = c.client.query(&st, &[&limit]).db()?;
+            rows.iter().map(function_test_row).collect()
+        })
+    }
+
+    fn function_test_summary(&self, fn_hash: &str, fn_name: Option<&str>) -> Result<TestSummary> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("function_test_summary", |c| {
+            let st = c.stmt(Q::FunctionTestSummary)?;
+            let r = c.client.query_one(&st, &[&fn_hash, &fn_name]).db()?;
+            // The counts are bigint, the branch counts integer (at least zero): exact casts.
+            let count = |i: usize| -> Result<u64> { Ok(r.try_get::<_, i64>(i).db()? as u64) };
+            let total: i32 = r.try_get(6).db()?;
+            let covered: i32 = r.try_get(7).db()?;
+            Ok(TestSummary {
+                count: count(0)?,
+                pass: count(1)?,
+                fail: count(2)?,
+                error: count(3)?,
+                not_run: count(4)?,
+                last_run_at: r.try_get(5).db()?,
+                branches_total: total as u32,
+                branches_covered: covered as u32,
+            })
+        })
+    }
+
+    fn function_tests_page(
+        &self,
+        fn_hash: &str,
+        fn_name: Option<&str>,
+        after_case: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("function_tests_page", |c| {
+            let rows = match fn_name {
+                None => {
+                    let st = c.stmt(Q::FunctionTestsPage)?;
+                    c.client.query(&st, &[&fn_hash, &after_case, &limit]).db()?
+                }
+                Some(name) => {
+                    let st = c.stmt(Q::FunctionTestsPageNamed)?;
+                    c.client.query(&st, &[&fn_hash, &name, &after_case, &limit]).db()?
+                }
+            };
+            rows.iter().map(function_test_row).collect()
+        })
+    }
+
+    fn stored_receipts_of(&self, ns: &str, fn_name: &str, fn_hash: &str, limit: usize) -> Result<Vec<Vec<u8>>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("stored_receipts_of", |c| {
+            let st = c.stmt(Q::StoredReceiptsOf)?;
+            let rows = c.client.query(&st, &[&fn_hash, &ns, &fn_name, &limit]).db()?;
+            rows.iter().map(|r| r.try_get::<_, Vec<u8>>(0).db()).collect()
+        })
+    }
+
+    fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            return self.run("slice_values_limit", |c| {
+                // The statement of slice_values, with its LIMIT: the same order (tx).
+                let sql = format!("{} LIMIT $5", Q::VersionsBetweenValues.sql());
+                let rows = c.client.query(sql.as_str(), &[&cell_id, &from, &to, &asof, &limit]).db()?;
+                rows.iter().map(|r| value_row(r, &cell_id)).collect()
+            });
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_values_limit", |c| pattern.values_limited(c, asof, limit))
+    }
+
+    fn versions_limit(&self, cell_id: &str, from: &str, to: &str, limit: usize) -> Result<Vec<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(from, "from")?;
+        check_instant(to, "to")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("versions_limit", |c| {
+            let st = c.stmt(Q::VersionRangeLimit)?;
+            let rows = c.client.query(&st, &[&cell_id, &from, &to, &limit]).db()?;
+            PgStore::version_rows(&rows, cell_id)
+        })
+    }
+
+    fn stored_cell_count(&self, ns: &str, fn_name: &str, fn_hash: &str) -> Result<u64> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("stored_cell_count", |c| {
+            let st = c.stmt(Q::StoredCellCount)?;
+            let n: i64 = c.client.query_one(&st, &[&fn_hash, &ns, &fn_name]).db()?.try_get(0).db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn has_key_value(&self, owner: &str, key: &str, value: &str) -> Result<bool> {
+        self.run("has_key_value", |c| {
+            let st = c.stmt(Q::DictionaryHas)?;
+            c.client.query_one(&st, &[&owner, &key, &value]).db()?.try_get(0).db()
+        })
+    }
+
+    fn key_value_count(&self, owner: &str, key: &str) -> Result<u64> {
+        self.run("key_value_count", |c| {
+            let st = c.stmt(Q::DictionaryCount)?;
+            let n: i64 = c.client.query_one(&st, &[&owner, &key]).db()?.try_get(0).db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn mark_key_open(&self, owner: &str, key: &str) -> Result<()> {
+        if owner.is_empty() || owner.len() > 512 || key.is_empty() || key.len() > 128 {
+            return Err(invalid("key", "an owner of 1 to 512 bytes and a key of 1 to 128 bytes"));
+        }
+        self.run("mark_key_open", |c| {
+            let st = c.stmt(Q::KeyOpenPut)?;
+            c.client.execute(&st, &[&owner, &key]).db()?;
+            Ok(())
+        })
+    }
+
+    fn open_key_count(&self) -> Result<u64> {
+        self.run("open_key_count", |c| {
+            let st = c.stmt(Q::OpenKeyCount)?;
+            let n: i64 = c.client.query_one(&st, &[]).db()?.try_get(0).db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn key_is_open(&self, owner: &str, key: &str) -> Result<bool> {
+        self.run("key_is_open", |c| {
+            let st = c.stmt(Q::KeyIsOpen)?;
+            c.client.query_one(&st, &[&owner, &key]).db()?.try_get(0).db()
+        })
+    }
+
+    fn catalog_entry(&self, name: &str) -> Result<Option<CatalogEntry>> {
+        self.run("catalog_entry", |c| {
+            let st = c.stmt(Q::CatalogEntryNamed)?;
+            let Some(r) = c.client.query_opt(&st, &[&name]).db()? else { return Ok(None) };
+            entry_from_columns(
+                &r.try_get::<_, String>(0).db()?,
+                r.try_get(1).db()?,
+                r.try_get(2).db()?,
+                r.try_get(3).db()?,
+                r.try_get(4).db()?,
+                &r.try_get::<_, String>(5).db()?,
+                &r.try_get::<_, String>(6).db()?,
+                &r.try_get::<_, String>(7).db()?,
+                r.try_get(8).db()?,
+            )
+            .map(Some)
+        })
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let mut entries = Vec::new();
@@ -1716,6 +1895,69 @@ impl Pattern {
     fn values(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceValue>> {
         let qs = [Q::SliceValuesAll, Q::SliceValuesText, Q::SliceValuesNum];
         self.rows(c, asof, qs, 9, value_row, |m| &m.version.cell_id)
+    }
+
+    /// The members' values as of `asof`, in key order, at most `limit`: the statement of
+    /// `values` with the key order and the LIMIT in SQL. The key order of `cmp_keys` is, per
+    /// key argument by name, the type's name, then the number (exact) or the text.
+    fn values_limited(&self, c: &mut Conn, asof: &str, limit: i64) -> Result<Vec<SliceValue>> {
+        let (drive, _) = self.drive(c, false)?;
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let (base, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::SliceValuesAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::SliceValuesNum } else { Q::SliceValuesText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        // $16.. name each key argument; its order is the type, then the number, then the text.
+        let mut order = Vec::with_capacity(keys.len() * 3 + 1);
+        for i in 0..keys.len() {
+            let p = 16 + i;
+            let of =
+                |col: &str| format!("(SELECT a.{col} FROM cell_args a WHERE a.cell_id = c.cell_id AND a.name = ${p})");
+            order.push(format!("{} COLLATE \"C\"", of("type")));
+            order.push(of("num"));
+            order.push(format!("{} COLLATE \"C\"", of("value")));
+        }
+        order.push("c.cell_id".to_string());
+        let sql = format!("{} ORDER BY {} LIMIT ${}", base.sql(), order.join(", "), 16 + keys.len());
+        // The parameters the base statement does not use (the drive's, when there is none) are
+        // typed as its statement types them: the text of the statement alone would not say.
+        let mut param_types = base.types().to_vec();
+        param_types.extend(std::iter::repeat_n(postgres::types::Type::TEXT, keys.len()));
+        param_types.push(postgres::types::Type::INT8);
+        let st = c.client.prepare_typed(sql.as_str(), &param_types).db()?;
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![
+            &self.fn_hash,
+            &self.ns,
+            &self.fn_name,
+            &nargs,
+            &asof,
+            &names,
+            &kinds,
+            &types,
+            &los,
+            &his,
+            &keys,
+            &d_name,
+            &d_ty,
+            &d_lo,
+            &d_hi,
+        ];
+        for k in &keys {
+            params.push(k);
+        }
+        params.push(&limit);
+        let rows = c.client.query(&st, &params).db()?;
+        rows.iter()
+            .map(|r| {
+                let cell_id: String = r.try_get(9).db()?;
+                value_row(r, &cell_id)
+            })
+            .collect()
     }
 
     /// The cells with a computed version answering as of `asof`, in cell id order, at most

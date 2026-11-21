@@ -18,7 +18,7 @@ use crate::sqlite_sql::L;
 use crate::{
     not_canonical_class, Binding, CatalogEntry, CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding,
     FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry,
-    Version, FIND_MISSES_CAP,
+    TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
@@ -1525,6 +1525,214 @@ impl Store for SqliteStore {
         self.run("bound_names", |c| get_strings(c, L::BoundNames, fn_hash))
     }
 
+    fn name_function_tests(&self, fn_hash: &str, names: &[(String, String)]) -> Result<u64> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        for (case, name) in names {
+            crate::functions::check_case(case)?;
+            check_function_name(name, "name")?;
+        }
+        if names.is_empty() {
+            return Ok(0);
+        }
+        self.write("name_function_tests", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestName.sql()).db()?;
+            let mut named = 0u64;
+            for (case, name) in names {
+                named += st.execute(rusqlite::params![fn_hash, case, name]).db()? as u64;
+            }
+            Ok(named)
+        })
+    }
+
+    fn unnamed_function_tests(&self, limit: usize) -> Result<Vec<FunctionTest>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("unnamed_function_tests", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestsUnnamed.sql()).db()?;
+            let rows = st.query_map([limit], function_test_row).db()?;
+            rows.collect::<rusqlite::Result<Vec<FunctionTest>>>().db()
+        })
+    }
+
+    fn function_test_summary(&self, fn_hash: &str, fn_name: Option<&str>) -> Result<TestSummary> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("function_test_summary", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestSummary.sql()).db()?;
+            let (count, pass, fail, error, not_run, last_run_at, total, covered) = st
+                .query_row(rusqlite::params![fn_hash, fn_name], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, i64>(6)?,
+                        r.get::<_, i64>(7)?,
+                    ))
+                })
+                .db()?;
+            // The branch counts are integer with a check of at least zero: an `as` is exact.
+            Ok(TestSummary {
+                count: count as u64,
+                pass: pass as u64,
+                fail: fail as u64,
+                error: error as u64,
+                not_run: not_run as u64,
+                last_run_at,
+                branches_total: total as u32,
+                branches_covered: covered as u32,
+            })
+        })
+    }
+
+    fn function_tests_page(
+        &self,
+        fn_hash: &str,
+        fn_name: Option<&str>,
+        after_case: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("function_tests_page", |c| {
+            let rows: Vec<FunctionTest> = match fn_name {
+                None => {
+                    let mut st = c.prepare_cached(L::FunctionTestsPage.sql()).db()?;
+                    let mapped = st.query_map(rusqlite::params![fn_hash, after_case, limit], function_test_row).db()?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+                }
+                Some(name) => {
+                    let mut st = c.prepare_cached(L::FunctionTestsPageNamed.sql()).db()?;
+                    let mapped =
+                        st.query_map(rusqlite::params![fn_hash, name, after_case, limit], function_test_row).db()?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
+                }
+            };
+            Ok(rows)
+        })
+    }
+
+    fn stored_receipts_of(&self, ns: &str, fn_name: &str, fn_hash: &str, limit: usize) -> Result<Vec<Vec<u8>>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("stored_receipts_of", |c| {
+            let mut st = c.prepare_cached(L::StoredReceiptsOf.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![fn_hash, ns, fn_name, limit], |r| r.get::<_, Vec<u8>>(0)).db()?;
+            rows.collect::<rusqlite::Result<Vec<Vec<u8>>>>().db()
+        })
+    }
+
+    fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            return self.run("slice_values_limit", |c| {
+                // The statement of slice_values, with its LIMIT: the same order (tx).
+                let sql = format!("{} LIMIT ?5", L::VersionsBetweenValues.sql());
+                let mut st = c.prepare(&sql).db()?;
+                let mut rows = st.query(rusqlite::params![cell_id, from, to, asof, limit]).db()?;
+                let mut out = Vec::new();
+                while let Some(r) = rows.next().db()? {
+                    out.push(value_of(value_columns(r).db()?)?.0);
+                }
+                Ok(out)
+            });
+        }
+        let p = Pattern::of(&v)?;
+        self.run("slice_values_limit", |c| values_limited(&p, c, asof, limit))
+    }
+
+    fn versions_limit(&self, cell_id: &str, from: &str, to: &str, limit: usize) -> Result<Vec<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(from, "from")?;
+        check_instant(to, "to")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("versions_limit", |c| {
+            let mut st = c.prepare_cached(L::VersionRangeLimit.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![cell_id, from, to, limit], |r| version_row(r, cell_id)).db()?;
+            rows.collect::<rusqlite::Result<Vec<Version>>>().db()
+        })
+    }
+
+    fn stored_cell_count(&self, ns: &str, fn_name: &str, fn_hash: &str) -> Result<u64> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.run("stored_cell_count", |c| {
+            let n: i64 = c
+                .prepare_cached(L::StoredCellCount.sql())
+                .db()?
+                .query_row(rusqlite::params![fn_hash, ns, fn_name], |r| r.get(0))
+                .db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn has_key_value(&self, owner: &str, key: &str, value: &str) -> Result<bool> {
+        self.run("has_key_value", |c| {
+            c.prepare_cached(L::DictionaryHas.sql())
+                .db()?
+                .query_row(rusqlite::params![owner, key, value], |r| r.get(0))
+                .db()
+        })
+    }
+
+    fn key_value_count(&self, owner: &str, key: &str) -> Result<u64> {
+        self.run("key_value_count", |c| {
+            let n: i64 = c
+                .prepare_cached(L::DictionaryCount.sql())
+                .db()?
+                .query_row(rusqlite::params![owner, key], |r| r.get(0))
+                .db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn mark_key_open(&self, owner: &str, key: &str) -> Result<()> {
+        if owner.is_empty() || owner.len() > 512 || key.is_empty() || key.len() > 128 {
+            return Err(invalid("key", "an owner of 1 to 512 bytes and a key of 1 to 128 bytes"));
+        }
+        self.write("mark_key_open", |c| exec(c, L::KeyOpenPut, rusqlite::params![owner, key]).map(|_| ()))
+    }
+
+    fn open_key_count(&self) -> Result<u64> {
+        self.run("open_key_count", |c| {
+            let n: i64 = c.prepare_cached(L::OpenKeyCount.sql()).db()?.query_row([], |r| r.get(0)).db()?;
+            Ok(n as u64)
+        })
+    }
+
+    fn key_is_open(&self, owner: &str, key: &str) -> Result<bool> {
+        self.run("key_is_open", |c| {
+            c.prepare_cached(L::KeyIsOpen.sql()).db()?.query_row(rusqlite::params![owner, key], |r| r.get(0)).db()
+        })
+    }
+
+    fn catalog_entry(&self, name: &str) -> Result<Option<CatalogEntry>> {
+        self.run("catalog_entry", |c| {
+            let mut st = c.prepare_cached(L::CatalogEntryNamed.sql()).db()?;
+            let row = st
+                .query_row([name], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, Option<String>>(8)?,
+                    ))
+                })
+                .optional()
+                .db()?;
+            let Some((kind, name, hash, label, description, args, examples, source, signed_by)) = row else {
+                return Ok(None);
+            };
+            entry_from_columns(&kind, name, hash, label, description, &args, &examples, &source, signed_by).map(Some)
+        })
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let rows: Vec<(String, String, String, i64)> = {
@@ -1722,6 +1930,42 @@ fn in_key_order_parsed<T>(p: &Pattern, rows: Vec<(T, Args)>, cell_of: impl Fn(&T
     let mut keyed: Vec<(Vec<String>, T)> = rows.into_iter().map(|(m, args)| (key_of(p, &args), m)).collect();
     keyed.sort_by(|(a, ma), (b, mb)| cmp_keys(a, b).then_with(|| cell_of(ma).cmp(cell_of(mb))));
     Ok(keyed.into_iter().map(|(_, m)| m).collect())
+}
+
+/// The members' values of a slice of cells as of `asof`, in key order, at most `limit`: the
+/// statement of `slice_values` with the key order and the LIMIT in SQL. The order of `cmp_keys`
+/// is, per key argument by name, the type's name, then the sort key (which sorts as the value
+/// does, a number's as the decimal does).
+fn values_limited(p: &Pattern, c: &Connection, asof: &str, limit: i64) -> Result<Vec<SliceValue>> {
+    let (d, _) = drive(p, c, false)?;
+    let base = if d.is_some() { L::SliceValuesDrive } else { L::SliceValuesAll };
+    let keys: Vec<&Constraint> = p.args.iter().filter(|a| a.kind != Kind::Value).collect();
+    let mut order = Vec::with_capacity(keys.len() * 2 + 1);
+    for i in 0..keys.len() {
+        let of =
+            |col: &str| format!("(SELECT x.{col} FROM cell_args x WHERE x.cell_id = c.cell_id AND x.name = :k{i})");
+        order.push(of("type"));
+        order.push(of("sort_key"));
+    }
+    order.push("c.cell_id".to_string());
+    let sql = format!("{} ORDER BY {} LIMIT :limit", base.sql(), order.join(", "));
+    let mut binds: Vec<(String, SqlValue)> = params(p, asof, d).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    for (i, a) in keys.iter().enumerate() {
+        binds.push((format!(":k{i}"), SqlValue::Text(a.name.clone())));
+    }
+    binds.push((":limit".to_string(), SqlValue::Integer(limit)));
+    let mut st = c.prepare(&sql).db()?;
+    for (name, value) in &binds {
+        if let Some(i) = st.parameter_index(name).db()? {
+            st.raw_bind_parameter(i, value).db()?;
+        }
+    }
+    let mut rows = st.raw_query();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().db()? {
+        out.push(value_of(value_columns(r).db()?)?.0);
+    }
+    Ok(out)
 }
 
 /// Whether a matching cell has a stored version answering from after `asof`: from

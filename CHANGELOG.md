@@ -2,6 +2,27 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.5.2 (unreleased)
+
+Additive: the function names of tests, bounded reads, exact dictionary and catalogue lookups (CONTRACT-0.4.9, Store 0.5.2, S1-S8). Fourteen methods, one type (`TestSummary`); nothing is removed and no existing method changes. Migrations 11 (PostgreSQL) and 7 (SQLite) add a column, an index and a table; no stored value changes, and a store of 0.5.1 keeps its function tests unnamed.
+
+### Added
+
+- `function_tests.fn_name` (NULL until named) with an index on `(fn_hash, fn_name, case)`, and table `open_keys (owner, key, marked_at)`.
+- `Store::name_function_tests(fn_hash, names)`: names the tests of the given cases; a name once set is never changed. Returns the rows changed.
+- `Store::unnamed_function_tests(limit)`: up to `limit` unnamed tests, by (fn_hash, case).
+- `Store::function_test_summary(fn_hash, fn_name)`: the counts (`pass`, `fail`, `error`, `not_run`), the latest run and the branch counts, in one aggregate; `fn_name` `None` is every test of the hash. `TestSummary` (non-exhaustive, `Default`) is exported at the root.
+- `Store::function_tests_page(fn_hash, fn_name, after_case, limit)`: a page of tests by case, with a SQL `LIMIT`.
+- `Store::stored_receipts_of(ns, fn_name, fn_hash, limit)`: the receipts of the latest stored version of up to `limit` cells of a function, lowest cell id first.
+- `Store::slice_values_limit(slice, asof, limit)` and `Store::versions_limit(cell_id, from, to, limit)`: the first `limit` members of `slice_values` and `versions`, in the same order, with the `LIMIT` in SQL.
+- `Store::stored_cell_count(ns, fn_name, fn_hash)`: the cells of a function name and hash that have a stored version.
+- `Store::has_key_value(owner, key, value)`, `Store::key_value_count(owner, key)`: exact dictionary lookups.
+- `Store::open_key_count()`: the number of keys marked open, of any owner.
+- `Store::mark_key_open(owner, key)` and `Store::key_is_open(owner, key)`: an open key takes no automatic values (rule H7 of the mesh).
+- `Store::catalog_entry(name)`: the catalogue entry of an exact name (a function's before a method's before a class's).
+
+Every new method has a default in the trait, so an `impl Store` that delegates only the 0.5.1 methods still compiles. The defaults answer from the 0.5.1 methods where they can (`slice_values_limit`, `versions_limit`, `function_test_summary` and `function_tests_page` without a name, and `has_key_value` through `text_find`), and are `Error::Unsupported` otherwise.
+
 ## 0.5.1
 
 Additive, and one fix: function tests, the index of descriptor inputs and the names bound to a function (Build 2, Part 3, calculus). Six methods and one type; nothing is removed. `public-api.txt` gains them (`tools/public_api.sh`). Migrations 10 (PostgreSQL) and 6 (SQLite) add a table, two indexes and the descriptor-inputs table; the migrations also back-fill the inputs index from the descriptors already stored. No existing table or stored value changes.

@@ -85,11 +85,18 @@ fn a_store_of_0_5_1_keeps_its_function_tests_unnamed(b: Backend) {
     want.branches_total = 5;
     want.branches_covered = 2;
     assert_eq!(s.function_tests(&h1).unwrap(), vec![want]);
-    assert_eq!(s.function_tests(&h2).unwrap(), vec![FunctionTest::new(&h2, "00000000000000b2", &line, "rates.example.org")]);
+    assert_eq!(
+        s.function_tests(&h2).unwrap(),
+        vec![FunctionTest::new(&h2, "00000000000000b2", &line, "rates.example.org")]
+    );
     // They are the unnamed ones, in (hash, case) order, and can be named.
     let unnamed = s.unnamed_function_tests(10).unwrap();
     assert_eq!(unnamed.iter().map(|t| t.fn_hash.clone()).collect::<Vec<_>>(), [h1.clone(), h2.clone()]);
-    assert_eq!(s.name_function_tests(&h1, &[("00000000000000a1".to_string(), "rates.example.org/fx_rate".to_string())]).unwrap(), 1);
+    assert_eq!(
+        s.name_function_tests(&h1, &[("00000000000000a1".to_string(), "rates.example.org/fx_rate".to_string())])
+            .unwrap(),
+        1
+    );
     assert_eq!(s.unnamed_function_tests(10).unwrap().len(), 1);
     let sum = s.function_test_summary(&h1, Some("rates.example.org/fx_rate")).unwrap();
     assert_eq!((sum.count, sum.pass, sum.branches_total, sum.branches_covered), (1, 1, 5, 2));

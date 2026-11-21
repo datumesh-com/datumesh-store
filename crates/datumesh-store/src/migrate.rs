@@ -63,6 +63,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0010_function_tests.sql",
         sql: include_str!("../migrations/0010_function_tests.sql"),
     },
+    Migration {
+        version: 11,
+        name: "0011_function_test_names.sql",
+        sql: include_str!("../migrations/0011_function_test_names.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -258,6 +263,11 @@ pub mod sqlite {
             version: 6,
             name: "0006_function_tests.sql",
             sql: include_str!("../migrations/sqlite/0006_function_tests.sql"),
+        },
+        Migration {
+            version: 7,
+            name: "0007_function_test_names.sql",
+            sql: include_str!("../migrations/sqlite/0007_function_test_names.sql"),
         },
     ];
 

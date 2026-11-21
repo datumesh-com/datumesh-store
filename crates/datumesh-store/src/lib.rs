@@ -261,6 +261,31 @@ impl FunctionTest {
     }
 }
 
+/// The results of a function's tests ([`Store::function_test_summary`]): how many there are,
+/// how many passed, failed, errored or have not run, the latest run and the branch counts.
+/// `Default` is the summary of no tests (all zero, no run). Since 0.5.2.
+#[non_exhaustive]
+#[derive(Clone, Debug, Default)]
+pub struct TestSummary {
+    /// The tests counted.
+    pub count: u64,
+    /// The tests whose last run passed.
+    pub pass: u64,
+    /// The tests whose last run failed.
+    pub fail: u64,
+    /// The tests whose last run errored.
+    pub error: u64,
+    /// The tests that have not run (no last result).
+    pub not_run: u64,
+    /// The latest `last_run_at` of the tests, if any has run (an instant; instants compare as
+    /// text).
+    pub last_run_at: Option<String>,
+    /// The branches of the function (the value replicated on its tests; 0 when none).
+    pub branches_total: u32,
+    /// The branches covered by the function's tests (replicated as `branches_total`).
+    pub branches_covered: u32,
+}
+
 /// A namespace's host and its key document.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -738,6 +763,142 @@ pub trait Store: Resolver + sealed::Sealed {
     /// `fn_hash`, distinct, ascending. A name since bound to another hash still lists this
     /// one. Since 0.5.1.
     fn bound_names(&self, fn_hash: &str) -> Result<Vec<String>>;
+
+    /// Sets the function name of tests of `fn_hash`: each `(case, fn_name)` names the test of
+    /// that case, if it has no name yet. A name once set is never changed, and a case with no
+    /// test changes nothing. Returns the number of tests named (rows changed); an empty list
+    /// is 0. The default is [`Error::Unsupported`]. Since 0.5.2.
+    fn name_function_tests(&self, fn_hash: &str, names: &[(String, String)]) -> Result<u64> {
+        let _ = (fn_hash, names);
+        Err(Error::Unsupported("naming function tests needs a store of 0.5.2".into()))
+    }
+    /// Up to `limit` tests that have no function name, ordered by (function hash, case), each
+    /// as [`function_tests`](Store::function_tests) gives it. Naming them drains the list. The
+    /// default is [`Error::Unsupported`]. Since 0.5.2.
+    fn unnamed_function_tests(&self, limit: usize) -> Result<Vec<FunctionTest>> {
+        let _ = limit;
+        Err(Error::Unsupported("unnamed tests need a store of 0.5.2".into()))
+    }
+    /// The summary of the tests of `fn_hash` in one aggregate: every test of the hash when
+    /// `fn_name` is `None`, else only those named `fn_name`. A hash with no such test gives the
+    /// zero summary ([`TestSummary::default`]). The default computes it from
+    /// [`function_tests`](Store::function_tests) when `fn_name` is `None`, and is
+    /// [`Error::Unsupported`] for a name (0.5.1 does not give a test's name). Since 0.5.2.
+    fn function_test_summary(&self, fn_hash: &str, fn_name: Option<&str>) -> Result<TestSummary> {
+        if fn_name.is_some() {
+            return Err(Error::Unsupported("a summary by function name needs a store of 0.5.2".into()));
+        }
+        let mut s = TestSummary::default();
+        for t in self.function_tests(fn_hash)? {
+            s.count += 1;
+            match t.last_result.as_deref() {
+                Some("pass") => s.pass += 1,
+                Some("fail") => s.fail += 1,
+                Some("error") => s.error += 1,
+                _ => s.not_run += 1,
+            }
+            if let Some(at) = t.last_run_at {
+                if s.last_run_at.as_ref().is_none_or(|latest| at > *latest) {
+                    s.last_run_at = Some(at);
+                }
+            }
+            s.branches_total = s.branches_total.max(t.branches_total);
+            s.branches_covered = s.branches_covered.max(t.branches_covered);
+        }
+        Ok(s)
+    }
+    /// A page of the tests of `fn_hash` by case ascending: those named `fn_name` (or all, when
+    /// `None`), with a case after `after_case` (exclusive, when given), at most `limit`.
+    /// Whole rows, as [`function_tests`](Store::function_tests) gives them. The default is the
+    /// page of [`function_tests`](Store::function_tests) when `fn_name` is `None`, and is
+    /// [`Error::Unsupported`] for a name. Since 0.5.2.
+    fn function_tests_page(
+        &self,
+        fn_hash: &str,
+        fn_name: Option<&str>,
+        after_case: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FunctionTest>> {
+        if fn_name.is_some() {
+            return Err(Error::Unsupported("a page by function name needs a store of 0.5.2".into()));
+        }
+        Ok(self
+            .function_tests(fn_hash)?
+            .into_iter()
+            .filter(|t| after_case.is_none_or(|after| t.case.as_str() > after))
+            .take(limit)
+            .collect())
+    }
+    /// The receipts (bytes, as [`receipt`](Resolver::receipt) returns them) of the latest
+    /// stored version of up to `limit` cells of `ns`/`fn_name`/`fn_hash` that have one, lowest
+    /// cell id first: at most `limit` cells are read. The default is [`Error::Unsupported`]
+    /// (0.5.1 has no read of a function's cells without a slice). Since 0.5.2.
+    fn stored_receipts_of(&self, ns: &str, fn_name: &str, fn_hash: &str, limit: usize) -> Result<Vec<Vec<u8>>> {
+        let _ = (ns, fn_name, fn_hash, limit);
+        Err(Error::Unsupported("stored receipts of a function need a store of 0.5.2".into()))
+    }
+    /// [`slice_values`](Store::slice_values) with at most `limit` members: the first `limit` of
+    /// its order (the same members, in the same order). The default takes them from
+    /// `slice_values`. Since 0.5.2.
+    fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
+        let mut values = self.slice_values(slice, asof)?;
+        values.truncate(limit);
+        Ok(values)
+    }
+    /// [`versions`](Store::versions) with at most `limit` versions: the first `limit`, in tx
+    /// order. The default takes them from `versions`. Since 0.5.2.
+    fn versions_limit(&self, cell_id: &str, from: &str, to: &str, limit: usize) -> Result<Vec<Version>> {
+        let mut versions = self.versions(cell_id, from, to)?;
+        versions.truncate(limit);
+        Ok(versions)
+    }
+    /// The number of cells of `ns`/`fn_name`/`fn_hash` that have a stored version (a second
+    /// version of a cell is not a second cell). The default is [`Error::Unsupported`]. Since
+    /// 0.5.2.
+    fn stored_cell_count(&self, ns: &str, fn_name: &str, fn_hash: &str) -> Result<u64> {
+        let _ = (ns, fn_name, fn_hash);
+        Err(Error::Unsupported("counting a function's cells needs a store of 0.5.2".into()))
+    }
+    /// Whether `owner` has the dictionary value `value` for `key`, exactly (the value's text,
+    /// case-sensitive; no prefix, substring or label match). Indexed in the native stores. The
+    /// default asks [`text_find`](Store::text_find) for `value` and keeps the exact match.
+    /// Since 0.5.2.
+    fn has_key_value(&self, owner: &str, key: &str, value: &str) -> Result<bool> {
+        Ok(self.text_find(value, usize::MAX)?.iter().any(
+            |h| matches!(h, Hit::Value { owner: o, key: k, value: v, .. } if o == owner && k == key && v == value),
+        ))
+    }
+    /// The number of dictionary values `owner` has for `key`. The default is
+    /// [`Error::Unsupported`]. Since 0.5.2.
+    fn key_value_count(&self, owner: &str, key: &str) -> Result<u64> {
+        let _ = (owner, key);
+        Err(Error::Unsupported("counting a dictionary needs a store of 0.5.2".into()))
+    }
+    /// Marks the key `key` of `owner` open: it takes no automatic values from now on. Marking
+    /// an open key again changes nothing. Its existing values stay. The default is
+    /// [`Error::Unsupported`]. Since 0.5.2.
+    fn mark_key_open(&self, owner: &str, key: &str) -> Result<()> {
+        let _ = (owner, key);
+        Err(Error::Unsupported("open keys need a store of 0.5.2".into()))
+    }
+    /// Whether the key `key` of `owner` has been marked open ([`mark_key_open`](Store::mark_key_open)).
+    /// The default is [`Error::Unsupported`]. Since 0.5.2.
+    fn key_is_open(&self, owner: &str, key: &str) -> Result<bool> {
+        let _ = (owner, key);
+        Err(Error::Unsupported("open keys need a store of 0.5.2".into()))
+    }
+    /// The number of keys marked open, of any owner ([`mark_key_open`](Store::mark_key_open)).
+    /// The default is 0, which is exact for a store with no open key. Since 0.5.2.
+    fn open_key_count(&self) -> Result<u64> {
+        Ok(0)
+    }
+    /// The catalogue entry named `name` (exactly), if there is one. A name may be the name of a
+    /// function and of a class; the function's entry is given first, then a method's, then a
+    /// class's. The default is [`Error::Unsupported`]. Since 0.5.2.
+    fn catalog_entry(&self, name: &str) -> Result<Option<CatalogEntry>> {
+        let _ = name;
+        Err(Error::Unsupported("an exact catalogue lookup needs a store of 0.5.2".into()))
+    }
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.

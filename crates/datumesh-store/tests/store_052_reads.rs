@@ -93,10 +93,7 @@ fn slice_values_limit_is_the_prefix_of_slice_values(b: Backend) {
     }
     // Before any version: empty. Malformed asof: refused as slice_values does.
     assert!(s.slice_values_limit(&sl, "2023-01-01T00:00:00.000000Z", 3).unwrap().is_empty());
-    assert_eq!(
-        s.slice_values_limit(&sl, "x", 3).unwrap_err().code(),
-        s.slice_values(&sl, "x").unwrap_err().code()
-    );
+    assert_eq!(s.slice_values_limit(&sl, "x", 3).unwrap_err().code(), s.slice_values(&sl, "x").unwrap_err().code());
     // A version slice too.
     let c = kcell("f", &h, 1);
     for d in 2..=4 {
@@ -120,7 +117,8 @@ fn versions_limit_is_the_prefix_of_versions(b: Backend) {
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     let c = kcell("f", &h, 1);
-    for d in [3, 1, 4, 2, 5] {
+    // In tx order: a store takes a version only later than the cell's latest one (NotLater).
+    for d in [1, 2, 3, 4, 5] {
         put_member(&s, &c, &format!("{d}"), &day(d), &day(d));
     }
     let id = c.id();

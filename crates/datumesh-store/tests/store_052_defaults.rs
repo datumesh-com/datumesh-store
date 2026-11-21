@@ -84,7 +84,10 @@ fn a_wrapper_delegating_only_the_0_5_1_methods_is_refused_only_by_the_seal() {
     let errors: Vec<&str> = stderr.lines().filter(|l| l.contains(": error")).collect();
     assert!(!errors.is_empty(), "{stderr}");
     for e in &errors {
-        assert!(e.contains("error[E0277]") && e.contains("Sealed"), "not only the seal (a method without a default?): {e}\n{stderr}");
+        assert!(
+            e.contains("error[E0277]") && e.contains("Sealed"),
+            "not only the seal (a method without a default?): {e}\n{stderr}"
+        );
         assert!(!e.contains("E0046"), "a 0.5.2 method has no default: {e}");
     }
 }

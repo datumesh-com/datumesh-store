@@ -118,7 +118,20 @@ fn catalog_entry_is_an_exact_lookup_by_name(b: Backend) {
     assert_eq!(s.catalog_entry("scripture.example.org/none").unwrap(), None);
 }
 
+fn open_key_count_counts_the_open_keys_of_every_owner(b: Backend) {
+    let db = TestDb::migrated(b);
+    let s = db.bare_store();
+    assert_eq!(s.open_key_count().unwrap(), 0);
+    s.mark_key_open(OWNER, "book").unwrap();
+    s.mark_key_open(OWNER2, "book").unwrap();
+    assert_eq!(s.open_key_count().unwrap(), 2);
+    // Marking an open key again keeps one row.
+    s.mark_key_open(OWNER, "book").unwrap();
+    assert_eq!(s.open_key_count().unwrap(), 2);
+}
+
 backends!(
+    open_key_count_counts_the_open_keys_of_every_owner,
     has_key_value_is_exact,
     key_value_count_counts_the_values_of_an_owners_key,
     mark_key_open_is_idempotent_and_key_is_open_reads_it,

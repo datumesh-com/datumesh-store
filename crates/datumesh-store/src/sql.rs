@@ -207,6 +207,65 @@ statements! {
                             WHERE fn_hash = $4 AND "case" = $5"# => [TEXT, TEXT, TEXT, TEXT, TEXT];
     FunctionBranches = "UPDATE function_tests SET branches_total = $2, branches_covered = $3 WHERE fn_hash = $1"
         => [TEXT, INT4, INT4];
+    // Named tests (0.5.2; migration 11): a name is set once, on the rows still unnamed.
+    FunctionTestName = r#"UPDATE function_tests f SET fn_name = n.name FROM unnest($2::text[], $3::text[]) AS n(c, name)
+                          WHERE f.fn_hash = $1 AND f."case" = n.c AND f.fn_name IS NULL"#
+        => [TEXT, TEXT_ARRAY, TEXT_ARRAY];
+    FunctionTestsUnnamed = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
+                           branches_total, branches_covered FROM function_tests WHERE fn_name IS NULL
+                           ORDER BY fn_hash, "case" LIMIT $1"#
+        => [INT8];
+    // The summary of a hash's tests, all of them or those of one name: one aggregate.
+    FunctionTestSummary = r#"SELECT count(*), count(*) FILTER (WHERE last_result = 'pass'),
+                           count(*) FILTER (WHERE last_result = 'fail'), count(*) FILTER (WHERE last_result = 'error'),
+                           count(*) FILTER (WHERE last_result IS NULL), max(last_run_at),
+                           COALESCE(max(branches_total), 0), COALESCE(max(branches_covered), 0)
+                         FROM function_tests WHERE fn_hash = $1 AND ($2::text IS NULL OR fn_name = $2)"#
+        => [TEXT, TEXT];
+    // A page of a hash's tests by case, after a case (exclusive), at most $LIMIT rows.
+    FunctionTestsPage = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
+                           branches_total, branches_covered FROM function_tests
+                         WHERE fn_hash = $1 AND ($2::text IS NULL OR "case" > $2) ORDER BY "case" LIMIT $3"#
+        => [TEXT, TEXT, INT8];
+    FunctionTestsPageNamed = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
+                           branches_total, branches_covered FROM function_tests
+                         WHERE fn_hash = $1 AND fn_name = $2 AND ($3::text IS NULL OR "case" > $3)
+                         ORDER BY "case" LIMIT $4"#
+        => [TEXT, TEXT, TEXT, INT8];
+    // The receipts of the latest stored version of the first cells (by cell id) of a function
+    // name and hash that have one: at most $4 cells read, one indexed query.
+    StoredReceiptsOf = "SELECT r.bytes FROM (SELECT c.cell_id FROM cells c
+                          WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3
+                            AND EXISTS (SELECT 1 FROM versions v WHERE v.cell_id = c.cell_id)
+                          ORDER BY c.cell_id LIMIT $4) k
+                        CROSS JOIN LATERAL (SELECT v.receipt_hash FROM versions v WHERE v.cell_id = k.cell_id
+                                             ORDER BY v.tx DESC LIMIT 1) m
+                        JOIN receipts r ON r.hash = m.receipt_hash
+                        ORDER BY k.cell_id"
+        => [TEXT, TEXT, TEXT, INT8];
+    StoredCellCount = "SELECT count(*) FROM cells c WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3
+                         AND EXISTS (SELECT 1 FROM versions v WHERE v.cell_id = c.cell_id)"
+        => [TEXT, TEXT, TEXT];
+    // A version slice's versions, at most $4 (SQL LIMIT, in tx order).
+    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+                         FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx LIMIT $4"
+        => [TEXT, TEXT, TEXT, INT8];
+    // Dictionaries (0.5.2): exact lookups on the primary key (owner, key, value).
+    DictionaryHas = "SELECT EXISTS (SELECT 1 FROM key_values WHERE owner = $1 AND key = $2 AND value = $3)"
+        => [TEXT, TEXT, TEXT];
+    DictionaryCount = "SELECT count(*) FROM key_values WHERE owner = $1 AND key = $2" => [TEXT, TEXT];
+    KeyOpenPut = r#"INSERT INTO open_keys (owner, key, marked_at)
+                    VALUES ($1, $2, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+                    ON CONFLICT (owner, key) DO NOTHING"#
+        => [TEXT, TEXT];
+    KeyIsOpen = "SELECT EXISTS (SELECT 1 FROM open_keys WHERE owner = $1 AND key = $2)" => [TEXT, TEXT];
+    OpenKeyCount = "SELECT count(*) FROM open_keys" => [];
+    // A catalogue entry by name alone: a name may be both a function's and a class's; the
+    // function's first, then a method's, then a class's.
+    CatalogEntryNamed = "SELECT kind, name, hash, label, description, args, examples, source, signed_by
+                         FROM catalog_entries WHERE name = $1
+                         ORDER BY CASE kind WHEN 'function' THEN 0 WHEN 'method' THEN 1 ELSE 2 END LIMIT 1"
+        => [TEXT];
 
     ReceiptGet = "SELECT bytes FROM receipts WHERE hash = $1" => [TEXT];
     ReceiptMeta = "SELECT cell_id, tx, asof FROM receipts WHERE hash = $1" => [TEXT];
