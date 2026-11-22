@@ -44,6 +44,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::*;
+use datumesh_core::{ClassEnv, FunctionDescriptor};
 use datumesh_store::{migrate, CatalogEntry, CatalogEntryExt, CatalogKind, CatalogSource, Error, Facets, Store};
 
 const F1: &str = "rates.example.org/fx_rate";
@@ -87,6 +88,25 @@ fn all_facets() -> Facets {
         ("region", &["ea", "none"]),
         ("thing", &["currency"]),
     ])
+}
+
+/// A minimal class under `rates.example.org` (as classes.rs builds `fx_pair`: two upper_ascii keys,
+/// one method `rate`), with the method function's descriptor. Returns (class bytes, class hash,
+/// method descriptor).
+fn minimal_class() -> (Vec<u8>, String, Vec<u8>) {
+    let key = r#"{"key_normalisation":"upper_ascii","type":"string","valid":false}"#;
+    let rate = jcs(format!(
+        r#"{{"code":{{"body":"rate","lang":"stored"}},"inputs":[],"signature":{{"args":{{"base":{key},"date":{{"type":"date","valid":true}},"quote":{key}}},"order":["base","quote","date"],"returns":{{"type":"number","unit":"1"}}}}}}"#
+    )
+    .as_bytes());
+    let text = format!(
+        r#"{{"steward":{{"process":"https://rates.example.org/classes/change","namespace":"rates.example.org"}},"order":["base","quote"],"methods":{{"rate":"{}"}},"keys":{{"quote":{{"type":"string","key_normalisation":"upper_ascii"}},"base":{{"type":"string","key_normalisation":"upper_ascii"}}}}}}"#,
+        fn_hash_of(&rate)
+    );
+    let mut env = ClassEnv::new("rates.example.org");
+    env.insert_function(FunctionDescriptor::from_json(&rate).unwrap());
+    let flat = datumesh_core::define_class(CLASS, text.as_bytes(), &env).unwrap();
+    (flat.canonical(), flat.hash(), rate)
 }
 
 fn bind_function(s: &dyn Store, name: &str, tx: &str) -> String {
@@ -172,7 +192,12 @@ fn entries_with_facets_are_listed_with_their_first_binding_time(b: Backend) {
     e1.entry.hash = Some(h.clone());
     let e2 = ext(CatalogKind::Function, F2, facets(&[("domain", &["finance"])]), None);
     let e3 = ext(CatalogKind::Function, F3, facets(&[("thing", &["currency"])]), None); // never bound
-    let c = ext(CatalogKind::Class, CLASS, facets(&[("domain", &["finance"])]), None); // never bound
+                                                                                        // The class is bound at T2 (bind_class), which is its first binding time.
+    let (class_bytes, class_hash, rate) = minimal_class();
+    s.put_descriptor(&rate).unwrap();
+    s.put_class(&class_bytes).unwrap();
+    s.bind_class(CLASS, &class_hash, T2).unwrap();
+    let c = ext(CatalogKind::Class, CLASS, facets(&[("domain", &["finance"])]), None);
     let none = CatalogEntryExt::new(entry(CatalogKind::Function, "rates.example.org/plain"));
     s.upsert_catalog_ext(&[e3, none, c, e2, e1]).unwrap();
 
@@ -184,7 +209,7 @@ fn entries_with_facets_are_listed_with_their_first_binding_time(b: Backend) {
     assert_eq!(
         view,
         vec![
-            (CatalogKind::Class, CLASS, None, None, 1),
+            (CatalogKind::Class, CLASS, None, Some(T2.to_string()), 1),
             (CatalogKind::Function, F3, None, None, 1),
             (CatalogKind::Function, F2, None, Some(T2.to_string()), 1),
             (CatalogKind::Function, F1, Some(h), Some(T1.to_string()), 5),

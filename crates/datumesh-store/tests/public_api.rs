@@ -240,3 +240,41 @@ fn the_api_has_computed_cells_and_has_bindings_under_since_0_4_2() {
     // Additions only: the 0.3.2 slice methods are still there.
     assert!(has("pub fn datumesh_store::Store::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>"));
 }
+
+/// 0.5.3 / 0.6.0 (CONTRACT-classes-round C2 and K9): catalogue facets and `extends`, additively
+/// (`public-api.txt` is regenerated with the implementation). `CatalogEntry` itself is unchanged.
+#[test]
+fn the_api_has_catalogue_facets_and_extends() {
+    let api = api();
+    let has = |item: &str| api.lines().any(|l| l == item);
+    for item in [
+        "pub type datumesh_store::Facets = alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>",
+        "#[non_exhaustive] pub struct datumesh_store::CatalogEntryExt",
+        "pub datumesh_store::CatalogEntryExt::entry: datumesh_store::CatalogEntry",
+        "pub datumesh_store::CatalogEntryExt::extends: core::option::Option<alloc::string::String>",
+        "pub datumesh_store::CatalogEntryExt::facets: datumesh_store::Facets",
+        "pub fn datumesh_store::CatalogEntryExt::new(datumesh_store::CatalogEntry) -> datumesh_store::CatalogEntryExt",
+        "#[non_exhaustive] pub struct datumesh_store::FacetedEntry",
+        "pub datumesh_store::FacetedEntry::facets: datumesh_store::Facets",
+        "pub datumesh_store::FacetedEntry::first_bound: core::option::Option<alloc::string::String>",
+        "pub datumesh_store::FacetedEntry::hash: core::option::Option<alloc::string::String>",
+        "pub datumesh_store::FacetedEntry::kind: datumesh_store::CatalogKind",
+        "pub datumesh_store::FacetedEntry::name: alloc::string::String",
+    ] {
+        assert!(has(item), "missing: {item}");
+    }
+    for owner in ["Store", "PgStore", "SqliteStore"] {
+        for item in [
+            format!("pub fn datumesh_store::{owner}::upsert_catalog_ext(&self, &[datumesh_store::CatalogEntryExt]) -> datumesh_store::Result<alloc::vec::Vec<i64>>"),
+            format!("pub fn datumesh_store::{owner}::catalog_entry_ext(&self, datumesh_store::CatalogKind, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::CatalogEntryExt>>"),
+            format!("pub fn datumesh_store::{owner}::catalog_entries_with_facets(&self) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::FacetedEntry>>"),
+            format!("pub fn datumesh_store::{owner}::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>"),
+        ] {
+            assert!(has(&item), "missing: {item}");
+        }
+    }
+    // Additions only: CatalogEntry keeps exactly its nine public fields and is not non_exhaustive.
+    assert!(has("pub struct datumesh_store::CatalogEntry"));
+    assert!(has("pub datumesh_store::CatalogEntry::signed_by: core::option::Option<alloc::string::String>"));
+    assert!(!api.lines().any(|l| l.starts_with("pub datumesh_store::CatalogEntry::facets")));
+}
