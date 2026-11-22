@@ -150,6 +150,16 @@ fn every_receipt_vector_is_stored_exactly_when_it_verifies(b: Backend) {
             Ok(h) => {
                 assert!(want.ok, "{id}: stored although verify says {:?}", want.code);
                 stored += 1;
+                if is_withdrawal(&bytes) {
+                    // A withdrawal (spec-0.7.0) is a receipt too: the core's `Withdrawal`.
+                    let parsed = datumesh_core::Withdrawal::from_json(&bytes).unwrap();
+                    assert_eq!(h, parsed.hash(), "{id}");
+                    let back = s.receipt(&h).unwrap_or_else(|| panic!("{id}: not stored"));
+                    assert_eq!(&*back, jcs(&bytes).as_slice(), "{id}");
+                    assert_eq!(datumesh_core::Withdrawal::from_json(&back).unwrap(), parsed, "{id}");
+                    assert_eq!(s.put_receipt(&back).unwrap(), h, "{id}");
+                    continue;
+                }
                 let parsed = Receipt::from_json(&bytes).unwrap();
                 assert_eq!(h, parsed.hash(), "{id}");
                 let back = s.receipt(&h).unwrap_or_else(|| panic!("{id}: not stored"));

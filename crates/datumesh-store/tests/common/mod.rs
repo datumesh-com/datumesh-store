@@ -593,6 +593,12 @@ pub fn key_doc(v: &Value, host: &str) -> Vec<u8> {
     str_of(env.get("https").unwrap(), "body").as_bytes().to_vec()
 }
 
+/// Whether the bytes are a withdrawal on the wire: a JSON object with a `withdrawn` member
+/// (`spec-0.7.0`), which the core parses as a `Withdrawal`, never as a `Receipt`.
+pub fn is_withdrawal(bytes: &[u8]) -> bool {
+    json::parse(bytes).ok().is_some_and(|v| v.get("withdrawn").is_some())
+}
+
 /// The vector's receipt input as bytes.
 pub fn input(v: &Value) -> Vec<u8> {
     str_of(v, "input").as_bytes().to_vec()

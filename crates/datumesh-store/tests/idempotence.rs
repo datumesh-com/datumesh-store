@@ -51,7 +51,13 @@ fn receipts_the_core_rejects_are_refused_with_its_code(b: Backend) {
     let mut seen = 0;
     for v in vectors("invalid").into_iter().filter(|v| str_of(v, "kind") == "receipt") {
         let bytes = input(&v);
-        let Err(core) = Receipt::from_json(&bytes) else { continue };
+        // A withdrawal (spec-0.7.0) is parsed by the core's `Withdrawal`, the rest by `Receipt`.
+        let parsed = if is_withdrawal(&bytes) {
+            datumesh_core::Withdrawal::from_json(&bytes).map(|_| ())
+        } else {
+            Receipt::from_json(&bytes).map(|_| ())
+        };
+        let Err(core) = parsed else { continue };
         seen += 1;
         match s.put_receipt(&bytes) {
             Err(Error::Invalid(e)) => {
