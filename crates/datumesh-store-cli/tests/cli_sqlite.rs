@@ -124,7 +124,13 @@ fn spec_vectors() -> PathBuf {
 /// A directory of the specification vectors `<group>/<file>` for which `keep` holds (see
 /// cli.rs: sets whose key documents agree).
 fn vector_set(name: &str, keep: fn(&str, &str) -> bool) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vectors-sqlite-{name}-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    // One directory per call: tests of one process run in parallel and must not remove each other's.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "vectors-sqlite-{name}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     for group in std::fs::read_dir(spec_vectors()).unwrap() {
         let group = group.unwrap().path();
@@ -144,8 +150,14 @@ fn vector_set(name: &str, keep: fn(&str, &str) -> bool) -> PathBuf {
     dir
 }
 
+///
+/// And without receipt/relayed-full (spec-0.7.0): the vectors are independent, and it shares a
+/// cell and tx with stored-number (both stored versions of the EUR/USD cell at 2024-03-15T16:00,
+/// different receipts), so a single store cannot hold both (NotLater, correctly). The import
+/// puts only valued receipts as versions, so the withdrawn-* vectors are imported as receipts
+/// and conflict with nothing.
 fn vectors_without_slices() -> PathBuf {
-    vector_set("no-slices", |g, f| !(g == "receipt" && f.starts_with("slice-")))
+    vector_set("no-slices", |g, f| !(g == "receipt" && (f.starts_with("slice-") || f == "relayed-full.json")))
 }
 
 /// An export's lines without the namespaces' `validated_at` (the time of an import).

@@ -101,7 +101,13 @@ fn spec_vectors() -> PathBuf {
 /// replaced document cannot be imported again (`E_KEY_UNKNOWN`). The round-trip tests use
 /// sets whose key documents agree.
 fn vector_set(name: &str, keep: fn(&str, &str) -> bool) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("vectors-{name}-{}", std::process::id()));
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    // One directory per call: tests of one process run in parallel and must not remove each other's.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "vectors-{name}-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     for group in std::fs::read_dir(spec_vectors()).unwrap() {
         let group = group.unwrap().path();
@@ -122,8 +128,28 @@ fn vector_set(name: &str, keep: fn(&str, &str) -> bool) -> PathBuf {
 }
 
 /// Every vector but the slice-lineage receipt vectors: the key documents of spec-0.3.0.
+///
+/// And without receipt/relayed-full (spec-0.7.0): the vectors are independent, and it shares a
+/// cell and tx with stored-number (both stored versions of the EUR/USD cell at 2024-03-15T16:00,
+/// different receipts), so a single store cannot hold both (NotLater, correctly). The import
+/// puts only valued receipts as versions, so the withdrawn-* vectors are imported as receipts
+/// and conflict with nothing.
 fn vectors_without_slices() -> PathBuf {
-    vector_set("no-slices", |g, f| !(g == "receipt" && f.starts_with("slice-")))
+    vector_set("no-slices", |g, f| !(g == "receipt" && (f.starts_with("slice-") || f == "relayed-full.json")))
+}
+
+/// Two exports are the same but for the namespaces' `validated_at` (the time of an import): the
+/// vectors' key documents of one host differ (spec-0.7.0), so each import re-validates that host.
+fn same_export(a: &str, b: &str) {
+    let strip = |e: &str| -> Vec<String> {
+        e.lines()
+            .map(|l| match l.find(r#""validated_at":""#) {
+                Some(i) if l.starts_with(r#"{"namespace":"#) => format!("{}{}", &l[..i], &l[i + 43..]),
+                _ => l.to_string(),
+            })
+            .collect()
+    };
+    assert_eq!(strip(a), strip(b));
 }
 
 #[test]
@@ -178,16 +204,16 @@ fn import_vectors_export_and_round_trip() {
 
     // Re-importing is a no-op.
     ok(&db.run(&["import", dir.to_str().unwrap()]));
-    assert_eq!(ok(&db.run(&["export"])), export1);
+    same_export(&ok(&db.run(&["export"])), &export1);
 
     // The export imports into an empty database and exports the same (from stdin and from
     // a file).
     let db2 = Db::new();
     ok(&db2.run(&["migrate"]));
     ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
-    assert_eq!(ok(&db2.run(&["export"])), export1);
+    same_export(&ok(&db2.run(&["export"])), &export1);
     ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
-    assert_eq!(ok(&db2.run(&["export"])), export1);
+    same_export(&ok(&db2.run(&["export"])), &export1);
 }
 
 #[test]
@@ -389,9 +415,9 @@ fn export_and_import_keep_computed_versions() {
     ok(&db2.run(&["migrate"]));
     let out = ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
     assert!(out.contains(&format!("{n} computed")), "{out}");
-    assert_eq!(ok(&db2.run(&["export"])), export1);
+    same_export(&ok(&db2.run(&["export"])), &export1);
     ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
-    assert_eq!(ok(&db2.run(&["export"])), export1);
+    same_export(&ok(&db2.run(&["export"])), &export1);
 
     // A computed line naming another asof than its receipt's is refused.
     let bad = computed[0].replace(r#""asof":"2"#, r#""asof":"1"#);
