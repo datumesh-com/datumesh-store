@@ -380,6 +380,13 @@ statements! {
         => [TEXT, TEXT, TEXT];
     ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
         => [TEXT, TEXT];
+    // The class names bound to a hash as of an instant: each name's latest binding with tx <= $2
+    // must be to the hash (0.5.3).
+    ClassNamesBound = "SELECT b.class_name FROM class_bindings b
+                       WHERE b.class_hash = $1 AND b.tx <= $2
+                         AND b.tx = (SELECT max(c.tx) FROM class_bindings c WHERE c.class_name = b.class_name AND c.tx <= $2)
+                       GROUP BY b.class_name ORDER BY b.class_name COLLATE \"C\""
+        => [TEXT, TEXT];
 
     // Manifests (0.3.1).
     ManifestPut = "INSERT INTO manifests (entry, slice_id, members_hash, fn_hash, members, bytes)

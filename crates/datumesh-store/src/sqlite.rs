@@ -1122,6 +1122,16 @@ impl Store for SqliteStore {
         })
     }
 
+    fn class_names_bound_to(&self, class_hash: &str, at: &str) -> Result<Vec<String>> {
+        check_hex(class_hash, 64, "class_hash")?;
+        check_instant(at, "at")?;
+        self.run("class_names_bound_to", |c| {
+            let mut st = c.prepare_cached(L::ClassNamesBound.sql()).db()?;
+            let rows = st.query_map([class_hash, at], |r| r.get::<_, String>(0)).db()?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().db()
+        })
+    }
+
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {
         check_function_name(fn_name, "fn_name")?;
         check_instant(asof, "asof")?;

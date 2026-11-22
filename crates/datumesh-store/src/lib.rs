@@ -590,6 +590,16 @@ pub trait Store: Resolver + sealed::Sealed {
     /// answer `None` for a class name: a bindings answer (9.7) has `fn_hash` or `class_hash`,
     /// never both. Since 0.4.1.
     fn resolve_class_binding(&self, class_name: &str, asof: &str) -> Result<Option<ClassBinding>>;
+    /// The class names whose class binding as of `at` (the latest with `tx <= at`, as
+    /// [`resolve_class_binding`](Store::resolve_class_binding) takes it) is `class_hash`, in byte
+    /// order, each once. A name rebound to another hash is no longer listed from that binding's
+    /// `tx` on. Function names are never listed. Empty when none is bound (also when the hash is
+    /// not stored, or `at` is before the first binding). A malformed hash is `E_CANON_HEX`, a
+    /// malformed instant `E_CANON_INSTANT`. The default is [`Error::Unsupported`]. Since 0.5.3.
+    fn class_names_bound_to(&self, class_hash: &str, at: &str) -> Result<Vec<String>> {
+        let _ = (class_hash, at);
+        Err(Error::Unsupported("class names need a store of 0.5.3".into()))
+    }
 
     /// Records that `receipt_hash` (stored, a receipt of `cell_id` at `tx`) is a computed
     /// version of the cell. Insert-only, in any order (an older version may be added after a

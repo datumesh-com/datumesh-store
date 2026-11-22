@@ -359,6 +359,7 @@ pub fn datumesh_store::PgStore::catalog_entry_ext(&self, datumesh_store::Catalog
 pub fn datumesh_store::PgStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::PgStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn datumesh_store::PgStore::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
@@ -511,6 +512,7 @@ pub fn datumesh_store::SqliteStore::catalog_entry_ext(&self, datumesh_store::Cat
 pub fn datumesh_store::SqliteStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::SqliteStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn datumesh_store::SqliteStore::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
@@ -643,6 +645,7 @@ pub fn datumesh_store::Store::catalog_entry_ext(&self, datumesh_store::CatalogKi
 pub fn datumesh_store::Store::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::Store::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn datumesh_store::Store::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::Store::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::Store::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
@@ -720,6 +723,7 @@ pub fn datumesh_store::PgStore::catalog_entry_ext(&self, datumesh_store::Catalog
 pub fn datumesh_store::PgStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::PgStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn datumesh_store::PgStore::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>
@@ -797,6 +801,7 @@ pub fn datumesh_store::SqliteStore::catalog_entry_ext(&self, datumesh_store::Cat
 pub fn datumesh_store::SqliteStore::catalog_summary(&self) -> datumesh_store::Result<datumesh_store::Summary>
 pub fn datumesh_store::SqliteStore::cell_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::class(&self, &str) -> datumesh_store::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn datumesh_store::SqliteStore::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::computed_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::computed_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::computed_cells(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_core::model::Cell>>

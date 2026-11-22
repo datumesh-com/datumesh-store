@@ -1272,6 +1272,16 @@ impl Store for PgStore {
         })
     }
 
+    fn class_names_bound_to(&self, class_hash: &str, at: &str) -> Result<Vec<String>> {
+        check_hex(class_hash, 64, "class_hash")?;
+        check_instant(at, "at")?;
+        self.run("class_names_bound_to", |c| {
+            let st = c.stmt(Q::ClassNamesBound)?;
+            let rows = c.client.query(&st, &[&class_hash, &at]).db()?;
+            rows.iter().map(|r| r.try_get(0).db()).collect()
+        })
+    }
+
     fn resolve_binding(&self, fn_name: &str, asof: &str) -> Result<Option<Binding>> {
         check_function_name(fn_name, "fn_name")?;
         check_instant(asof, "asof")?;

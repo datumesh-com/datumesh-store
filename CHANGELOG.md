@@ -4,7 +4,7 @@ All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
 ## 0.5.3
 
-Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec 16.8 and 9.6). Four methods on `Store` (`upsert_catalog_ext`, `catalog_entry_ext`, `catalog_entries_with_facets`, `extensions_of`), four types (`CatalogEntryExt`, `FacetedEntry`, `Facets`, and the `CatalogEntryExt::new` constructor); nothing is removed and no existing method or `CatalogEntry` field changes. `upsert_catalog` leaves the facets and `extends` of an existing row as they are. Migrations 12 (PostgreSQL) and 8 (SQLite) add the columns `facets` (JSON text, `'{}'` by default, a JSON object) and `extends` (NULL by default) to `catalog_entries`; no stored value changes. cargo-semver-checks against 0.5.2 with a patch release type: no semver update required (229 checks pass, 31 skipped), so this is 0.5.3. `datumesh-store-cli` 0.5.3 follows the store version and pins it exactly.
+Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec 16.8 and 9.6). Five methods on `Store` (`upsert_catalog_ext`, `catalog_entry_ext`, `catalog_entries_with_facets`, `extensions_of`, `class_names_bound_to`), four types (`CatalogEntryExt`, `FacetedEntry`, `Facets`, and the `CatalogEntryExt::new` constructor); nothing is removed and no existing method or `CatalogEntry` field changes. `upsert_catalog` leaves the facets and `extends` of an existing row as they are. Migrations 12 (PostgreSQL) and 8 (SQLite) add the columns `facets` (JSON text, `'{}'` by default, a JSON object) and `extends` (NULL by default) to `catalog_entries`; no stored value changes. cargo-semver-checks against 0.5.2 with a patch release type: no semver update required (229 checks pass, 31 skipped), so this is 0.5.3. `datumesh-store-cli` 0.5.3 follows the store version and pins it exactly.
 
 ### Added
 
@@ -12,6 +12,7 @@ Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec
 - `Store::catalog_entry_ext(kind, name)`: an entry with its facets and `extends`.
 - `Store::catalog_entries_with_facets()`: the entries that have a facet, by kind then name, each with its first binding time (`FacetedEntry::first_bound`, `None` when never bound).
 - `Store::extensions_of(class)`: the functions whose `extends` is `class`, by name.
+- `Store::class_names_bound_to(class_hash, at)`: the class names whose class binding as of `at` is `class_hash`, in byte order (a name rebound away is no longer listed from that binding's `tx`; function names are never listed; none bound is an empty list).
 - Each new method has a default in the trait (`Error::Unsupported`), so an `impl Store` that delegates only the 0.5.2 methods still compiles.
 
 The store does not check that `extends` names a stored class, nor the key rule of 16.3: http does that when it publishes.

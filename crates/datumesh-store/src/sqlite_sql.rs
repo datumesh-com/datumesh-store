@@ -313,6 +313,12 @@ statements! {
     ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, class_hash, written_at)
                        VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
     ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = ?1 AND tx <= ?2 ORDER BY tx DESC LIMIT 1";
+    // The class names bound to a hash as of an instant (0.5.3): each name's latest binding with
+    // tx <= ?2 must be to the hash.
+    ClassNamesBound = "SELECT DISTINCT b.class_name FROM class_bindings b
+                       WHERE b.class_hash = ?1 AND b.tx <= ?2
+                         AND b.tx = (SELECT max(c.tx) FROM class_bindings c WHERE c.class_name = b.class_name AND c.tx <= ?2)
+                       ORDER BY b.class_name";
 
     ManifestExists = "SELECT EXISTS (SELECT 1 FROM manifests WHERE entry = ?1)";
     ManifestPut = "INSERT INTO manifests (entry, slice_id, members_hash, fn_hash, members, bytes)
