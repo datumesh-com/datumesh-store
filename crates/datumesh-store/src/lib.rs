@@ -900,6 +900,101 @@ pub trait Store: Resolver + sealed::Sealed {
         Err(Error::Unsupported("an exact catalogue lookup needs a store of 0.5.2".into()))
     }
 
+    /// The number of cells of `ns`/`fn_name`/`fn_hash`: every cell with a stored receipt, a
+    /// second version of a cell not counted again. Read from the counter (PK), not counted
+    /// over the cells. The default is [`stored_cell_count`](Store::stored_cell_count). Since
+    /// 0.5.3.
+    fn cell_count(&self, ns: &str, fn_name: &str, fn_hash: &str) -> Result<u64> {
+        self.stored_cell_count(ns, fn_name, fn_hash)
+    }
+    /// The test of `fn_hash` with case `case` (16 hex digits), if there is one: one row by
+    /// primary key, as [`function_tests`](Store::function_tests) gives it. The default takes
+    /// it from [`function_tests`](Store::function_tests). Since 0.5.3.
+    fn function_test(&self, fn_hash: &str, case: &str) -> Result<Option<FunctionTest>> {
+        Ok(self.function_tests(fn_hash)?.into_iter().find(|t| t.case == case))
+    }
+    /// Up to `limit` tests of `fn_hash` whose last result is `fail` or `error`, by case
+    /// ascending, among those named `fn_name` (or all, when `None`). A SQL limit: the rows
+    /// past it are not read. The default pages [`function_tests_page`](Store::function_tests_page)
+    /// (which is [`Error::Unsupported`] for a name). Since 0.5.3.
+    fn function_tests_failing(&self, fn_hash: &str, fn_name: Option<&str>, limit: usize) -> Result<Vec<FunctionTest>> {
+        let mut out = Vec::new();
+        if limit == 0 {
+            return Ok(out);
+        }
+        let mut after: Option<String> = None;
+        loop {
+            let page = self.function_tests_page(fn_hash, fn_name, after.as_deref(), 256)?;
+            let Some(last) = page.last() else { return Ok(out) };
+            after = Some(last.case.clone());
+            for t in page {
+                if matches!(t.last_result.as_deref(), Some("fail") | Some("error")) {
+                    out.push(t);
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+    }
+    /// The stored `test_case` cells of any namespace whose `function_hash` argument is
+    /// `fn_hash` and whose latest version is `false`: each as (cell id, the bytes of the
+    /// receipt of that latest version), at most `limit`, in one query. The default is
+    /// [`Error::Unsupported`]. Since 0.5.3.
+    fn false_test_cells(&self, fn_hash: &str, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
+        let _ = (fn_hash, limit);
+        Err(Error::Unsupported("false test cells need a store of 0.5.3".into()))
+    }
+    /// The names bound at `at` to a function hash that reads `name` (its descriptor's inputs
+    /// name it), as (name, fn_hash), at most `limit`. The default walks
+    /// [`function_readers`](Store::function_readers), [`bound_names`](Store::bound_names) and
+    /// [`resolve_name`](Store::resolve_name). Since 0.5.3.
+    fn dependants_of(&self, name: &str, at: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        if limit == 0 {
+            return Ok(out);
+        }
+        for h in self.function_readers(name)? {
+            for n in self.bound_names(&h)? {
+                if self.resolve_name(&n, at)?.as_deref() == Some(h.as_str()) {
+                    out.push((n, h.clone()));
+                    if out.len() == limit {
+                        return Ok(out);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+    /// A page of the members of `slice` as of `asof`, by cell id ascending: those whose cell
+    /// id is after `after_cell_id` (exclusive, when given), at most `limit`, with one value
+    /// per member. The default takes all of [`slice_values`](Store::slice_values) and pages
+    /// them. Since 0.5.3.
+    fn slice_values_page(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        after_cell_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SliceValue>> {
+        let mut values = self.slice_values(slice, asof)?;
+        values.retain(|v| after_cell_id.is_none_or(|a| v.version.cell_id.as_str() > a));
+        values.sort_by(|a, b| a.version.cell_id.cmp(&b.version.cell_id));
+        values.truncate(limit);
+        Ok(values)
+    }
+    /// Up to `limit` catalogue entries as (kind, name, label, description), with no counts.
+    /// The default is [`Error::Unsupported`]. Since 0.5.3.
+    fn catalog_entries_all(&self, limit: usize) -> Result<Vec<(CatalogKind, String, String, String)>> {
+        let _ = limit;
+        Err(Error::Unsupported("the catalogue's entries need a store of 0.5.3".into()))
+    }
+    /// The values of dictionary `key` of `owner`, in insertion order, at most `limit`. The
+    /// default is [`Error::Unsupported`]. Since 0.5.3.
+    fn dictionary_values_ordered(&self, owner: &str, key: &str, limit: usize) -> Result<Vec<String>> {
+        let _ = (owner, key, limit);
+        Err(Error::Unsupported("ordered dictionary values need a store of 0.5.3".into()))
+    }
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as
     /// [`receipt`](Resolver::receipt) returns them), which is what a caller reads next.
     /// The default asks for the two in turn (a receipt that cannot be read then is

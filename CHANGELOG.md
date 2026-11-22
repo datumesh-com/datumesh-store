@@ -2,6 +2,27 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.5.3 (unreleased)
+
+Additive, and the reads that were counts over whole tables are now counters and bounded queries (CONTRACT-round-0.7-P, Store 0.5.3, SP1-SP7). Eight methods; nothing is removed, and no existing signature changes. Migrations 12 (PostgreSQL) and 8 (SQLite) add two counter tables and a trigram index; the migrations fill the counters from the rows already stored, once.
+
+### Added
+
+- `Store::cell_count(ns, fn_name, fn_hash)`: the cells of a function name and hash, read from the counter `cell_counts` (by primary key). `stored_cell_count` and the catalogue summary's `n_cells` read the same counter, not a count over `cells`. A new cell adds one (by the statement trigger on PostgreSQL, by a trigger on SQLite); a second version of a cell adds nothing.
+- `Store::function_test(fn_hash, case)`: one test by primary key.
+- `Store::function_tests_failing(fn_hash, fn_name, limit)`: up to `limit` failing or erroring tests, by case, with a SQL `LIMIT`.
+- `Store::false_test_cells(fn_hash, limit)`: the stored `test_case` cells whose latest version is `false` and whose `function_hash` argument is the given hash, with the bytes of that version's receipt, in one query.
+- `Store::dependants_of(name, at, limit)`: the names bound at `at` to a function that reads `name`, in one query.
+- `Store::slice_values_page(slice, asof, after_cell_id, limit)`: a page of a slice's values by cell id.
+- `Store::catalog_entries_all(limit)`: the catalogue's (kind, name, label, description), without counts.
+- `Store::dictionary_values_ordered(owner, key, limit)`: a dictionary's values in insertion order.
+
+### Changed
+
+- The function test counter `function_test_counts (fn_hash, fn_name, n, pass, fail, error, not_run, last_run_at, branches_total, branches_covered)` (`fn_name` `''` for an unnamed test) is kept in the transaction of each write to a test. `function_test_summary` reads it. Branch counts are kept per hash on the counter and are no longer written to every test row; `function_tests` and `function_test` read them from the counter.
+- `text_find` ranks in SQL (`ORDER BY` the score, then the name) and applies its limit there: it no longer loads every match. Scores are integers in tens (10, 8, 5 per word, then the mean), so the order is exact and the same as before. PostgreSQL adds a trigram index on `lower(catalog_entries.name)`; the search's scoring functions are in the migration (`datumesh_word_score`, `datumesh_entry_total`, `datumesh_value_total`), and SQLite registers the same as connection functions.
+- `set_function_branches` on a function with no tests is still a no-op.
+
 ## 0.5.2 (unreleased)
 
 Additive: the function names of tests, bounded reads, exact dictionary and catalogue lookups (CONTRACT-0.4.9, Store 0.5.2, S1-S8). Fourteen methods, one type (`TestSummary`); nothing is removed and no existing method changes. Migrations 11 (PostgreSQL) and 7 (SQLite) add a column, an index and a table; no stored value changes, and a store of 0.5.1 keeps its function tests unnamed.

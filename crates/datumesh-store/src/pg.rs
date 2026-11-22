@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::catalogue::{
-    args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, check_model, entry_fields,
-    entry_from_columns, entry_text, invalid, miss_text, rank, value_text, vector_literal, Words, SUMMARY_VALUES,
+    args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, check_model, entry_from_columns,
+    entry_text, invalid, miss_text, rank, value_text, vector_literal, Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
@@ -1411,12 +1411,28 @@ impl Store for PgStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let entry_where = like_where(&words, &["name", "label", "description", "args"]);
-        let value_where = like_where(&words, &["value", "label", "array_to_string(aliases, ' ')"]);
+        // The words (lower-cased) are $1; the prefilter's patterns follow; the LIMIT is last.
+        // The scores are computed in SQL (migration 12), so each table is ordered and cut in SQL.
+        let word_list: Vec<String> = words.words().to_vec();
+        let entry_where = like_where(&words, &["name", "label", "description", "args"], 2);
+        let value_where = like_where(&words, &["value", "label", "array_to_string(aliases, ' ')"], 2);
+        let cap = limit;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.run("text_find", |c| {
             let mut hits = Vec::new();
-            let refs = as_refs(&entry_where.1);
-            for r in c.client.query(&format!("SELECT id, kind, name, hash, label, description, args, examples, source, signed_by FROM catalog_entries WHERE TRUE{}", entry_where.0), &refs).db()? {
+            let mut params: Vec<Box<dyn postgres::types::ToSql + Sync>> = vec![Box::new(word_list.clone())];
+            params.extend(entry_where.1.iter().map(|p| Box::new(p.clone()) as Box<dyn postgres::types::ToSql + Sync>));
+            params.push(Box::new(limit));
+            let sql = format!(
+                "SELECT * FROM (SELECT id, kind, name, hash, label, description, args, examples, source, signed_by,
+                        datumesh_entry_total($1::text[], name, label, description, args) AS total
+                   FROM catalog_entries WHERE TRUE{}) e
+                  WHERE total IS NOT NULL ORDER BY total DESC, name COLLATE \"C\" LIMIT ${}",
+                entry_where.0,
+                params.len()
+            );
+            let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref() as _).collect();
+            for r in c.client.query(&sql, &refs).db()? {
                 let entry = entry_from_columns(
                     &r.try_get::<_, String>(1).db()?,
                     r.try_get(2).db()?,
@@ -1428,25 +1444,37 @@ impl Store for PgStore {
                     &r.try_get::<_, String>(8).db()?,
                     r.try_get(9).db()?,
                 )?;
-                let score = words.score(&entry_fields(&entry));
-                if let Some(score) = score {
-                    hits.push(Hit::Entry { id: r.try_get(0).db()?, entry, score });
-                }
+                let total: i32 = r.try_get(10).db()?;
+                hits.push(Hit::Entry { id: r.try_get(0).db()?, entry, score: words.score_of(total as u32) });
             }
-            let refs = as_refs(&value_where.1);
-            for r in c.client.query(&format!("SELECT id, owner, key, value, label, aliases FROM key_values WHERE TRUE{}", value_where.0), &refs).db()? {
+            let mut params: Vec<Box<dyn postgres::types::ToSql + Sync>> = vec![Box::new(word_list.clone())];
+            params.extend(value_where.1.iter().map(|p| Box::new(p.clone()) as Box<dyn postgres::types::ToSql + Sync>));
+            params.push(Box::new(limit));
+            let sql = format!(
+                "SELECT * FROM (SELECT id, owner, key, value, label, aliases,
+                        datumesh_value_total($1::text[], value, label, aliases) AS total
+                   FROM key_values WHERE TRUE{}) v
+                  WHERE total IS NOT NULL
+                  ORDER BY total DESC, (owner || chr(1) || key || chr(1) || value) COLLATE \"C\" LIMIT ${}",
+                value_where.0,
+                params.len()
+            );
+            let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref() as _).collect();
+            for r in c.client.query(&sql, &refs).db()? {
                 let aliases: Vec<String> = r.try_get(5).db()?;
                 let (value, label): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
-                let score = {
-                    let mut fields: Vec<&str> = vec![&value, &label];
-                    fields.extend(aliases.iter().map(String::as_str));
-                    words.score(&fields)
-                };
-                if let Some(score) = score {
-                    hits.push(Hit::Value { id: r.try_get(0).db()?, owner: r.try_get(1).db()?, key: r.try_get(2).db()?, value, label, aliases, score });
-                }
+                let total: i32 = r.try_get(6).db()?;
+                hits.push(Hit::Value {
+                    id: r.try_get(0).db()?,
+                    owner: r.try_get(1).db()?,
+                    key: r.try_get(2).db()?,
+                    value,
+                    label,
+                    aliases,
+                    score: words.score_of(total as u32),
+                });
             }
-            Ok(rank(hits, limit))
+            Ok(rank(hits, cap))
         })
     }
 
@@ -1601,8 +1629,10 @@ impl Store for PgStore {
         let (total, covered) = crate::functions::check_test(test)?;
         self.run("put_function_test", |c| {
             let st = c.stmt(Q::FunctionTestPut)?;
-            let n = c
-                .client
+            let ensure = c.stmt(Q::CounterEnsure)?;
+            let add = c.stmt(Q::CounterAdd)?;
+            let mut t = c.client.transaction().db()?;
+            let n = t
                 .execute(
                     &st,
                     &[
@@ -1618,7 +1648,102 @@ impl Store for PgStore {
                     ],
                 )
                 .db()?;
+            if n == 1 {
+                let results = crate::functions::result_counts(test.last_result.as_deref());
+                let last = test.last_run_at.as_deref();
+                bump_counter(&mut t, &ensure, &add, &test.fn_hash, "", 1, results, last, (total, covered))?;
+            }
+            t.commit().db()?;
             Ok(n == 1)
+        })
+    }
+
+    fn function_test(&self, fn_hash: &str, case: &str) -> Result<Option<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        crate::functions::check_case(case)?;
+        self.run("function_test", |c| {
+            let st = c.stmt(Q::FunctionTestOne)?;
+            c.client.query_opt(&st, &[&fn_hash, &case]).db()?.as_ref().map(function_test_row).transpose()
+        })
+    }
+
+    fn function_tests_failing(&self, fn_hash: &str, fn_name: Option<&str>, limit: usize) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("function_tests_failing", |c| {
+            let st = c.stmt(Q::FunctionTestsFailing)?;
+            let rows = c.client.query(&st, &[&fn_hash, &fn_name, &limit]).db()?;
+            rows.iter().map(function_test_row).collect()
+        })
+    }
+
+    fn false_test_cells(&self, fn_hash: &str, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("false_test_cells", |c| {
+            let st = c.stmt(Q::FalseTestCells)?;
+            let rows = c.client.query(&st, &[&fn_hash, &limit]).db()?;
+            rows.iter().map(|r| -> Result<(String, Vec<u8>)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) }).collect()
+        })
+    }
+
+    fn dependants_of(&self, name: &str, at: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        check_function_name(name, "name")?;
+        check_instant(at, "at")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("dependants_of", |c| {
+            let st = c.stmt(Q::DependantsOf)?;
+            let rows = c.client.query(&st, &[&name, &at, &limit]).db()?;
+            rows.iter().map(|r| -> Result<(String, String)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) }).collect()
+        })
+    }
+
+    fn slice_values_page(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        after_cell_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            // A version slice is one cell's versions: paged here, from its values.
+            let mut values = self.slice_values(slice, asof)?;
+            values.retain(|x| after_cell_id.is_none_or(|a| x.version.cell_id.as_str() > a));
+            values.sort_by(|a, b| a.version.cell_id.cmp(&b.version.cell_id));
+            values.truncate(limit);
+            return Ok(values);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_values_page", |c| pattern.values_page(c, asof, after_cell_id, limit))
+    }
+
+    fn catalog_entries_all(&self, limit: usize) -> Result<Vec<(CatalogKind, String, String, String)>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("catalog_entries_all", |c| {
+            let st = c.stmt(Q::CatalogEntriesAll)?;
+            let rows = c.client.query(&st, &[&limit]).db()?;
+            rows.iter()
+                .map(|r| -> Result<(CatalogKind, String, String, String)> {
+                    let kind = CatalogKind::parse(&r.try_get::<_, String>(0).db()?)
+                        .ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?;
+                    Ok((kind, r.try_get(1).db()?, r.try_get(2).db()?, r.try_get(3).db()?))
+                })
+                .collect()
+        })
+    }
+
+    fn dictionary_values_ordered(&self, owner: &str, key: &str, limit: usize) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("dictionary_values_ordered", |c| {
+            let st = c.stmt(Q::DictionaryValuesOrdered)?;
+            let rows = c.client.query(&st, &[&owner, &key, &limit]).db()?;
+            rows.iter().map(|r| r.try_get::<_, String>(0).db()).collect()
         })
     }
 
@@ -1645,8 +1770,25 @@ impl Store for PgStore {
         crate::functions::check_result(result)?;
         self.run("record_function_test", |c| {
             let st = c.stmt(Q::FunctionTestRecord)?;
-            let n = c.client.execute(&st, &[&run_at, &result, &detail, &fn_hash, &case]).db()?;
-            Ok(n == 1)
+            let old_st = c.stmt(Q::FunctionTestOld)?;
+            let ensure = c.stmt(Q::CounterEnsure)?;
+            let add = c.stmt(Q::CounterAdd)?;
+            let recompute = c.stmt(Q::CounterRunRecompute)?;
+            let mut t = c.client.transaction().db()?;
+            let Some(old) = t.query_opt(&old_st, &[&fn_hash, &case]).db()? else { return Ok(false) };
+            let old_name: Option<String> = old.try_get(0).db()?;
+            let old_result: Option<String> = old.try_get(1).db()?;
+            t.execute(&st, &[&run_at, &result, &detail, &fn_hash, &case]).db()?;
+            // The test moves within its row: the row's counts change by the difference.
+            let (before, after) =
+                (crate::functions::result_counts(old_result.as_deref()), crate::functions::result_counts(Some(result)));
+            let row = old_name.unwrap_or_default();
+            let d: Vec<i64> = after.iter().zip(before.iter()).map(|(a, b)| a - b).collect();
+            let results = [d[0], d[1], d[2], d[3]];
+            bump_counter(&mut t, &ensure, &add, fn_hash, &row, 0, results, None, (0, 0))?;
+            t.execute(&recompute, &[&fn_hash, &row]).db()?;
+            t.commit().db()?;
+            Ok(true)
         })
     }
 
@@ -1683,7 +1825,37 @@ impl Store for PgStore {
         let fn_names: Vec<String> = names.iter().map(|(_, n)| n.clone()).collect();
         self.run("name_function_tests", |c| {
             let st = c.stmt(Q::FunctionTestName)?;
-            c.client.execute(&st, &[&fn_hash, &cases, &fn_names]).db()
+            let ensure = c.stmt(Q::CounterEnsure)?;
+            let add = c.stmt(Q::CounterAdd)?;
+            let recompute = c.stmt(Q::CounterRunRecompute)?;
+            let mut t = c.client.transaction().db()?;
+            let named = t.query(&st, &[&fn_hash, &cases, &fn_names]).db()?;
+            // The rows moved from unnamed to their names, with their results: [tests, pass,
+            // fail, error, not_run] per name.
+            let mut moved: std::collections::BTreeMap<String, [i64; 5]> = std::collections::BTreeMap::new();
+            for r in &named {
+                let name: String = r.try_get(0).db()?;
+                let result: Option<String> = r.try_get(1).db()?;
+                let d = crate::functions::result_counts(result.as_deref());
+                let e = moved.entry(name).or_insert([0; 5]);
+                e[0] += 1;
+                for (i, x) in d.iter().enumerate() {
+                    e[i + 1] += x;
+                }
+            }
+            let unnamed = "";
+            for (name, d) in &moved {
+                let results = [d[1], d[2], d[3], d[4]];
+                let minus = results.map(|x| -x);
+                bump_counter(&mut t, &ensure, &add, fn_hash, name, d[0], results, None, (0, 0))?;
+                bump_counter(&mut t, &ensure, &add, fn_hash, unnamed, -d[0], minus, None, (0, 0))?;
+                t.execute(&recompute, &[&fn_hash, name]).db()?;
+            }
+            if !moved.is_empty() {
+                t.execute(&recompute, &[&fn_hash, &unnamed]).db()?;
+            }
+            t.commit().db()?;
+            Ok(named.len() as u64)
         })
     }
 
@@ -1854,7 +2026,7 @@ impl Store for PgStore {
             let mut entries = Vec::new();
             for r in c.client.query(
                 "SELECT e.kind, e.name, e.label,
-                        CASE WHEN e.kind = 'function' THEN (SELECT count(*) FROM cells x WHERE x.fn_hash = e.hash) ELSE 0 END
+                        CASE WHEN e.kind = 'function' THEN (SELECT COALESCE(sum(x.n), 0)::bigint FROM cell_counts x WHERE x.fn_hash = e.hash) ELSE 0 END
                    FROM catalog_entries e ORDER BY e.kind COLLATE \"C\", e.name COLLATE \"C\"",
                 &[],
             ).db()? {
@@ -1951,6 +2123,53 @@ impl Pattern {
             params.push(k);
         }
         params.push(&limit);
+        let rows = c.client.query(&st, &params).db()?;
+        rows.iter()
+            .map(|r| {
+                let cell_id: String = r.try_get(9).db()?;
+                value_row(r, &cell_id)
+            })
+            .collect()
+    }
+
+    /// The members' values as of `asof` in cell id order, after `after` (exclusive), at most
+    /// `limit`: the statement of `values` with the cell id order and the LIMIT in SQL (0.5.3).
+    fn values_page(&self, c: &mut Conn, asof: &str, after: Option<&str>, limit: i64) -> Result<Vec<SliceValue>> {
+        let (drive, _) = self.drive(c, false)?;
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let (base, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::SliceValuesAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::SliceValuesNum } else { Q::SliceValuesText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        let sql = format!("{} AND ($16::text IS NULL OR c.cell_id > $16) ORDER BY c.cell_id LIMIT $17", base.sql());
+        let mut param_types = base.types().to_vec();
+        param_types.push(postgres::types::Type::TEXT);
+        param_types.push(postgres::types::Type::INT8);
+        let st = c.client.prepare_typed(sql.as_str(), &param_types).db()?;
+        let params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![
+            &self.fn_hash,
+            &self.ns,
+            &self.fn_name,
+            &nargs,
+            &asof,
+            &names,
+            &kinds,
+            &types,
+            &los,
+            &his,
+            &keys,
+            &d_name,
+            &d_ty,
+            &d_lo,
+            &d_hi,
+            &after,
+            &limit,
+        ];
         let rows = c.client.query(&st, &params).db()?;
         rows.iter()
             .map(|r| {
@@ -2137,14 +2356,14 @@ fn pg_safe(word: &str) -> bool {
 
 /// The `AND (...)` prefilter of a text search over `fields` (SQL expressions of text): one
 /// clause per word the SQL can match, each word a LIKE pattern over lower-cased fields, and
-/// the parameters they take (numbered from $1).
-fn like_where(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
+/// the parameters they take (numbered from `first`).
+fn like_where(words: &Words, fields: &[&str], first: usize) -> (String, Vec<String>) {
     let mut sql = String::new();
     let mut params = Vec::new();
     for i in 0..words.len() {
         if let Some(p) = words.pattern(i, pg_safe) {
             params.push(p);
-            let n = params.len();
+            let n = first + params.len() - 1;
             let ors: Vec<String> = fields.iter().map(|f| format!("lower({f}) LIKE ${n} ESCAPE '!'")).collect();
             sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }
@@ -2152,12 +2371,29 @@ fn like_where(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
     (sql, params)
 }
 
-/// Parameters for a query built at run time.
-fn as_refs(params: &[String]) -> Vec<&(dyn postgres::types::ToSql + Sync)> {
-    params.iter().map(|p| p as &(dyn postgres::types::ToSql + Sync)).collect()
+/// A function test row of `function_tests`, in the column order of `FunctionTestsOf`.
+/// Adds to a function's counter row (0.5.3): `n` tests and the deltas of their results, and the
+/// latest run of them. The row is made first, with the hash's branch counts (or `init`).
+#[allow(clippy::too_many_arguments)]
+fn bump_counter(
+    t: &mut postgres::Transaction<'_>,
+    ensure: &postgres::Statement,
+    add: &postgres::Statement,
+    fn_hash: &str,
+    fn_name: &str,
+    n: i64,
+    results: [i64; 4],
+    last_run_at: Option<&str>,
+    init: (i32, i32),
+) -> Result<()> {
+    let (total, covered) = init;
+    t.execute(ensure, &[&fn_hash, &fn_name, &total, &covered]).db()?;
+    let [pass, fail, error, not_run] = results;
+    let last_run_at = last_run_at.map(str::to_string);
+    t.execute(add, &[&fn_hash, &fn_name, &n, &pass, &fail, &error, &not_run, &last_run_at]).db()?;
+    Ok(())
 }
 
-/// A function test row of `function_tests`, in the column order of `FunctionTestsOf`.
 fn function_test_row(r: &postgres::Row) -> Result<FunctionTest> {
     // The branch counts are `integer` with a check of at least zero: an `as` is exact.
     let total: i32 = r.try_get(7).db()?;

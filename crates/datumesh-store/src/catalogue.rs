@@ -493,43 +493,48 @@ impl Words {
         self.words.len()
     }
 
-    /// The score of a row with these fields, or `None` when a word is in none of them.
-    pub(crate) fn score(&self, fields: &[&str]) -> Option<f64> {
+    /// The words, lower-cased, as the text search matches them.
+    pub(crate) fn words(&self) -> &[String] {
+        &self.words
+    }
+
+    /// The total of a row with these fields, in tens (see [`field_score`]), or `None` when a
+    /// word is in none of them: the sum of each word's best field. An integer, so the order
+    /// of the search is exact and the same as the SQL's.
+    #[cfg(feature = "sqlite")]
+    pub(crate) fn total(&self, fields: &[&str]) -> Option<u32> {
         let fields: Vec<String> = fields.iter().map(|f| f.to_lowercase()).collect();
-        let mut total = 0.0;
+        let mut total = 0;
         for w in &self.words {
-            let best = fields.iter().map(|f| field_score(f, w)).fold(0.0_f64, f64::max);
-            if best == 0.0 {
+            let best = fields.iter().map(|f| field_score(f, w)).max().unwrap_or(0);
+            if best == 0 {
                 return None;
             }
             total += best;
         }
-        Some(total / self.words.len() as f64)
+        Some(total)
+    }
+
+    /// The score of a total ([`Words::total`]): the mean of the words' best scores.
+    pub(crate) fn score_of(&self, total: u32) -> f64 {
+        f64::from(total) / (10.0 * self.words.len() as f64)
     }
 }
 
-/// How well a lower-cased field matches a lower-cased word: the whole field, one of its words
-/// (split on anything but letters and digits), inside it, or not at all.
-fn field_score(field: &str, word: &str) -> f64 {
+#[cfg(feature = "sqlite")]
+/// How well a lower-cased field matches a lower-cased word, in tens: the whole field (10), one
+/// of its words (split on anything but letters and digits: 8), inside it (5), or not at all
+/// (0). The SQL of migration 12 computes the same.
+pub(crate) fn field_score(field: &str, word: &str) -> u32 {
     if field == word {
-        1.0
+        10
     } else if field.split(|c: char| !c.is_alphanumeric()).any(|p| p == word) {
-        0.8
+        8
     } else if field.contains(word) {
-        0.5
+        5
     } else {
-        0.0
+        0
     }
-}
-
-/// The fields of an entry the text search matches.
-pub(crate) fn entry_fields(e: &CatalogEntry) -> Vec<&str> {
-    let mut f = vec![e.name.as_str(), e.label.as_str(), e.description.as_str()];
-    for (k, v) in &e.args {
-        f.push(k);
-        f.push(v);
-    }
-    f
 }
 
 /// Hits in rank order: by score (highest first), then by name (entries) or owner, key and
