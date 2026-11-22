@@ -122,7 +122,7 @@ fn facets_round_trip(b: Backend) {
     let s = db.store();
     let mut e = ext(CatalogKind::Function, F1, all_facets(), None);
     e.entry.hash = Some(HASH_A.to_string());
-    s.upsert_catalog_ext(&[e.clone()]).unwrap();
+    s.upsert_catalog_ext(std::slice::from_ref(&e)).unwrap();
     assert_eq!(s.catalog_entry_ext(CatalogKind::Function, F1).unwrap(), Some(e));
     assert_eq!(s.catalog_entry_ext(CatalogKind::Class, F1).unwrap(), None);
     // The stored text is JSON of the map, keys ascending (the column is text).
@@ -132,7 +132,7 @@ fn facets_round_trip(b: Backend) {
     );
     // A class entry carries facets too; the plain entry read still works.
     let c = ext(CatalogKind::Class, CLASS, facets(&[("domain", &["finance"])]), None);
-    s.upsert_catalog_ext(&[c.clone()]).unwrap();
+    s.upsert_catalog_ext(std::slice::from_ref(&c)).unwrap();
     assert_eq!(s.catalog_entry_ext(CatalogKind::Class, CLASS).unwrap(), Some(c));
     assert_eq!(s.catalog_entry(F1).unwrap().unwrap().name, F1);
 }
@@ -171,7 +171,7 @@ fn the_old_upsert_leaves_facets_and_extends_alone(b: Backend) {
     let db = TestDb::migrated(b);
     let s = db.store();
     let e = ext(CatalogKind::Function, F1, all_facets(), Some(CLASS));
-    s.upsert_catalog_ext(&[e.clone()]).unwrap();
+    s.upsert_catalog_ext(std::slice::from_ref(&e)).unwrap();
     let mut plain = entry(CatalogKind::Function, F1);
     plain.label = "changed".to_string();
     s.upsert_catalog(&[plain]).unwrap();
@@ -267,7 +267,7 @@ fn extends_round_trips(b: Backend) {
     let db = TestDb::migrated(b);
     let s = db.store();
     let e = ext(CatalogKind::Function, F1, Facets::new(), Some(CLASS));
-    s.upsert_catalog_ext(&[e.clone()]).unwrap();
+    s.upsert_catalog_ext(std::slice::from_ref(&e)).unwrap();
     assert_eq!(s.catalog_entry_ext(CatalogKind::Function, F1).unwrap(), Some(e));
     // Cleared by an update without it.
     s.upsert_catalog_ext(&[CatalogEntryExt::new(entry(CatalogKind::Function, F1))]).unwrap();
