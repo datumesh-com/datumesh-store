@@ -4,8 +4,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::catalogue::{
-    args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, check_model, entry_fields,
-    entry_from_columns, entry_text, invalid, miss_text, rank, value_text, vector_literal, Words, SUMMARY_VALUES,
+    args_json, as_i64, canonical_examples, check_catalog_entry, check_catalog_ext, check_key_values, check_model,
+    entry_ext, entry_fields, entry_from_columns, entry_text, invalid, miss_text, parse_facets, rank, value_text,
+    vector_literal, CatalogRow, Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
 use crate::pg_unstable::Connector;
@@ -13,9 +14,9 @@ use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
 use crate::{
-    not_canonical_class, Binding, CatalogEntry, CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue,
-    EmbedRef, Embedding, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store,
-    Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
+    not_canonical_class, Binding, CatalogEntry, CatalogEntryExt, CatalogKind, CellWrite, ClassBinding, Dictionary,
+    DictionaryValue, EmbedRef, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding,
+    SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -1298,56 +1299,16 @@ impl Store for PgStore {
         for e in entries {
             check_catalog_entry(e)?;
         }
-        if entries.is_empty() {
-            return Ok(Vec::new());
+        let rows: Vec<CatalogRow> = entries.iter().map(CatalogRow::plain).collect();
+        self.write_catalog(&rows, false)
+    }
+
+    fn upsert_catalog_ext(&self, entries: &[CatalogEntryExt]) -> Result<Vec<i64>> {
+        for e in entries {
+            check_catalog_ext(e)?;
         }
-        self.run("upsert_catalog", |c| {
-            let mut t = c.client.transaction().db()?;
-            let mut ids = Vec::with_capacity(entries.len());
-            for e in entries {
-                let kind = e.kind.as_str();
-                let args = args_json(&e.args);
-                let examples = canonical_examples(&e.examples)?;
-                let before = t
-                    .query_opt("SELECT label, description FROM catalog_entries WHERE kind = $1 AND name = $2", &[&kind, &e.name])
-                    .db()?
-                    .map(|r| -> Result<(String, String)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) })
-                    .transpose()?;
-                let updated = t
-                    .query_opt(
-                        "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, updated_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
-                         ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
-                             description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
-                             source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, updated_at = now()
-                         WHERE catalog_entries.source = 'operator' OR EXCLUDED.source = 'publisher'
-                         RETURNING id",
-                        &[&kind, &e.name, &e.hash, &e.label, &e.description, &args, &examples, &e.source.as_str(), &e.signed_by],
-                    )
-                    .db()?;
-                let id: i64 = match updated {
-                    Some(row) => {
-                        let id: i64 = row.try_get(0).db()?;
-                        // A new text drops the embedding (the old one is of other words).
-                        if let Some((label, description)) = before {
-                            if self.vectors && entry_text(&label, &description) != entry_text(&e.label, &e.description) {
-                                t.execute("DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id = $1", &[&id]).db()?;
-                            }
-                        }
-                        id
-                    }
-                    // An operator's entry over a publisher's: kept as it is.
-                    None => t
-                        .query_one("SELECT id FROM catalog_entries WHERE kind = $1 AND name = $2", &[&kind, &e.name])
-                        .db()?
-                        .try_get(0)
-                        .db()?,
-                };
-                ids.push(id);
-            }
-            t.commit().db()?;
-            Ok(ids)
-        })
+        let rows: Vec<CatalogRow> = entries.iter().map(CatalogRow::ext).collect();
+        self.write_catalog(&rows, true)
     }
 
     fn upsert_key_values(&self, owner: &str, key: &str, values: &[KeyValue]) -> Result<Vec<i64>> {
@@ -1849,6 +1810,65 @@ impl Store for PgStore {
         })
     }
 
+    fn catalog_entry_ext(&self, kind: CatalogKind, name: &str) -> Result<Option<CatalogEntryExt>> {
+        self.run("catalog_entry_ext", |c| {
+            let Some(r) = c.client.query_opt(CATALOG_EXT_SELECT_BY_KIND_NAME, &[&kind.as_str(), &name]).db()? else {
+                return Ok(None);
+            };
+            ext_from_row(&r).map(Some)
+        })
+    }
+
+    fn catalog_entries_with_facets(&self) -> Result<Vec<FacetedEntry>> {
+        self.run("catalog_entries_with_facets", |c| {
+            let mut out = Vec::new();
+            for r in c
+                .client
+                .query(
+                    "SELECT e.kind, e.name, e.hash, e.facets,
+                        CASE WHEN e.kind = 'class'
+                             THEN (SELECT min(b.tx) FROM class_bindings b WHERE b.class_name = e.name)
+                             ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END
+                   FROM catalog_entries e
+                  WHERE e.facets::jsonb <> '{}'::jsonb
+                  ORDER BY e.kind COLLATE \"C\", e.name COLLATE \"C\"",
+                    &[],
+                )
+                .db()?
+            {
+                let kind = CatalogKind::parse(&r.try_get::<_, String>(0).db()?)
+                    .ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?;
+                out.push(FacetedEntry {
+                    kind,
+                    name: r.try_get(1).db()?,
+                    hash: r.try_get(2).db()?,
+                    facets: parse_facets(&r.try_get::<_, String>(3).db()?)?,
+                    first_bound: r.try_get(4).db()?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn extensions_of(&self, class: &str) -> Result<Vec<CatalogEntryExt>> {
+        check_function_name(class, "class")?;
+        self.run("extensions_of", |c| {
+            let mut out = Vec::new();
+            for r in c
+                .client
+                .query(
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+                   FROM catalog_entries WHERE extends = $1 ORDER BY name COLLATE \"C\"",
+                    &[&class],
+                )
+                .db()?
+            {
+                out.push(ext_from_row(&r)?);
+            }
+            Ok(out)
+        })
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let mut entries = Vec::new();
@@ -1880,6 +1900,87 @@ impl Store for PgStore {
                 dictionaries.push(Dictionary { owner, key, n_values: g.try_get(2).db()?, values });
             }
             Ok(Summary { entries, dictionaries })
+        })
+    }
+}
+
+impl PgStore {
+    /// Writes catalogue rows, all or nothing, keyed by (kind, name) (the call's bounds are
+    /// checked by the caller). An operator's row never replaces a publisher's. An existing row
+    /// keeps its facets and `extends` unless `replace_ext` (the facets call), in which case
+    /// they are replaced. A new text drops the embedding.
+    fn write_catalog(&self, rows: &[CatalogRow<'_>], replace_ext: bool) -> Result<Vec<i64>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let replace = if replace_ext { ", facets = EXCLUDED.facets, extends = EXCLUDED.extends" } else { "" };
+        let upsert = format!(
+            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+             ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
+                 description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
+                 source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, updated_at = now(){replace}
+             WHERE catalog_entries.source = 'operator' OR EXCLUDED.source = 'publisher'
+             RETURNING id"
+        );
+        self.run("upsert_catalog", |c| {
+            let mut t = c.client.transaction().db()?;
+            let mut ids = Vec::with_capacity(rows.len());
+            for row in rows {
+                let e = row.entry;
+                let kind = e.kind.as_str();
+                let args = args_json(&e.args);
+                let examples = canonical_examples(&e.examples)?;
+                let before = t
+                    .query_opt(
+                        "SELECT label, description FROM catalog_entries WHERE kind = $1 AND name = $2",
+                        &[&kind, &e.name],
+                    )
+                    .db()?
+                    .map(|r| -> Result<(String, String)> { Ok((r.try_get(0).db()?, r.try_get(1).db()?)) })
+                    .transpose()?;
+                let updated = t
+                    .query_opt(
+                        &upsert,
+                        &[
+                            &kind,
+                            &e.name,
+                            &e.hash,
+                            &e.label,
+                            &e.description,
+                            &args,
+                            &examples,
+                            &e.source.as_str(),
+                            &e.signed_by,
+                            &row.facets,
+                            &row.extends,
+                        ],
+                    )
+                    .db()?;
+                let id: i64 = match updated {
+                    Some(r) => {
+                        let id: i64 = r.try_get(0).db()?;
+                        // A new text drops the embedding (the old one is of other words).
+                        if let Some((label, description)) = before {
+                            if self.vectors && entry_text(&label, &description) != entry_text(&e.label, &e.description)
+                            {
+                                t.execute("DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id = $1", &[&id])
+                                    .db()?;
+                            }
+                        }
+                        id
+                    }
+                    // An operator's entry over a publisher's: kept as it is.
+                    None => t
+                        .query_one("SELECT id FROM catalog_entries WHERE kind = $1 AND name = $2", &[&kind, &e.name])
+                        .db()?
+                        .try_get(0)
+                        .db()?,
+                };
+                ids.push(id);
+            }
+            t.commit().db()?;
+            Ok(ids)
         })
     }
 }
@@ -2173,4 +2274,26 @@ fn function_test_row(r: &postgres::Row) -> Result<FunctionTest> {
         branches_total: total as u32,
         branches_covered: covered as u32,
     })
+}
+
+/// The columns of a catalogue entry with its facets and `extends`, by kind and name.
+const CATALOG_EXT_SELECT_BY_KIND_NAME: &str =
+    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+       FROM catalog_entries WHERE kind = $1 AND name = $2";
+
+/// A catalogue entry with its facets and `extends` from a row of [`CATALOG_EXT_SELECT_BY_KIND_NAME`]
+/// (or of any query with those eleven columns in that order).
+fn ext_from_row(r: &postgres::Row) -> Result<CatalogEntryExt> {
+    let entry = entry_from_columns(
+        &r.try_get::<_, String>(0).db()?,
+        r.try_get(1).db()?,
+        r.try_get(2).db()?,
+        r.try_get(3).db()?,
+        r.try_get(4).db()?,
+        &r.try_get::<_, String>(5).db()?,
+        &r.try_get::<_, String>(6).db()?,
+        &r.try_get::<_, String>(7).db()?,
+        r.try_get(8).db()?,
+    )?;
+    entry_ext(entry, &r.try_get::<_, String>(9).db()?, r.try_get(10).db()?)
 }

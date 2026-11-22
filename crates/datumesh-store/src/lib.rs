@@ -122,8 +122,8 @@ mod sqlite_sql;
 mod tls;
 
 pub use catalogue::{
-    CatalogEntry, CatalogKind, CatalogSource, Dictionary, DictionaryValue, EmbedRef, Embedding, Hit, KeyValue,
-    PendingEmbedding, Summary, SummaryEntry, FIND_MISSES_CAP,
+    CatalogEntry, CatalogEntryExt, CatalogKind, CatalogSource, Dictionary, DictionaryValue, EmbedRef, Embedding,
+    FacetedEntry, Facets, Hit, KeyValue, PendingEmbedding, Summary, SummaryEntry, FIND_MISSES_CAP,
 };
 pub use error::{DatabaseError, Error, Result};
 pub use pg::PgStore;
@@ -898,6 +898,37 @@ pub trait Store: Resolver + sealed::Sealed {
     fn catalog_entry(&self, name: &str) -> Result<Option<CatalogEntry>> {
         let _ = name;
         Err(Error::Unsupported("an exact catalogue lookup needs a store of 0.5.2".into()))
+    }
+
+    /// Inserts or replaces catalogue entries with their facets and `extends`, keyed by (kind,
+    /// name), as [`upsert_catalog`](Store::upsert_catalog) does, and replaces the facets and
+    /// `extends` of an existing row. Checked first, all or nothing ([`Error::Invalid`]): the
+    /// facets (a key of domain, thing, measure, region or frequency; 1 to 8 names each, names of
+    /// at most 32 bytes, ascending and unique), and `extends` (a full function name, on a
+    /// function only). The store does not check that `extends` names a stored class, nor the key
+    /// rule of 16.3. Returns each entry's id, in order. The default is [`Error::Unsupported`].
+    /// Since 0.5.3.
+    fn upsert_catalog_ext(&self, entries: &[CatalogEntryExt]) -> Result<Vec<i64>> {
+        let _ = entries;
+        Err(Error::Unsupported("catalogue facets need a store of 0.5.3".into()))
+    }
+    /// The catalogue entry of kind `kind` and name `name` (exactly), with its facets and
+    /// `extends`, if there is one. The default is [`Error::Unsupported`]. Since 0.5.3.
+    fn catalog_entry_ext(&self, kind: CatalogKind, name: &str) -> Result<Option<CatalogEntryExt>> {
+        let _ = (kind, name);
+        Err(Error::Unsupported("catalogue facets need a store of 0.5.3".into()))
+    }
+    /// The entries that have at least one facet, by kind (as text: class, function, method)
+    /// then name in byte order, each with its first binding time (see [`FacetedEntry`]).
+    /// The default is [`Error::Unsupported`]. Since 0.5.3.
+    fn catalog_entries_with_facets(&self) -> Result<Vec<FacetedEntry>> {
+        Err(Error::Unsupported("catalogue facets need a store of 0.5.3".into()))
+    }
+    /// The function entries whose `extends` is `class`, by name in byte order. A `class` that
+    /// is not a full name is [`Error::Invalid`]. The default is [`Error::Unsupported`]. Since 0.5.3.
+    fn extensions_of(&self, class: &str) -> Result<Vec<CatalogEntryExt>> {
+        let _ = class;
+        Err(Error::Unsupported("catalogue facets need a store of 0.5.3".into()))
     }
 
     /// [`computed_asof`](Store::computed_asof) and the bytes of the version's receipt (as

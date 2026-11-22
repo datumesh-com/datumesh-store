@@ -9,16 +9,17 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::catalogue::{
-    aliases_json, args_json, as_i64, canonical_examples, check_catalog_entry, check_key_values, entry_fields,
-    entry_from_columns, invalid, miss_text, parse_aliases, rank, Words, SUMMARY_VALUES,
+    aliases_json, args_json, as_i64, canonical_examples, check_catalog_entry, check_catalog_ext, check_key_values,
+    entry_ext, entry_fields, entry_from_columns, invalid, miss_text, parse_aliases, parse_facets, rank, CatalogRow,
+    Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
 use crate::{
-    not_canonical_class, Binding, CatalogEntry, CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding,
-    FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry,
-    TestSummary, Version, FIND_MISSES_CAP,
+    not_canonical_class, Binding, CatalogEntry, CatalogEntryExt, CatalogKind, ClassBinding, Dictionary,
+    DictionaryValue, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember,
+    SliceValue, Store, Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
@@ -631,6 +632,68 @@ impl SqliteStore {
         })?;
         tracing::debug!(target: "datumesh_store", host, checked_at, ok = threshold.is_none(), "namespace check");
         Ok(out)
+    }
+}
+
+impl SqliteStore {
+    /// Writes catalogue rows, all or nothing, keyed by (kind, name) (the call's bounds are
+    /// checked by the caller). An operator's row never replaces a publisher's. An existing row
+    /// keeps its facets and `extends` unless `replace_ext` (the facets call), in which case
+    /// they are replaced.
+    fn write_catalog(&self, rows: &[CatalogRow<'_>], replace_ext: bool) -> Result<Vec<i64>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let replace = if replace_ext { ", facets = excluded.facets, extends = excluded.extends" } else { "" };
+        let upsert = format!(
+            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
+                 description = excluded.description, args = excluded.args, examples = excluded.examples,
+                 source = excluded.source, signed_by = excluded.signed_by, updated_at = excluded.updated_at{replace}
+             WHERE catalog_entries.source = 'operator' OR excluded.source = 'publisher'
+             RETURNING id"
+        );
+        self.write("upsert_catalog", |c| {
+            let mut ids = Vec::with_capacity(rows.len());
+            for row in rows {
+                let e = row.entry;
+                let args = args_json(&e.args);
+                let examples = canonical_examples(&e.examples)?;
+                let updated: Option<i64> = c
+                    .prepare_cached(&upsert)
+                    .db()?
+                    .query_row(
+                        rusqlite::params![
+                            e.kind.as_str(),
+                            e.name,
+                            e.hash,
+                            e.label,
+                            e.description,
+                            args,
+                            examples,
+                            e.source.as_str(),
+                            e.signed_by,
+                            row.facets,
+                            row.extends
+                        ],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .db()?;
+                let id = match updated {
+                    Some(id) => id,
+                    // An operator's entry over a publisher's: kept as it is.
+                    None => c
+                        .prepare_cached("SELECT id FROM catalog_entries WHERE kind = ?1 AND name = ?2")
+                        .db()?
+                        .query_row([e.kind.as_str(), e.name.as_str()], |r| r.get(0))
+                        .db()?,
+                };
+                ids.push(id);
+            }
+            Ok(ids)
+        })
     }
 }
 
@@ -1300,44 +1363,16 @@ impl Store for SqliteStore {
         for e in entries {
             check_catalog_entry(e)?;
         }
-        if entries.is_empty() {
-            return Ok(Vec::new());
+        let rows: Vec<CatalogRow> = entries.iter().map(CatalogRow::plain).collect();
+        self.write_catalog(&rows, false)
+    }
+
+    fn upsert_catalog_ext(&self, entries: &[CatalogEntryExt]) -> Result<Vec<i64>> {
+        for e in entries {
+            check_catalog_ext(e)?;
         }
-        self.write("upsert_catalog", |c| {
-            let mut ids = Vec::with_capacity(entries.len());
-            for e in entries {
-                let args = args_json(&e.args);
-                let examples = canonical_examples(&e.examples)?;
-                let updated: Option<i64> = c
-                    .prepare_cached(
-                        "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                         ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
-                             description = excluded.description, args = excluded.args, examples = excluded.examples,
-                             source = excluded.source, signed_by = excluded.signed_by, updated_at = excluded.updated_at
-                         WHERE catalog_entries.source = 'operator' OR excluded.source = 'publisher'
-                         RETURNING id",
-                    )
-                    .db()?
-                    .query_row(
-                        rusqlite::params![e.kind.as_str(), e.name, e.hash, e.label, e.description, args, examples, e.source.as_str(), e.signed_by],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .db()?;
-                let id = match updated {
-                    Some(id) => id,
-                    // An operator's entry over a publisher's: kept as it is.
-                    None => c
-                        .prepare_cached("SELECT id FROM catalog_entries WHERE kind = ?1 AND name = ?2")
-                        .db()?
-                        .query_row([e.kind.as_str(), e.name.as_str()], |r| r.get(0))
-                        .db()?,
-                };
-                ids.push(id);
-            }
-            Ok(ids)
-        })
+        let rows: Vec<CatalogRow> = entries.iter().map(CatalogRow::ext).collect();
+        self.write_catalog(&rows, true)
     }
 
     fn upsert_key_values(&self, owner: &str, key: &str, values: &[KeyValue]) -> Result<Vec<i64>> {
@@ -1733,6 +1768,61 @@ impl Store for SqliteStore {
         })
     }
 
+    fn catalog_entry_ext(&self, kind: CatalogKind, name: &str) -> Result<Option<CatalogEntryExt>> {
+        self.run("catalog_entry_ext", |c| {
+            let mut st = c.prepare_cached(CATALOG_EXT_SELECT_BY_KIND_NAME).db()?;
+            st.query_row(rusqlite::params![kind.as_str(), name], ext_from_row).optional().db()?.transpose()
+        })
+    }
+
+    fn catalog_entries_with_facets(&self) -> Result<Vec<FacetedEntry>> {
+        self.run("catalog_entries_with_facets", |c| {
+            let mut st = c
+                .prepare(
+                    "SELECT e.kind, e.name, e.hash, e.facets,
+                            CASE WHEN e.kind = 'class'
+                                 THEN (SELECT min(b.tx) FROM class_bindings b WHERE b.class_name = e.name)
+                                 ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END
+                       FROM catalog_entries e
+                      WHERE e.facets <> '{}'
+                      ORDER BY e.kind, e.name",
+                )
+                .db()?;
+            type FacetRow = (String, String, Option<String>, String, Option<String>);
+            let rows: Vec<FacetRow> = st
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .db()?
+                .collect::<rusqlite::Result<_>>()
+                .db()?;
+            rows.into_iter()
+                .map(|(kind, name, hash, facets, first_bound)| {
+                    Ok(FacetedEntry {
+                        kind: CatalogKind::parse(&kind)
+                            .ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?,
+                        name,
+                        hash,
+                        facets: parse_facets(&facets)?,
+                        first_bound,
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn extensions_of(&self, class: &str) -> Result<Vec<CatalogEntryExt>> {
+        check_function_name(class, "class")?;
+        self.run("extensions_of", |c| {
+            let mut st = c
+                .prepare_cached(
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+                       FROM catalog_entries WHERE extends = ?1 ORDER BY name",
+                )
+                .db()?;
+            let rows = st.query_map([class], ext_from_row).db()?.collect::<rusqlite::Result<Vec<_>>>().db()?;
+            rows.into_iter().collect()
+        })
+    }
+
     fn catalog_summary(&self) -> Result<Summary> {
         self.run("catalog_summary", |c| {
             let rows: Vec<(String, String, String, i64)> = {
@@ -2044,6 +2134,30 @@ fn function_test_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FunctionTest> {
         branches_total: r.get(7)?,
         branches_covered: r.get(8)?,
     })
+}
+
+/// The columns of a catalogue entry with its facets and `extends`, by kind and name.
+const CATALOG_EXT_SELECT_BY_KIND_NAME: &str =
+    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+       FROM catalog_entries WHERE kind = ?1 AND name = ?2";
+
+/// A catalogue entry with its facets and `extends` from a row with the eleven columns of
+/// [`CATALOG_EXT_SELECT_BY_KIND_NAME`] (or of any query with those columns in that order).
+fn ext_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CatalogEntryExt>> {
+    let entry = entry_from_columns(
+        &r.get::<_, String>(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        &r.get::<_, String>(5)?,
+        &r.get::<_, String>(6)?,
+        &r.get::<_, String>(7)?,
+        r.get(8)?,
+    );
+    let facets: String = r.get(9)?;
+    let extends: Option<String> = r.get(10)?;
+    Ok(entry.and_then(|entry| entry_ext(entry, &facets, extends)))
 }
 
 #[cfg(test)]

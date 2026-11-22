@@ -117,6 +117,76 @@ pub struct CatalogEntry {
     pub signed_by: Option<String>,
 }
 
+/// The facets of a catalogue entry: a facet key (`domain`, `thing`, `measure`, `region` or
+/// `frequency`) to its names, ascending and unique, at most 8 of them (CONTRACT-classes-round C2).
+pub type Facets = BTreeMap<String, Vec<String>>;
+
+/// A catalogue entry with its facets and its `extends` (CONTRACT-classes-round C2 and K9).
+///
+/// `extends` is the full name of the class a function extends (16.8): only a function extends a
+/// class, and the store does not check that the class is stored. [`CatalogEntry`] itself is
+/// unchanged; an entry with no facets and no `extends` is `CatalogEntryExt::new`.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogEntryExt {
+    /// The entry.
+    pub entry: CatalogEntry,
+    /// Its facets; empty when it has none.
+    pub facets: Facets,
+    /// The class this function extends, when it extends one.
+    pub extends: Option<String>,
+}
+
+impl CatalogEntryExt {
+    /// The entry with no facets and no `extends`.
+    pub fn new(entry: CatalogEntry) -> CatalogEntryExt {
+        CatalogEntryExt { entry, facets: Facets::new(), extends: None }
+    }
+}
+
+/// A catalogue entry that has facets, as [`Store::catalog_entries_with_facets`](crate::Store::catalog_entries_with_facets)
+/// lists it.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FacetedEntry {
+    /// Class, method or function.
+    pub kind: CatalogKind,
+    /// The full name.
+    pub name: String,
+    /// The catalogue's hash of the entry (a function's or a class's), when it has one.
+    pub hash: Option<String>,
+    /// Its facets; at least one key.
+    pub facets: Facets,
+    /// The instant of the earliest binding of the name (of a class for a class, of a function
+    /// or method otherwise); `None` when the name was never bound.
+    pub first_bound: Option<String>,
+}
+
+/// The facet keys an entry may carry.
+pub(crate) const FACET_KEYS: &[&str] = &["domain", "frequency", "measure", "region", "thing"];
+
+/// The most names a facet lists.
+pub(crate) const FACET_MAX: usize = 8;
+
+/// One row to write: an entry, its facets as canonical JSON, and its `extends`.
+pub(crate) struct CatalogRow<'a> {
+    pub(crate) entry: &'a CatalogEntry,
+    pub(crate) facets: String,
+    pub(crate) extends: Option<&'a str>,
+}
+
+impl<'a> CatalogRow<'a> {
+    /// A row of the 0.5.2 call: no facets, no `extends` (the store keeps those of an existing row).
+    pub(crate) fn plain(entry: &'a CatalogEntry) -> Self {
+        CatalogRow { entry, facets: "{}".to_string(), extends: None }
+    }
+
+    /// A row of the facets call, with its facets and `extends` as given.
+    pub(crate) fn ext(e: &'a CatalogEntryExt) -> Self {
+        CatalogRow { entry: &e.entry, facets: facets_json(&e.facets), extends: e.extends.as_deref() }
+    }
+}
+
 /// One value of a dictionary: its label and aliases (the publisher's dictionary only).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyValue {
@@ -293,6 +363,47 @@ pub(crate) fn check_catalog_entry(e: &CatalogEntry) -> Result<()> {
     Ok(())
 }
 
+/// A catalogue entry with its facets and `extends`: the entry's bounds, then the facets' and
+/// `extends`' (CONTRACT-classes-round C2 and K9). Nothing is written before all of them pass.
+pub(crate) fn check_catalog_ext(e: &CatalogEntryExt) -> Result<()> {
+    check_catalog_entry(&e.entry)?;
+    check_facets(&e.facets)?;
+    check_extends(e.entry.kind, e.extends.as_deref())
+}
+
+/// Facets: a key of [`FACET_KEYS`], 1 to 8 names each, every name a name (2.2) of at most 32
+/// bytes, ascending and unique.
+pub(crate) fn check_facets(f: &Facets) -> Result<()> {
+    for (k, names) in f {
+        if !FACET_KEYS.contains(&k.as_str()) {
+            return Err(invalid("facets", format!("{k:?} is not a facet key")));
+        }
+        if names.is_empty() || names.len() > FACET_MAX {
+            return Err(invalid("facets", "a facet has 1 to 8 names"));
+        }
+        for n in names {
+            check_name(n, "facets")?;
+            if n.len() > 32 {
+                return Err(invalid("facets", "a facet name has at most 32 bytes"));
+            }
+        }
+        if names.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(invalid("facets", "the names of a facet are ascending and unique"));
+        }
+    }
+    Ok(())
+}
+
+/// `extends`: a full function name (2.3), and only on a function.
+pub(crate) fn check_extends(kind: CatalogKind, extends: Option<&str>) -> Result<()> {
+    let Some(class) = extends else { return Ok(()) };
+    check_function_name(class, "extends")?;
+    if kind != CatalogKind::Function {
+        return Err(invalid("extends", "only a function extends a class"));
+    }
+    Ok(())
+}
+
 /// A dictionary's bounds (owner, key, values, labels, aliases).
 pub(crate) fn check_key_values(owner: &str, key: &str, values: &[KeyValue]) -> Result<()> {
     check_function_name(owner, "owner")?;
@@ -371,6 +482,41 @@ pub(crate) fn parse_args(text: &str) -> Result<BTreeMap<String, String>> {
         out.insert(k.clone(), s.to_string());
     }
     Ok(out)
+}
+
+/// The facets as canonical JSON (an object of arrays of strings, keys ascending).
+pub(crate) fn facets_json(f: &Facets) -> String {
+    let members: Vec<(String, json::Value)> = f
+        .iter()
+        .map(|(k, names)| {
+            let items = names.iter().map(|n| json::Value::String(n.clone())).collect();
+            (k.clone(), json::Value::Array(items))
+        })
+        .collect();
+    String::from_utf8(json::Value::Object(members).to_jcs()).unwrap_or_default()
+}
+
+/// The facets from their stored JSON.
+pub(crate) fn parse_facets(text: &str) -> Result<Facets> {
+    let corrupt = || invalid("facets", "a stored entry has bad facets");
+    let v = json::parse(text.as_bytes())?;
+    let members = v.as_object().ok_or_else(corrupt)?;
+    let mut out = Facets::new();
+    for (k, v) in members {
+        let items = match v {
+            json::Value::Array(items) => items,
+            _ => return Err(corrupt()),
+        };
+        let names =
+            items.iter().map(|i| i.as_str().map(str::to_string).ok_or_else(corrupt)).collect::<Result<Vec<_>>>()?;
+        out.insert(k.clone(), names);
+    }
+    Ok(out)
+}
+
+/// A catalogue entry with its stored facets and `extends`.
+pub(crate) fn entry_ext(entry: CatalogEntry, facets: &str, extends: Option<String>) -> Result<CatalogEntryExt> {
+    Ok(CatalogEntryExt { entry, facets: parse_facets(facets)?, extends })
 }
 
 /// The examples in canonical form; they must be a JSON array.
