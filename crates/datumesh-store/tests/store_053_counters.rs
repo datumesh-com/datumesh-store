@@ -104,12 +104,15 @@ fn cell_count_follows_put_receipt_and_a_second_version_is_not_a_new_cell(b: Back
     );
 }
 
+/// An item: a receipt and the (cell id, tx) of its version, if any.
+type Item = (Vec<u8>, Option<(String, String)>);
+
 fn cell_count_follows_put_cells_the_bundle_path(b: Backend) {
     let db = TestDb::migrated(b);
     let s = slice_store(&db);
     let h = s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap();
     // One batch: cells 1..=4, with cell 1 twice in it (two versions) and cell 5 with no version.
-    let mut items: Vec<(Vec<u8>, Option<(String, String)>)> = Vec::new();
+    let mut items: Vec<Item> = Vec::new();
     for k in 1..=4 {
         let c = kcell("f", &h, k);
         items.push((receipt(&c, "1", 1), Some((c.id(), day(1)))));
@@ -235,7 +238,13 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
     // Function tests as 0.5.2 wrote them: h1 has four (one named, two have run), h2 one.
     let (h1, h2) = ("ab".repeat(32), "cd".repeat(32));
     let line = jcs(br#"{"args":{},"case":"00000000000000a1","expect":"1"}"#);
-    for (hh, case) in [(&h1, "00000000000000a1"), (&h1, "00000000000000a2"), (&h1, "00000000000000a3"), (&h1, "00000000000000a4"), (&h2, "00000000000000b1")] {
+    for (hh, case) in [
+        (&h1, "00000000000000a1"),
+        (&h1, "00000000000000a2"),
+        (&h1, "00000000000000a3"),
+        (&h1, "00000000000000a4"),
+        (&h2, "00000000000000b1"),
+    ] {
         db.exec(db.pick(
             &format!("INSERT INTO function_tests (fn_hash, \"case\", test_json, signed_by) VALUES ('{hh}', '{case}', decode('{}', 'hex'), 'rates.example.org')", hex_of(&line)),
             &format!("INSERT INTO function_tests (fn_hash, \"case\", test_json, signed_by) VALUES ('{hh}', '{case}', X'{}', 'rates.example.org')", hex_of(&line)),
@@ -245,7 +254,8 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
     db.exec(&format!("UPDATE function_tests SET last_run_at = '{T1}', last_result = 'pass', last_detail = 'ok' WHERE fn_hash = '{h1}' AND \"case\" = '00000000000000a1'")).unwrap();
     db.exec(&format!("UPDATE function_tests SET last_run_at = '{T2}', last_result = 'fail', last_detail = 'no' WHERE fn_hash = '{h1}' AND \"case\" = '00000000000000a2'")).unwrap();
     db.exec(&format!("UPDATE function_tests SET fn_name = '{NAME}' WHERE fn_hash = '{h1}' AND \"case\" IN ('00000000000000a2', '00000000000000a3')")).unwrap();
-    db.exec(&format!("UPDATE function_tests SET branches_total = 6, branches_covered = 4 WHERE fn_hash = '{h1}'")).unwrap();
+    db.exec(&format!("UPDATE function_tests SET branches_total = 6, branches_covered = 4 WHERE fn_hash = '{h1}'"))
+        .unwrap();
 
     let applied = match b {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
@@ -385,15 +395,12 @@ fn function_test_counts_follow_put_record_name_and_branches(b: Backend) {
         rows(&[["", "2", "2", "0", "0", "0"], [NAME, "3", "0", "2", "1", "0"]]),
         "rows moved from unnamed to the name, with their results"
     );
-    let again: Vec<(String, String)> = vec![(case_of(1), NAME2.to_string()), (case_of(3), NAME2.to_string()), (case_of(9), NAME2.to_string())];
+    let again: Vec<(String, String)> =
+        vec![(case_of(1), NAME2.to_string()), (case_of(3), NAME2.to_string()), (case_of(9), NAME2.to_string())];
     assert_eq!(s.name_function_tests(&h, &again).unwrap(), 1, "only case 3 was unnamed");
     assert_eq!(
         counter_rows(&db, &h),
-        rows(&[
-            ["", "1", "1", "0", "0", "0"],
-            [NAME, "3", "0", "2", "1", "0"],
-            [NAME2, "1", "1", "0", "0", "0"]
-        ]),
+        rows(&[["", "1", "1", "0", "0", "0"], [NAME, "3", "0", "2", "1", "0"], [NAME2, "1", "1", "0", "0", "0"]]),
         "case 3 had passed: it moves with its result"
     );
     assert_eq!(counter_rows(&db, &h), recount(&db, &h));

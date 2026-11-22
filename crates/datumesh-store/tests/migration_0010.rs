@@ -56,7 +56,11 @@ fn the_inputs_of_descriptors_stored_before_0_5_1_are_indexed(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, [all as u32 - 2, all as u32 - 1, all as u32], "only the 0.5.1, 0.5.2 and 0.5.3 migrations are applied");
+    assert_eq!(
+        applied,
+        [all as u32 - 2, all as u32 - 1, all as u32],
+        "only the 0.5.1, 0.5.2 and 0.5.3 migrations are applied"
+    );
 
     let s = db.bare_store();
     assert_eq!(s.function_readers(NAME).unwrap(), vec![hw.clone()]);

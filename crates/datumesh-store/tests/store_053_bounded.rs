@@ -50,9 +50,11 @@ fn case_id(n: u32) -> String {
 }
 
 fn test_line(case: &str) -> Vec<u8> {
-    json::parse(format!(r#"{{"args":{{"base":{{"type":"string","value":"EUR"}}}},"case":"{case}","expect":"1"}}"#).as_bytes())
-        .unwrap()
-        .to_jcs()
+    json::parse(
+        format!(r#"{{"args":{{"base":{{"type":"string","value":"EUR"}}}},"case":"{case}","expect":"1"}}"#).as_bytes(),
+    )
+    .unwrap()
+    .to_jcs()
 }
 
 fn test_of(h: &str, n: u32) -> FunctionTest {
@@ -176,7 +178,13 @@ fn false_test_cells_span_namespaces_and_respect_the_limit(b: Backend) {
     // Of the function: host A has false(1), false(2), true(3); host B false(4), false(5);
     // case 6 of A is false and then corrected to true (its latest version is true).
     let mut want: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for (host, n, v) in [(SLICE_HOST, 1, false), (SLICE_HOST, 2, false), (SLICE_HOST, 3, true), (OTHER_HOST, 4, false), (OTHER_HOST, 5, false)] {
+    for (host, n, v) in [
+        (SLICE_HOST, 1, false),
+        (SLICE_HOST, 2, false),
+        (SLICE_HOST, 3, true),
+        (OTHER_HOST, 4, false),
+        (OTHER_HOST, 5, false),
+    ] {
         let c = test_case_cell(host, &tc, &case_id(n), &target);
         let bytes = put_bool(&s, host, &c, v, &day(1));
         if !v {
@@ -323,7 +331,11 @@ fn text_find_with_more_matches_than_the_limit_gives_exactly_the_limit_best_first
     for limit in [1, 5, 10, 46] {
         let got = s.text_find("widget", limit).unwrap();
         assert_eq!(got.len(), limit, "exactly the limit");
-        assert_eq!(got.iter().map(hit_name).collect::<Vec<_>>(), all[..limit].iter().map(hit_name).collect::<Vec<_>>(), "limit {limit}: the best ones, in order");
+        assert_eq!(
+            got.iter().map(hit_name).collect::<Vec<_>>(),
+            all[..limit].iter().map(hit_name).collect::<Vec<_>>(),
+            "limit {limit}: the best ones, in order"
+        );
     }
     assert_eq!(s.text_find("widget", 47).unwrap().len(), 47);
     assert_eq!(s.text_find("widget", 500).unwrap().len(), 47);
@@ -400,18 +412,21 @@ fn catalog_entries_all_gives_kind_name_label_description_within_the_limit(b: Bac
         entries.push(entry(&format!("t.example.org/f{i}"), &format!("Label {i}"), &format!("Description {i}.")));
     }
     for i in 0..3 {
-        let mut e = entry(&format!("t.example.org/C{i}"), &format!("Class {i}"), "A class.");
+        let mut e = entry(&format!("t.example.org/class_{i}"), &format!("Class {i}"), "A class.");
         e.kind = CatalogKind::Class;
         entries.push(e);
     }
     s.upsert_catalog(&entries).unwrap();
-    s.upsert_key_values("t.example.org/f0", "k", &[KeyValue { value: "v".into(), label: String::new(), aliases: vec![] }]).unwrap();
-    let want: BTreeSet<(String, String, String)> = entries
-        .iter()
-        .map(|e| (e.name.clone(), e.label.clone(), e.description.clone()))
-        .collect();
+    s.upsert_key_values(
+        "t.example.org/f0",
+        "k",
+        &[KeyValue { value: "v".into(), label: String::new(), aliases: vec![] }],
+    )
+    .unwrap();
+    let want: BTreeSet<(String, String, String)> =
+        entries.iter().map(|e| (e.name.clone(), e.label.clone(), e.description.clone())).collect();
     let key = |(k, n, l, d): (CatalogKind, String, String, String)| {
-        assert_eq!(k == CatalogKind::Class, n.contains("/C"), "{n} has its kind");
+        assert_eq!(k == CatalogKind::Class, n.contains("/class_"), "{n} has its kind");
         (n, l, d)
     };
     let all: BTreeSet<_> = s.catalog_entries_all(100).unwrap().into_iter().map(key).collect();
