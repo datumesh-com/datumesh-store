@@ -1185,7 +1185,7 @@ impl Store for PgStore {
             let name_put = c.stmt(Q::NamePut)?;
             let mut t = c.client.transaction().db()?;
             // Every name this binding makes is locked before it is read: the class name, then
-            // its method names (the flattened descriptor's, in JCS order).
+            // its own method names (the flattened descriptor's, in JCS order).
             t.execute(&lock, &[&"names", &class_name]).db()?;
             // No new bindings under a suspended namespace: the host of the class name.
             let host = name_host(class_name);
@@ -1199,8 +1199,19 @@ impl Store for PgStore {
             };
             let flat = ClassDescriptor::from_json(&row.try_get::<_, Vec<u8>>(0).db()?)?;
             let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
-            let method_names: Vec<String> = methods.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
-            for name in &method_names {
+            // K5: only the methods this class adds or overrides are bound under its name: those
+            // whose function hash the parent's flattened descriptor does not give.
+            let parent = match &flat.parent {
+                Some(p) => match t.query_opt(&get, &[p]).db()? {
+                    Some(row) => Some(ClassDescriptor::from_json(&row.try_get::<_, Vec<u8>>(0).db()?)?.methods),
+                    None => None,
+                },
+                None => None,
+            };
+            let own: Vec<(String, String)> =
+                methods.iter().filter(|(m, h)| parent.as_ref().and_then(|pm| pm.get(m)) != Some(h)).cloned().collect();
+            let own_names: Vec<String> = own.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
+            for name in &own_names {
                 t.execute(&lock, &[&"names", &name.as_str()]).db()?;
             }
             // Every method's function descriptor is stored.
@@ -1216,7 +1227,7 @@ impl Store for PgStore {
             if function {
                 return Err(Error::NameTaken { name: class_name.to_string(), bound_as: "function" });
             }
-            for name in &method_names {
+            for name in &own_names {
                 let class: bool = t.query_one(&class_bound, &[&name.as_str()]).db()?.try_get(0).db()?;
                 if class {
                     return Err(Error::NameTaken { name: name.clone(), bound_as: "class" });
@@ -1234,7 +1245,7 @@ impl Store for PgStore {
                     });
                 }
             }
-            for name in &method_names {
+            for name in &own_names {
                 if let Some(row) = t.query_opt(&latest, &[&name.as_str()]).db()? {
                     let l: String = row.try_get(0).db()?;
                     if tx <= l.as_str() {
@@ -1248,7 +1259,7 @@ impl Store for PgStore {
                 }
             }
             t.execute(&class_put, &[&class_name, &tx, &class_hash]).db()?;
-            for ((_, h), name) in methods.iter().zip(&method_names) {
+            for ((_, h), name) in own.iter().zip(&own_names) {
                 t.execute(&name_put, &[&name.as_str(), &tx, &h.as_str()]).db()?;
             }
             t.commit().db()?;

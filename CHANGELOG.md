@@ -2,6 +2,10 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.5.4
+
+**BREAKING** (CONTRACT-classes-round K5; spec 16.2, 16.3, 16.6). `Store::bind_class` binds a method name under the class only for the methods that class adds or overrides: those whose function hash its parent's flattened descriptor does not give, or that the parent does not have. Under 0.5.3 it bound every flattened method, inherited ones included, so `S/m` of an inherited method answered the parent's function. Now that name is not bound: a plain read of `S/m` of an inherited method is `E_NAME_UNBOUND` (or `E_FORMULA_UNRESOLVED` in a body), and the object form `N(k).m` reaches it through the defining class. An overridden method is still bound under `S`. The parent's names are unchanged, and a class with no parent binds every method as before. No stored value and no table changes: a name bound under 0.5.3 stays bound at its tx, so the inherited names bound by an earlier binding of a subclass remain bound; a rebind under 0.5.4 binds only the subclass's own methods and does not unbind them. `datumesh-store-cli` 0.5.4 follows the store version and pins it exactly.
+
 ## 0.5.3
 
 Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec 16.8 and 9.6). Five methods on `Store` (`upsert_catalog_ext`, `catalog_entry_ext`, `catalog_entries_with_facets`, `extensions_of`, `class_names_bound_to`), four types (`CatalogEntryExt`, `FacetedEntry`, `Facets`, and the `CatalogEntryExt::new` constructor); nothing is removed and no existing method or `CatalogEntry` field changes. `upsert_catalog` leaves the facets and `extends` of an existing row as they are. Migrations 12 (PostgreSQL) and 8 (SQLite) add the columns `facets` (JSON text, `'{}'` by default, a JSON object) and `extends` (NULL by default) to `catalog_entries`; no stored value changes. cargo-semver-checks against 0.5.2 with a patch release type: no semver update required (229 checks pass, 31 skipped), so this is 0.5.3. `datumesh-store-cli` 0.5.3 follows the store version and pins it exactly.

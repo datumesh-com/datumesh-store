@@ -577,6 +577,11 @@ pub trait Store: Resolver + sealed::Sealed {
     ///
     /// The store does not check that the class name is under the steward's namespace, nor
     /// who binds it (the definer's check, 16.2 step 1). Since 0.4.1.
+    ///
+    /// Since 0.5.4 (K5), only the methods the class adds or overrides are bound under its name:
+    /// those whose function hash its parent's flattened descriptor does not give (or that the
+    /// parent does not have). An inherited method's name is not bound, so `S/m` of an inherited
+    /// `m` answers `None`. Under 0.5.3 every flattened method was bound.
     fn bind_class(&self, class_name: &str, class_hash: &str, tx: &str) -> Result<()>;
     /// The class hash `class_name` meant as of `asof`: the hash of
     /// [`resolve_class_binding`](Store::resolve_class_binding)'s binding. `None` before the

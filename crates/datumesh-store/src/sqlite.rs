@@ -1056,7 +1056,15 @@ impl Store for SqliteStore {
             };
             let flat = ClassDescriptor::from_json(&bytes)?;
             let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
-            let method_names: Vec<String> = methods.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
+            // K5: only the methods this class adds or overrides are bound under its name: those
+            // whose function hash the parent's flattened descriptor does not give.
+            let parent = match &flat.parent {
+                Some(p) => get_bytes(c, L::ClassGet, p)?.map(|b| ClassDescriptor::from_json(&b)).transpose()?.map(|d| d.methods),
+                None => None,
+            };
+            let own: Vec<(String, String)> =
+                methods.iter().filter(|(m, h)| parent.as_ref().and_then(|pm| pm.get(m)) != Some(h)).cloned().collect();
+            let own_names: Vec<String> = own.iter().map(|(m, _)| format!("{class_name}/{m}")).collect();
             // Every method's function descriptor is stored.
             for (_, h) in &methods {
                 if !exists(c, L::DescriptorExists, h)? {
@@ -1068,7 +1076,7 @@ impl Store for SqliteStore {
             if exists(c, L::NameBound, class_name)? {
                 return Err(Error::NameTaken { name: class_name.to_string(), bound_as: "function" });
             }
-            for name in &method_names {
+            for name in &own_names {
                 if exists(c, L::ClassNameBound, name)? {
                     return Err(Error::NameTaken { name: name.clone(), bound_as: "class" });
                 }
@@ -1084,7 +1092,7 @@ impl Store for SqliteStore {
                     });
                 }
             }
-            for name in &method_names {
+            for name in &own_names {
                 if let Some(l) = get_strings(c, L::NameLatest, name)?.pop() {
                     if tx <= l.as_str() {
                         return Err(Error::NotLater {
@@ -1097,7 +1105,7 @@ impl Store for SqliteStore {
                 }
             }
             exec(c, L::ClassBindingPut, rusqlite::params![class_name, tx, class_hash])?;
-            for ((_, h), name) in methods.iter().zip(&method_names) {
+            for ((_, h), name) in own.iter().zip(&own_names) {
                 exec(c, L::NamePut, rusqlite::params![name.as_str(), tx, h.as_str()])?;
             }
             Ok(())
