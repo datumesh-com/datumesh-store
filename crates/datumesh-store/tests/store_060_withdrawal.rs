@@ -149,11 +149,11 @@ fn evaluate_is_none_while_withdrawn_and_a_later_value_ends_it(b: Backend) {
     assert_eq!(x.s.evaluate(&cell, AFTER), None);
     assert_eq!(x.s.evaluate(&cell, END), None);
     // A later valued version ends the withdrawal.
-    let r2 = stored_number_at("1.0950", T2);
+    let r2 = stored_number_at("1.095", T2);
     let h2 = x.s.put_receipt(&r2).unwrap();
     x.s.put_version(&x.id, T2, &h2).unwrap();
     assert_eq!(x.s.evaluate(&cell, "2024-03-20T08:29:59.999999Z"), None);
-    assert_eq!(x.s.evaluate(&cell, T2), Some(n("1.0950")));
+    assert_eq!(x.s.evaluate(&cell, T2), Some(n("1.095")));
     let v = x.s.stored_asof(&x.id, END).unwrap().unwrap();
     assert_eq!((v.receipt_hash.as_str(), v.withdrawn), (h2.as_str(), false));
     let v = x.s.stored_asof(&x.id, AFTER).unwrap().unwrap();
@@ -183,7 +183,7 @@ fn versions_latest_and_version_asof_list_the_withdrawal(b: Backend) {
 
 fn open_slice(x: &World) -> datumesh_core::Slice {
     slice(&format!(
-        r#"{{"args":{{"base":{{"type":"string","value":"EUR"}},"date":{{"type":"date","value":"2024-03-15"}},"quote":{{"type":"string","value":"USD"}}}},"fn":"fx_rate","fn_hash":"{}","ns":"rates.example.org"}}"#,
+        r#"{{"args":{{"base":{{"type":"string","value":"EUR"}},"date":{{"type":"date","value":"2024-03-15"}},"quote":"*"}},"fn":"fx_rate","fn_hash":"{}","ns":"rates.example.org"}}"#,
         x.w.cell().fn_hash
     ))
 }
@@ -199,12 +199,12 @@ fn slice_values_leaves_a_withdrawn_cell_out(b: Backend) {
     assert!(x.s.slice_values(&sl, AW).unwrap().is_empty());
     assert!(x.s.slice_values(&sl, END).unwrap().is_empty());
     assert!(x.s.slice_values_limit(&sl, END, 10).unwrap().is_empty());
-    let r2 = stored_number_at("1.0950", T2);
+    let r2 = stored_number_at("1.095", T2);
     let h2 = x.s.put_receipt(&r2).unwrap();
     x.s.put_version(&x.id, T2, &h2).unwrap();
     let vs = x.s.slice_values(&sl, END).unwrap();
     assert_eq!(vs.len(), 1);
-    assert_eq!((vs[0].value.clone(), vs[0].version.receipt_hash.as_str()), (n("1.0950"), h2.as_str()));
+    assert_eq!((vs[0].value.clone(), vs[0].version.receipt_hash.as_str()), (n("1.095"), h2.as_str()));
 }
 
 fn a_withdrawal_of_an_existing_cell_does_not_change_the_counts(b: Backend) {
@@ -229,8 +229,9 @@ fn put_cells_takes_a_withdrawal(b: Backend) {
     let v = x.s.stored_asof(&x.id, END).unwrap().unwrap();
     assert_eq!((v.receipt_hash.as_str(), v.withdrawn), (x.w.hash(), true));
     assert_eq!(x.s.evaluate(x.w.cell(), END), None);
-    // The same batch again is a no-op.
-    assert_eq!(x.s.put_cells(&items).unwrap(), hashes);
+    // The receipt again (no version: a version at the same tx is NotLater) is a no-op.
+    let again = [CellWrite::new(&x.wbytes, None)];
+    assert_eq!(x.s.put_cells(&again).unwrap(), hashes);
     assert_eq!(x.s.versions(&x.id, FIRST, END).unwrap().len(), 2);
 }
 
@@ -257,42 +258,24 @@ backends!(
     receipts_many_and_dependents_do_not_choke_on_a_withdrawal,
 );
 
-// ---- PostgreSQL: migration 4's NOT NULL value columns and a valueless receipt -----------------
+// ---- PostgreSQL: the value columns of migration 4 and a valueless receipt ----------------------
 
-const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
-    version integer PRIMARY KEY,
-    name text NOT NULL,
-    checksum text NOT NULL,
-    applied_at timestamptz NOT NULL DEFAULT now()
-)";
-
-/// A withdrawal planted with the 0.3.1 insert (migrations 1-3 only) does not stop migrating
-/// to the latest schema (the backfill of `receipts.value_type`/`value` is not defeated by a
-/// receipt that has neither), and the store reads it back.
+/// A withdrawal inserted with the 0.3.1 statement (which names no value column) into the
+/// latest schema is accepted and read back: the value columns (NOT NULL before 0.6.0) no
+/// longer refuse a receipt that has no `type` and `value`. (Applied migrations are never
+/// edited, so the relaxing is a later migration; withdrawals did not exist before 0.6.0.)
 #[test]
-fn pg_a_withdrawal_row_survives_the_value_backfill_of_migration_4() {
-    let db = PgDb::empty();
-    let mut c = db.client();
-    c.batch_execute(TRACKING).unwrap();
-    for m in &datumesh_store::migrate::MIGRATIONS[..3] {
-        let mut t = c.transaction().unwrap();
-        t.batch_execute(m.sql).unwrap();
-        t.execute(
-            "INSERT INTO datumesh_schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
-            &[&(m.version as i32), &m.name, &m.checksum()],
-        )
-        .unwrap();
-        t.commit().unwrap();
-    }
+fn pg_a_withdrawal_row_is_accepted_by_the_value_columns() {
+    let db = PgDb::migrated();
     let v = vector("receipt/withdrawn-primary");
     let w = Withdrawal::from_json(&input(&v)).unwrap();
-    c.execute(
-        "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
-         VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)",
-        &[&w.hash(), &w.canonical(), &w.cell().id(), &w.tx(), &w.asof(), &w.cell().fn_hash, &w.publisher()],
-    )
-    .unwrap();
-    datumesh_store::migrate::apply(&db.bare_store()).expect("migrating a database holding a withdrawal");
+    db.client()
+        .execute(
+            "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
+             VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)",
+            &[&w.hash(), &w.canonical(), &w.cell().id(), &w.tx(), &w.asof(), &w.cell().fn_hash, &w.publisher()],
+        )
+        .expect("a valueless receipt row");
     let s = db.store();
     assert_eq!(s.receipt(w.hash()).unwrap().into_owned(), w.canonical());
 }
