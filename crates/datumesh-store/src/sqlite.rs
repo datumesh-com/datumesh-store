@@ -1504,6 +1504,20 @@ impl Store for SqliteStore {
         })
     }
 
+    fn slice_withdrawn_latest(&self, slice: &Slice, asof: &str) -> Result<Option<(String, String)>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            // A version slice: its cell's version answering as of asof, when a withdrawal in range.
+            return Ok(self
+                .stored_asof(&cell_id, asof)?
+                .filter(|s| s.withdrawn && from.as_str() <= s.tx.as_str() && s.tx.as_str() <= to.as_str())
+                .map(|s| (s.tx, s.asof)));
+        }
+        let p = Pattern::of(&v)?;
+        self.run("slice_withdrawn_latest", |c| withdrawn_latest(&p, c, asof))
+    }
+
     fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool> {
         check_instant(asof, "asof")?;
         let v = slice.to_value();
@@ -2358,6 +2372,20 @@ fn params(p: &Pattern, asof: &str, drive: Option<&Constraint>) -> Vec<(&'static 
         out.push((":d_hi", SqlValue::Text(sort_key(&a.ty, &a.hi))));
     }
     out
+}
+
+/// The latest withdrawal among a slice's members as of `asof`: the (tx, asof) of the greatest,
+/// one indexed query (0.6.0; SPEC 8.2).
+fn withdrawn_latest(p: &Pattern, c: &Connection, asof: &str) -> Result<Option<(String, String)>> {
+    let (d, _) = drive(p, c, false)?;
+    let q = if d.is_some() { L::SliceWithdrawnDrive } else { L::SliceWithdrawnAll };
+    let mut st = c.prepare_cached(q.sql()).db()?;
+    bind(&mut st, &params(p, asof, d))?;
+    let mut rows = st.raw_query();
+    match rows.next().db()? {
+        Some(r) => Ok(Some((r.get::<_, String>(0).db()?, r.get::<_, String>(1).db()?))),
+        None => Ok(None),
+    }
 }
 
 /// The rows of one of the member queries `qs` (all cells, driven), each made by `make`.

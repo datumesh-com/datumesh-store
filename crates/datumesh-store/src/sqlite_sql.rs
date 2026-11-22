@@ -97,6 +97,29 @@ macro_rules! slice_members {
     };
 }
 
+/// The latest withdrawal among the members of a slice as of `:asof` (0.6.0; SPEC 8.2): the
+/// candidates of `$from` and `$where` whose answering version is a withdrawal; (tx, asof) of the
+/// greatest, one row.
+macro_rules! slice_withdrawn {
+    ($from:expr, $where:expr) => {
+        concat!(
+            "SELECT v.tx, r.asof FROM ",
+            $from,
+            " CROSS JOIN versions v CROSS JOIN receipts r
+             WHERE ",
+            $where,
+            " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
+               AND v.rowid = (SELECT v2.rowid FROM versions v2 CROSS JOIN receipts r2
+                               WHERE v2.cell_id = c.cell_id AND v2.tx <= :asof
+                                 AND r2.hash = v2.receipt_hash AND r2.asof <= :asof
+                               ORDER BY v2.tx DESC LIMIT 1)
+               AND r.hash = v.receipt_hash AND r.value_type = '' AND ",
+            slice_match!(),
+            " ORDER BY v.tx DESC, r.asof DESC LIMIT 1"
+        )
+    };
+}
+
 /// A member's columns: (tx, receipt_hash, asof, bytes, cell_id, arguments).
 macro_rules! member_cols {
     () => {
@@ -411,6 +434,9 @@ statements! {
 
     // The members of a slice of cells, and their values: from every cell of the function,
     // or from a range of one argument of the typed-argument index.
+    // The latest withdrawal among a slice's members as of :asof (0.6.0; SPEC 8.2): (tx, asof).
+    SliceWithdrawnAll = slice_withdrawn!(from_all!(), where_all!());
+    SliceWithdrawnDrive = slice_withdrawn!(from_drive!(), where_drive!());
     SliceMembersAll = slice_members!(member_cols!(), from_all!(), where_all!());
     SliceMembersDrive = slice_members!(member_cols!(), from_drive!(), where_drive!());
     SliceValuesAll = slice_members!(value_cols!(), from_all!(), where_all!());

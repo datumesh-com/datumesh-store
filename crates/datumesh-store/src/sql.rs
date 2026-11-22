@@ -95,6 +95,27 @@ macro_rules! slice_members {
     };
 }
 
+/// The latest withdrawal among the members of a slice of cells as of $5 (SPEC 8.2, 0.6.0): the
+/// candidates from `$with` and `$from`, whose version answering as of $5 (the answering rule of
+/// `stored_asof`) is a withdrawal; the (tx, asof) of the greatest such version, one row.
+macro_rules! slice_withdrawn {
+    ($with:expr, $from:expr) => {
+        concat!(
+            $with,
+            "SELECT m.tx, m.asof ",
+            $from,
+            "
+              CROSS JOIN LATERAL (SELECT v.tx, r.asof, r.value_type = '' AS withdrawn
+                                    FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                                   WHERE v.cell_id = c.cell_id AND v.tx <= $5 AND r.asof <= $5
+                                   ORDER BY v.tx DESC LIMIT 1) m
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND m.withdrawn AND ",
+            slice_match!(),
+            " ORDER BY m.tx DESC, m.asof DESC LIMIT 1"
+        )
+    };
+}
+
 /// Whether a candidate cell of a slice (from `$with` and `$from`) has a stored version whose
 /// receipt's asof is after A.
 macro_rules! changed_cand {
@@ -497,6 +518,10 @@ statements! {
     // The same with the receipt's value and the member's cell from the index (0.3.2): (tx,
     // receipt_hash, asof, value_type, value, ns, fn, fn_hash, "name:type:value" of each
     // argument by name, cell_id, key).
+    // The latest withdrawal among a slice's members as of $5 (0.6.0; SPEC 8.2): (tx, asof).
+    SliceWithdrawnAll = slice_withdrawn!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceWithdrawnText = slice_withdrawn!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceWithdrawnNum = slice_withdrawn!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesAll = slice_members!(no_with!(), from_all!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesText = slice_members!(drive_text!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,

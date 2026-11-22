@@ -17,6 +17,10 @@ Additive (CONTRACT-round-0.7 R1 and R2; spec 8.1 `spec-0.7.0`, and the names of 
 - `put_computed` refuses a withdrawal (`E_SCHEMA`): a computed version states a value.
 - `Store::close_binding(name, at)` closes the latest binding of a function or class name from `at` on: `resolve_name`, `resolve_binding`, `resolve_class` and `resolve_class_binding` give `None` from `at`, and the old binding before it. A class name's close also closes its method names (`<class>/<m>`, those its binding bound and that are still bound) from the same `at`. A closed name may be bound again later (a `tx` after the close). Each close is one row of the binding history (`written_at` filled). A name with no binding, or whose latest binding is closed, is `Error::NotFound` (`what` `binding`); `at` not later than the name's latest binding is `Error::NotLater`; a malformed instant is `E_CANON_INSTANT`.
 
+### `slice_withdrawn_latest` (also in 0.6.0)
+
+Additive (SPEC 8.2, spec-0.7.0). `Store::slice_withdrawn_latest(slice, asof)` gives the `(tx, asof)` of the greatest withdrawal among the cells that match the slice whose version answering as of `asof` (the rule of `stored_asof`) is a withdrawal, or `None`. One indexed query on each backend; a version slice's one cell is read with `stored_asof`. The default is `Error::Unsupported`; both stores implement it. No table changes.
+
 ### Catalogue `source_name` and bounded `extensions_of` (also in 0.6.0)
 
 Additive (CONTRACT-round-0.7 R8 and R11). `CatalogEntryExt` and `FacetedEntry` gain the public field `source_name: Option<String>` (`CatalogEntryExt::new` gives `None`); `upsert_catalog_ext` stores it, `catalog_entry_ext` and `catalog_entries_with_facets` read it back, a republish with `None` clears it, and the 0.5.2 `upsert_catalog` leaves it of an existing row. `Store::extensions_of_limit(class, limit)` is the first `limit` of `extensions_of(class)`, read with a SQL `LIMIT` on both backends (default: truncate). Migrations 14 (PostgreSQL) and 10 (SQLite) add the nullable column `catalog_entries.source_name` and, on PostgreSQL, a partial index on `(extends, name) WHERE extends IS NOT NULL`.

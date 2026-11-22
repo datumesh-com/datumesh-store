@@ -423,6 +423,7 @@ pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slic
 pub fn datumesh_store::PgStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
+pub fn datumesh_store::PgStore::slice_withdrawn_latest(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<core::option::Option<(alloc::string::String, alloc::string::String)>>
 pub fn datumesh_store::PgStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::stored_cell_count(&self, &str, &str, &str) -> datumesh_store::Result<u64>
@@ -586,6 +587,7 @@ pub fn datumesh_store::SqliteStore::slice_members(&self, &datumesh_core::slice::
 pub fn datumesh_store::SqliteStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
+pub fn datumesh_store::SqliteStore::slice_withdrawn_latest(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<core::option::Option<(alloc::string::String, alloc::string::String)>>
 pub fn datumesh_store::SqliteStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::stored_cell_count(&self, &str, &str, &str) -> datumesh_store::Result<u64>
@@ -730,6 +732,7 @@ pub fn datumesh_store::Store::slice_members(&self, &datumesh_core::slice::Slice,
 pub fn datumesh_store::Store::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::Store::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::Store::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
+pub fn datumesh_store::Store::slice_withdrawn_latest(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<core::option::Option<(alloc::string::String, alloc::string::String)>>
 pub fn datumesh_store::Store::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::Store::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::Store::stored_cell_count(&self, &str, &str, &str) -> datumesh_store::Result<u64>
@@ -818,6 +821,7 @@ pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slic
 pub fn datumesh_store::PgStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
+pub fn datumesh_store::PgStore::slice_withdrawn_latest(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<core::option::Option<(alloc::string::String, alloc::string::String)>>
 pub fn datumesh_store::PgStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::PgStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::PgStore::stored_cell_count(&self, &str, &str, &str) -> datumesh_store::Result<u64>
@@ -906,6 +910,7 @@ pub fn datumesh_store::SqliteStore::slice_members(&self, &datumesh_core::slice::
 pub fn datumesh_store::SqliteStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
+pub fn datumesh_store::SqliteStore::slice_withdrawn_latest(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<core::option::Option<(alloc::string::String, alloc::string::String)>>
 pub fn datumesh_store::SqliteStore::stored_asof(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::stored_asof_with_receipt(&self, &str, &str) -> datumesh_store::Result<core::option::Option<(datumesh_store::Version, alloc::borrow::Cow<'_, [u8]>)>>
 pub fn datumesh_store::SqliteStore::stored_cell_count(&self, &str, &str, &str) -> datumesh_store::Result<u64>

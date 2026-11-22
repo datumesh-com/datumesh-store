@@ -706,6 +706,16 @@ pub trait Store: Resolver + sealed::Sealed {
     /// the function's receipts with an asof after `asof` or the slice's candidate cells,
     /// whichever is fewer, and one query walks it, stopping at the first match. Since 0.3.2.
     fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool>;
+    /// The latest withdrawal among the cells that match `slice` (SPEC 8.2, spec-0.7.0): among
+    /// the cells whose version answering as of `asof` (the rule of `stored_asof`) is a
+    /// withdrawal, the greatest by `tx`, then by `asof`; its `(tx, asof)`. `None` when no such
+    /// cell. A version slice's one cell counts when its answering version is a withdrawal with
+    /// a `tx` in the slice's range. A malformed instant is `E_CANON_INSTANT`. The default is
+    /// [`Error::Unsupported`]. Since 0.6.0.
+    fn slice_withdrawn_latest(&self, slice: &Slice, asof: &str) -> Result<Option<(String, String)>> {
+        let _ = (slice, asof);
+        Err(Error::Unsupported("the withdrawn cells of a slice need a store of 0.6.0".into()))
+    }
     /// The cells of `slice` (matched as [`slice_values`](Store::slice_values) matches them: the
     /// fixed arguments, `fn_hash`, `ns`, `fn` and the number of arguments) that have a computed
     /// version answering as of `asof`: one with `tx <= asof` whose receipt's asof is `<= asof`

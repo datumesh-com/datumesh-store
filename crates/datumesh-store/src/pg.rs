@@ -1131,6 +1131,20 @@ impl Store for PgStore {
         self.run("slice_values", |c| pattern.values(c, asof))
     }
 
+    fn slice_withdrawn_latest(&self, slice: &Slice, asof: &str) -> Result<Option<(String, String)>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if let Some((cell_id, from, to)) = version_slice(slice, &v)? {
+            // A version slice: its cell's version answering as of asof, when a withdrawal in range.
+            return Ok(self
+                .stored_asof(&cell_id, asof)?
+                .filter(|s| s.withdrawn && from.as_str() <= s.tx.as_str() && s.tx.as_str() <= to.as_str())
+                .map(|s| (s.tx, s.asof)));
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_withdrawn_latest", |c| pattern.withdrawn_latest(c, asof))
+    }
+
     fn slice_changed_after(&self, slice: &Slice, asof: &str) -> Result<bool> {
         check_instant(asof, "asof")?;
         let v = slice.to_value();
@@ -2484,6 +2498,18 @@ impl Pattern {
         match rows.first() {
             Some(r) => r.try_get(0).db(),
             None => Ok(false),
+        }
+    }
+
+    /// The latest withdrawal among the members as of `asof`: the (tx, asof) of the greatest,
+    /// one indexed query (0.6.0; SPEC 8.2).
+    fn withdrawn_latest(&self, c: &mut Conn, asof: &str) -> Result<Option<(String, String)>> {
+        let (drive, _) = self.drive(c, false)?;
+        let qs = [Q::SliceWithdrawnAll, Q::SliceWithdrawnText, Q::SliceWithdrawnNum];
+        let rows = self.query(c, asof, qs, drive)?;
+        match rows.first() {
+            Some(r) => Ok(Some((r.try_get(0).db()?, r.try_get(1).db()?))),
+            None => Ok(None),
         }
     }
 
