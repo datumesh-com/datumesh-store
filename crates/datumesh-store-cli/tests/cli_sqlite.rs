@@ -243,13 +243,13 @@ fn import_vectors_export_round_trip_and_agree_with_postgres() {
     }
     // Re-importing is a no-op.
     ok(&db.run(&["import", dir.to_str().unwrap()]));
-    assert_eq!(ok(&db.run(&["export"])), export1);
+    assert_eq!(without_validation_times(&ok(&db.run(&["export"]))), without_validation_times(&export1));
 
     // Into a new file, from stdin.
     let db2 = Lite::new();
     ok(&db2.run(&["migrate"]));
     ok(&db2.run_stdin(&["import", "-"], Some(export1.as_bytes())));
-    assert_eq!(ok(&db2.run(&["export"])), export1);
+    assert_eq!(without_validation_times(&ok(&db2.run(&["export"]))), without_validation_times(&export1));
 
     // PostgreSQL, the same import: the same export, but for when each import validated the
     // key documents (now, each time).
@@ -263,7 +263,7 @@ fn import_vectors_export_round_trip_and_agree_with_postgres() {
     let db3 = Lite::new();
     ok(&db3.run(&["migrate"]));
     ok(&db3.run_stdin(&["import", "-"], Some(pg_export.as_bytes())));
-    assert_eq!(ok(&db3.run(&["export"])), pg_export);
+    assert_eq!(without_validation_times(&ok(&db3.run(&["export"]))), without_validation_times(&pg_export));
 }
 
 /// The 0.1.2 and 0.3.0 export fixtures import into SQLite and export the same lines.
