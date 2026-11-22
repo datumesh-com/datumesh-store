@@ -1,4 +1,4 @@
--- datumesh-store schema, migration 12 (additions only; a store release later; CONTRACT-classes-round
+-- datumesh-store schema, migration 13 (additions only; a store release later; CONTRACT-classes-round
 -- C2 and K9): facets and extends on catalogue entries.
 --
 -- facets: the facets of an entry, a JSON object of name lists (canonical JCS, as the store writes

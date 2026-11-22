@@ -2,14 +2,13 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.5.4
+## 0.6.0
 
-**BREAKING** (CONTRACT-classes-round K5; spec 16.2, 16.3, 16.6). `Store::bind_class` binds a method name under the class only for the methods that class adds or overrides: those whose function hash its parent's flattened descriptor does not give, or that the parent does not have. Under 0.5.3 it bound every flattened method, inherited ones included, so `S/m` of an inherited method answered the parent's function. Now that name is not bound: a plain read of `S/m` of an inherited method is `E_NAME_UNBOUND` (or `E_FORMULA_UNRESOLVED` in a body), and the object form `N(k).m` reaches it through the defining class. An overridden method is still bound under `S`. The parent's names are unchanged, and a class with no parent binds every method as before. No stored value and no table changes: a name bound under 0.5.3 stays bound at its tx, so the inherited names bound by an earlier binding of a subclass remain bound; a rebind under 0.5.4 binds only the subclass's own methods and does not unbind them. `datumesh-store-cli` 0.5.4 follows the store version and pins it exactly.
+**BREAKING** (CONTRACT-classes-round K5; spec 16.2, 16.3, 16.6). `Store::bind_class` binds a method name under the class only for the methods that class adds or overrides: those whose function hash its parent's flattened descriptor does not give, or that the parent does not have. Under 0.5.3 (released) it bound every flattened method, inherited ones included, so `S/m` of an inherited method answered the parent's function. Now that name is not bound: a plain read of `S/m` of an inherited method is `E_NAME_UNBOUND` (or `E_FORMULA_UNRESOLVED` in a body), and the object form `N(k).m` reaches it through the defining class. An overridden method is still bound under `S`. The parent's names are unchanged, and a class with no parent binds every method as before. No stored value and no table changes: a name bound under 0.5.3 stays bound at its tx, so the inherited names bound by an earlier binding of a subclass remain bound; a rebind under 0.6.0 binds only the subclass's own methods and does not unbind them. `datumesh-store-cli` 0.6.0 follows the store version and pins it exactly.
 
-## 0.5.3
+### Catalogue facets and `extends` (also in 0.6.0)
 
-Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec 16.8 and 9.6). Five methods on `Store` (`upsert_catalog_ext`, `catalog_entry_ext`, `catalog_entries_with_facets`, `extensions_of`, `class_names_bound_to`), four types (`CatalogEntryExt`, `FacetedEntry`, `Facets`, and the `CatalogEntryExt::new` constructor); nothing is removed and no existing method or `CatalogEntry` field changes. `upsert_catalog` leaves the facets and `extends` of an existing row as they are. Migrations 12 (PostgreSQL) and 8 (SQLite) add the columns `facets` (JSON text, `'{}'` by default, a JSON object) and `extends` (NULL by default) to `catalog_entries`; no stored value changes. cargo-semver-checks against 0.5.2 with a patch release type: no semver update required (229 checks pass, 31 skipped), so this is 0.5.3. `datumesh-store-cli` 0.5.3 follows the store version and pins it exactly.
-
+Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec 16.8 and 9.6). Five methods on `Store` (`upsert_catalog_ext`, `catalog_entry_ext`, `catalog_entries_with_facets`, `extensions_of`, `class_names_bound_to`), four types (`CatalogEntryExt`, `FacetedEntry`, `Facets`, and the `CatalogEntryExt::new` constructor); nothing is removed and no existing method or `CatalogEntry` field changes. `upsert_catalog` leaves the facets and `extends` of an existing row as they are. Migrations 13 (PostgreSQL) and 9 (SQLite), after the released 0.5.3 counters (12 and 8), add the columns `facets` (JSON text, `'{}'` by default, a JSON object) and `extends` (NULL by default) to `catalog_entries`; no stored value changes. 
 ### Added
 
 - `Store::upsert_catalog_ext(&[CatalogEntryExt])`: inserts or replaces entries with their facets and `extends`, all or nothing. The store refuses a facet key other than `domain`, `thing`, `measure`, `region` or `frequency`, a facet of 0 or more than 8 names, a name that is not a name (2.2) or is longer than 32 bytes, names not ascending and unique, and an `extends` that is not a full name or is on an entry that is not a function (`Error::Invalid`).
@@ -20,6 +19,26 @@ Additive: catalogue facets and `extends` (CONTRACT-classes-round C2 and K9; spec
 - Each new method has a default in the trait (`Error::Unsupported`), so an `impl Store` that delegates only the 0.5.2 methods still compiles.
 
 The store does not check that `extends` names a stored class, nor the key rule of 16.3: http does that when it publishes.
+## 0.5.3
+
+Additive, and the reads that were counts over whole tables are now counters and bounded queries (CONTRACT-round-0.7-P, Store 0.5.3, SP1-SP7). Eight methods; nothing is removed, and no existing signature changes. Migrations 12 (PostgreSQL) and 8 (SQLite) add two counter tables and a trigram index; the migrations fill the counters from the rows already stored, once.
+
+### Added
+
+- `Store::cell_count(ns, fn_name, fn_hash)`: the cells of a function name and hash, read from the counter `cell_counts` (by primary key). `stored_cell_count` and the catalogue summary's `n_cells` read the same counter, not a count over `cells`. A new cell adds one (by the statement trigger on PostgreSQL, by a trigger on SQLite); a second version of a cell adds nothing.
+- `Store::function_test(fn_hash, case)`: one test by primary key.
+- `Store::function_tests_failing(fn_hash, fn_name, limit)`: up to `limit` failing or erroring tests, by case, with a SQL `LIMIT`.
+- `Store::false_test_cells(fn_hash, limit)`: the stored `test_case` cells whose latest version is `false` and whose `function_hash` argument is the given hash, with the bytes of that version's receipt, in one query.
+- `Store::dependants_of(name, at, limit)`: the names bound at `at` to a function that reads `name`, in one query.
+- `Store::slice_values_page(slice, asof, after_cell_id, limit)`: a page of a slice's values by cell id.
+- `Store::catalog_entries_all(limit)`: the catalogue's (kind, name, label, description), without counts.
+- `Store::dictionary_values_ordered(owner, key, limit)`: a dictionary's values in insertion order.
+
+### Changed
+
+- The function test counter `function_test_counts (fn_hash, fn_name, n, pass, fail, error, not_run, last_run_at, branches_total, branches_covered)` (`fn_name` `''` for an unnamed test) is kept in the transaction of each write to a test. `function_test_summary` reads it. Branch counts are kept per hash on the counter and are no longer written to every test row; `function_tests` and `function_test` read them from the counter.
+- `text_find` ranks in SQL (`ORDER BY` the score, then the name) and applies its limit there: it no longer loads every match. Scores are integers in tens (10, 8, 5 per word, then the mean), so the order is exact and the same as before. PostgreSQL adds a trigram index on `lower(catalog_entries.name)`; the search's scoring functions are in the migration (`datumesh_word_score`, `datumesh_entry_total`, `datumesh_value_total`), and SQLite registers the same as connection functions.
+- `set_function_branches` on a function with no tests is still a no-op.
 
 ## 0.5.2 (unreleased)
 

@@ -70,8 +70,13 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 12,
-        name: "0012_catalogue_facets.sql",
-        sql: include_str!("../migrations/0012_catalogue_facets.sql"),
+        name: "0012_counters_and_search.sql",
+        sql: include_str!("../migrations/0012_counters_and_search.sql"),
+    },
+    Migration {
+        version: 13,
+        name: "0013_catalogue_facets.sql",
+        sql: include_str!("../migrations/0013_catalogue_facets.sql"),
     },
 ];
 
@@ -276,8 +281,13 @@ pub mod sqlite {
         },
         Migration {
             version: 8,
-            name: "0008_catalogue_facets.sql",
-            sql: include_str!("../migrations/sqlite/0008_catalogue_facets.sql"),
+            name: "0008_counters.sql",
+            sql: include_str!("../migrations/sqlite/0008_counters.sql"),
+        },
+        Migration {
+            version: 9,
+            name: "0009_catalogue_facets.sql",
+            sql: include_str!("../migrations/sqlite/0009_catalogue_facets.sql"),
         },
     ];
 

@@ -200,38 +200,106 @@ statements! {
                            last_detail, branches_total, branches_covered)
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (fn_hash, "case") DO NOTHING"#
         => [TEXT, TEXT, BYTEA, TEXT, TEXT, TEXT, TEXT, INT4, INT4];
-    FunctionTestsOf = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
-                           branches_total, branches_covered FROM function_tests WHERE fn_hash = $1 ORDER BY "case""#
+    // The branch counts of a test are its hash's, read from the hash's counter (0.5.3).
+    FunctionTestsOf = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_hash = $1 ORDER BY t."case""#
         => [TEXT];
+    FunctionTestOne = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_hash = $1 AND t."case" = $2"#
+        => [TEXT, TEXT];
+    // The row a test is in before a run or a naming (0.5.3: the counters move with it).
+    FunctionTestOld = r#"SELECT fn_name, last_result FROM function_tests WHERE fn_hash = $1 AND "case" = $2 FOR UPDATE"#
+        => [TEXT, TEXT];
+    // A counter row moves by deltas. The row is created first, with zero counts and the hash's
+    // branch counts (or the given ones): a CHECK of a proposed row is tested before a conflict,
+    // so a negative delta cannot go through an INSERT ... ON CONFLICT.
+    CounterEnsure = "INSERT INTO function_test_counts (fn_hash, fn_name, branches_total, branches_covered)
+                     VALUES ($1, $2,
+                             COALESCE((SELECT k.branches_total FROM function_test_counts k WHERE k.fn_hash = $1 LIMIT 1), $3),
+                             COALESCE((SELECT k.branches_covered FROM function_test_counts k WHERE k.fn_hash = $1 LIMIT 1), $4))
+                     ON CONFLICT (fn_hash, fn_name) DO NOTHING"
+        => [TEXT, TEXT, INT4, INT4];
+    CounterAdd = "UPDATE function_test_counts SET n = n + $3, pass = pass + $4, fail = fail + $5, error = error + $6,
+                    not_run = not_run + $7, last_run_at = GREATEST(last_run_at, $8)
+                  WHERE fn_hash = $1 AND fn_name = $2"
+        => [TEXT, TEXT, INT8, INT8, INT8, INT8, INT8, TEXT];
+    // The latest run of a counter row, from its tests (after a run moved one, or a naming).
+    CounterRunRecompute = "UPDATE function_test_counts c SET last_run_at = (SELECT max(t.last_run_at) FROM function_tests t
+                             WHERE t.fn_hash = c.fn_hash AND COALESCE(t.fn_name, '') = c.fn_name)
+                           WHERE c.fn_hash = $1 AND c.fn_name = $2"
+        => [TEXT, TEXT];
     FunctionTestRecord = r#"UPDATE function_tests SET last_run_at = $1, last_result = $2, last_detail = $3
                             WHERE fn_hash = $4 AND "case" = $5"# => [TEXT, TEXT, TEXT, TEXT, TEXT];
-    FunctionBranches = "UPDATE function_tests SET branches_total = $2, branches_covered = $3 WHERE fn_hash = $1"
+    // The branch counts are per hash: on the hash's counter rows (0.5.3), none for a hash with no test.
+    FunctionBranches = "UPDATE function_test_counts SET branches_total = $2, branches_covered = $3 WHERE fn_hash = $1"
         => [TEXT, INT4, INT4];
     // Named tests (0.5.2; migration 11): a name is set once, on the rows still unnamed.
+    // Returns the rows it named (their name and last result), for the counters.
     FunctionTestName = r#"UPDATE function_tests f SET fn_name = n.name FROM unnest($2::text[], $3::text[]) AS n(c, name)
-                          WHERE f.fn_hash = $1 AND f."case" = n.c AND f.fn_name IS NULL"#
+                          WHERE f.fn_hash = $1 AND f."case" = n.c AND f.fn_name IS NULL
+                          RETURNING f.fn_name, f.last_result"#
         => [TEXT, TEXT_ARRAY, TEXT_ARRAY];
-    FunctionTestsUnnamed = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
-                           branches_total, branches_covered FROM function_tests WHERE fn_name IS NULL
-                           ORDER BY fn_hash, "case" LIMIT $1"#
+    FunctionTestsUnnamed = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_name IS NULL ORDER BY t.fn_hash, t."case" LIMIT $1"#
         => [INT8];
     // The summary of a hash's tests, all of them or those of one name: one aggregate.
-    FunctionTestSummary = r#"SELECT count(*), count(*) FILTER (WHERE last_result = 'pass'),
-                           count(*) FILTER (WHERE last_result = 'fail'), count(*) FILTER (WHERE last_result = 'error'),
-                           count(*) FILTER (WHERE last_result IS NULL), max(last_run_at),
+    // Read from the counters (0.5.3): the sum over the hash's rows, or the row of one name.
+    FunctionTestSummary = r#"SELECT COALESCE(sum(n), 0)::bigint, COALESCE(sum(pass), 0)::bigint,
+                           COALESCE(sum(fail), 0)::bigint, COALESCE(sum(error), 0)::bigint,
+                           COALESCE(sum(not_run), 0)::bigint, max(last_run_at),
                            COALESCE(max(branches_total), 0), COALESCE(max(branches_covered), 0)
-                         FROM function_tests WHERE fn_hash = $1 AND ($2::text IS NULL OR fn_name = $2)"#
+                         FROM function_test_counts WHERE fn_hash = $1 AND ($2::text IS NULL OR fn_name = $2)"#
         => [TEXT, TEXT];
-    // A page of a hash's tests by case, after a case (exclusive), at most $LIMIT rows.
-    FunctionTestsPage = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
-                           branches_total, branches_covered FROM function_tests
-                         WHERE fn_hash = $1 AND ($2::text IS NULL OR "case" > $2) ORDER BY "case" LIMIT $3"#
+    FunctionTestsFailing = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_hash = $1 AND ($2::text IS NULL OR t.fn_name = $2)
+                           AND t.last_result IN ('fail', 'error') ORDER BY t."case" LIMIT $3"#
         => [TEXT, TEXT, INT8];
-    FunctionTestsPageNamed = r#"SELECT fn_hash, "case", test_json, signed_by, last_run_at, last_result, last_detail,
-                           branches_total, branches_covered FROM function_tests
-                         WHERE fn_hash = $1 AND fn_name = $2 AND ($3::text IS NULL OR "case" > $3)
-                         ORDER BY "case" LIMIT $4"#
+    // A page of a hash's tests by case, after a case (exclusive), at most $LIMIT rows.
+    FunctionTestsPage = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_hash = $1 AND ($2::text IS NULL OR t."case" > $2) ORDER BY t."case" LIMIT $3"#
+        => [TEXT, TEXT, INT8];
+    FunctionTestsPageNamed = r#"SELECT t.fn_hash, t."case", t.test_json, t.signed_by, t.last_run_at, t.last_result, t.last_detail,
+                           COALESCE(k.branches_total, 0), COALESCE(k.branches_covered, 0) FROM function_tests t
+                           LEFT JOIN LATERAL (SELECT branches_total, branches_covered FROM function_test_counts c
+                                               WHERE c.fn_hash = t.fn_hash LIMIT 1) k ON true
+                         WHERE t.fn_hash = $1 AND t.fn_name = $2 AND ($3::text IS NULL OR t."case" > $3)
+                         ORDER BY t."case" LIMIT $4"#
         => [TEXT, TEXT, TEXT, INT8];
+    // The stored test cells of any namespace whose function_hash argument is $1 and whose latest
+    // version is false (0.5.3): one query, at most $2 (cell id, receipt bytes).
+    FalseTestCells = "SELECT c.cell_id, r.bytes FROM cell_args a JOIN cells c ON c.cell_id = a.cell_id
+                        CROSS JOIN LATERAL (SELECT v.receipt_hash FROM versions v WHERE v.cell_id = c.cell_id
+                                             ORDER BY v.tx DESC LIMIT 1) m
+                        JOIN receipts r ON r.hash = m.receipt_hash
+                       WHERE a.name = 'function_hash' AND a.type = 'string' AND a.value = $1 AND c.fn = 'test_case'
+                         AND r.value_type = 'boolean' AND r.value = 'false'
+                       ORDER BY c.cell_id LIMIT $2"
+        => [TEXT, INT8];
+    // The names bound at $2 to a hash that reads $1 (0.5.3): the latest binding of each name
+    // that was bound to a reader, one query, at most $3.
+    DependantsOf = "WITH readers AS (SELECT fn_hash FROM descriptor_inputs WHERE input_name = $1),
+                      cand AS (SELECT DISTINCT b.fn_name FROM name_bindings b
+                                WHERE b.fn_hash IN (SELECT fn_hash FROM readers)),
+                      latest AS (SELECT DISTINCT ON (b.fn_name) b.fn_name, b.fn_hash FROM name_bindings b
+                                  JOIN cand USING (fn_name) WHERE b.tx <= $2 ORDER BY b.fn_name, b.tx DESC)
+                    SELECT fn_name, fn_hash FROM latest WHERE fn_hash IN (SELECT fn_hash FROM readers)
+                    ORDER BY fn_name LIMIT $3"
+        => [TEXT, TEXT, INT8];
     // The receipts of the latest stored version of the first cells (by cell id) of a function
     // name and hash that have one: at most $4 cells read, one indexed query.
     StoredReceiptsOf = "SELECT r.bytes FROM (SELECT c.cell_id FROM cells c
@@ -243,8 +311,8 @@ statements! {
                         JOIN receipts r ON r.hash = m.receipt_hash
                         ORDER BY k.cell_id"
         => [TEXT, TEXT, TEXT, INT8];
-    StoredCellCount = "SELECT count(*) FROM cells c WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3
-                         AND EXISTS (SELECT 1 FROM versions v WHERE v.cell_id = c.cell_id)"
+    // The cells of a function name, from the counter (0.5.3; the PK, never a count over cells).
+    StoredCellCount = "SELECT COALESCE((SELECT n FROM cell_counts WHERE fn_hash = $1 AND ns = $2 AND fn = $3), 0)"
         => [TEXT, TEXT, TEXT];
     // A version slice's versions, at most $4 (SQL LIMIT, in tx order).
     VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
@@ -254,6 +322,10 @@ statements! {
     DictionaryHas = "SELECT EXISTS (SELECT 1 FROM key_values WHERE owner = $1 AND key = $2 AND value = $3)"
         => [TEXT, TEXT, TEXT];
     DictionaryCount = "SELECT count(*) FROM key_values WHERE owner = $1 AND key = $2" => [TEXT, TEXT];
+    // The values in insertion order (0.5.3): the row's id, which an upsert keeps.
+    DictionaryValuesOrdered = "SELECT value FROM key_values WHERE owner = $1 AND key = $2 ORDER BY id LIMIT $3"
+        => [TEXT, TEXT, INT8];
+    CatalogEntriesAll = "SELECT kind, name, label, description FROM catalog_entries ORDER BY id LIMIT $1" => [INT8];
     KeyOpenPut = r#"INSERT INTO open_keys (owner, key, marked_at)
                     VALUES ($1, $2, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
                     ON CONFLICT (owner, key) DO NOTHING"#

@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::catalogue::{
     aliases_json, args_json, as_i64, canonical_examples, check_catalog_entry, check_catalog_ext, check_key_values,
-    entry_ext, entry_fields, entry_from_columns, invalid, miss_text, parse_aliases, parse_facets, rank, CatalogRow,
+    entry_ext, entry_from_columns, invalid, miss_text, parse_aliases, parse_args, parse_facets, rank, CatalogRow,
     Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
@@ -215,6 +215,7 @@ impl SqliteStore {
             flags |= OpenFlags::SQLITE_OPEN_CREATE;
         }
         let c = Connection::open_with_flags(&self.path, flags).db()?;
+        register_text_functions(&c)?;
         c.busy_timeout(self.options.busy_timeout).db()?;
         c.set_prepared_statement_cache_capacity(L::ALL.len() + 16);
         if self.existing {
@@ -474,6 +475,70 @@ fn get_strings(c: &Connection, q: L, key: &str) -> Result<Vec<String>> {
 
 fn exists(c: &Connection, q: L, key: &str) -> Result<bool> {
     c.prepare_cached(q.sql()).db()?.query_row([key], |r| r.get(0)).db()
+}
+
+/// Registers the functions of the text search on a connection (0.5.3): `datumesh_entry_total`
+/// and `datumesh_value_total` give a row's total score in tens for a query (see `Words` and
+/// `field_score`), or NULL when a word is in none of the row's fields. The search orders and
+/// cuts by them in SQL.
+fn register_text_functions(c: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    c.create_scalar_function("datumesh_entry_total", 5, flags, |ctx| {
+        let Some(words) = Words::new(&ctx.get::<String>(0)?) else { return Ok(None::<i64>) };
+        let name: String = ctx.get(1)?;
+        let label: String = ctx.get(2)?;
+        let description: String = ctx.get(3)?;
+        let args = parse_args(&ctx.get::<String>(4)?).map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+        let mut fields: Vec<&str> = vec![&name, &label, &description];
+        for (k, v) in &args {
+            fields.push(k);
+            fields.push(v);
+        }
+        Ok(words.total(&fields).map(i64::from))
+    })
+    .db()?;
+    c.create_scalar_function("datumesh_value_total", 4, flags, |ctx| {
+        let Some(words) = Words::new(&ctx.get::<String>(0)?) else { return Ok(None::<i64>) };
+        let value: String = ctx.get(1)?;
+        let label: String = ctx.get(2)?;
+        let aliases =
+            parse_aliases(&ctx.get::<String>(3)?).map_err(|e| rusqlite::Error::UserFunctionError(e.into()))?;
+        let mut fields: Vec<&str> = vec![&value, &label];
+        fields.extend(aliases.iter().map(String::as_str));
+        Ok(words.total(&fields).map(i64::from))
+    })
+    .db()?;
+    Ok(())
+}
+
+/// The counter's update of a row (0.5.3): `n` tests more (or fewer) and the deltas of their
+/// results, on the row of `fn_name` ('' for unnamed). The row is made first, with the hash's
+/// branch counts (or `init`).
+fn bump_counter(
+    c: &Connection,
+    fn_hash: &str,
+    fn_name: &str,
+    n: i64,
+    results: [i64; 4],
+    last_run_at: Option<&str>,
+    init: (i64, i64),
+) -> Result<()> {
+    exec(c, L::CounterEnsure, rusqlite::params![fn_hash, fn_name, init.0, init.1])?;
+    let [pass, fail, error, not_run] = results;
+    exec(c, L::CounterAdd, rusqlite::params![fn_hash, fn_name, n, pass, fail, error, not_run, last_run_at])?;
+    Ok(())
+}
+
+/// A test's name and last result, if the test is stored (0.5.3).
+fn function_test_old(c: &Connection, fn_hash: &str, case: &str) -> Result<Option<(Option<String>, Option<String>)>> {
+    let mut st = c.prepare_cached(L::FunctionTestOld.sql()).db()?;
+    let mut rows = st
+        .query_map(rusqlite::params![fn_hash, case], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
+        })
+        .db()?;
+    rows.next().transpose().db()
 }
 
 fn exec(c: &Connection, q: L, params: impl rusqlite::Params) -> Result<usize> {
@@ -1059,7 +1124,10 @@ impl Store for SqliteStore {
             // K5: only the methods this class adds or overrides are bound under its name: those
             // whose function hash the parent's flattened descriptor does not give.
             let parent = match &flat.parent {
-                Some(p) => get_bytes(c, L::ClassGet, p)?.map(|b| ClassDescriptor::from_json(&b)).transpose()?.map(|d| d.methods),
+                Some(p) => get_bytes(c, L::ClassGet, p)?
+                    .map(|b| ClassDescriptor::from_json(&b))
+                    .transpose()?
+                    .map(|d| d.methods),
                 None => None,
             };
             let own: Vec<(String, String)> =
@@ -1438,44 +1506,78 @@ impl Store for SqliteStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let entry_where = like_where_sqlite(&words, &["name", "label", "description", "args"]);
-        let value_where = like_where_sqlite(&words, &["value", "label", "aliases"]);
+        // The query is $1 (the scores are computed by the functions registered on each
+        // connection, which split the query the same way); the prefilter's patterns follow;
+        // the LIMIT is last. Each table is ordered and cut in SQL (0.5.3).
+        let entry_where = like_where_sqlite(&words, &["name", "label", "description", "args"], 2);
+        let value_where = like_where_sqlite(&words, &["value", "label", "aliases"], 2);
+        let cap = limit;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.run("text_find", |c| {
             let mut hits = Vec::new();
+            let mut params: Vec<SqlValue> = vec![SqlValue::Text(query.to_string())];
+            params.extend(entry_where.1.iter().map(|p| SqlValue::Text(p.clone())));
+            params.push(SqlValue::Integer(limit));
             let sql = format!(
-                "SELECT id, kind, name, hash, label, description, args, examples, source, signed_by FROM catalog_entries WHERE 1 = 1{}",
-                entry_where.0
+                "SELECT * FROM (SELECT id, kind, name, hash, label, description, args, examples, source, signed_by,
+                        datumesh_entry_total(?1, name, label, description, args) AS total
+                   FROM catalog_entries WHERE 1 = 1{}) e
+                  WHERE total IS NOT NULL ORDER BY total DESC, name LIMIT ?{}",
+                entry_where.0,
+                params.len()
             );
-            let rows: Vec<EntryRow> = {
+            let rows: Vec<HitRow> = {
                 let mut st = c.prepare(&sql).db()?;
-                let mapped = st.query_map(rusqlite::params_from_iter(entry_where.1.iter()), entry_columns).db()?;
+                let mapped = st
+                    .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                        ))
+                    })
+                    .db()?;
                 mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
             };
-            for (id, kind, name, hash, label, description, args, examples, source, signed_by) in rows {
-                let entry = entry_from_columns(&kind, name, hash, label, description, &args, &examples, &source, signed_by)?;
-                let score = words.score(&entry_fields(&entry));
-                if let Some(score) = score {
-                    hits.push(Hit::Entry { id, entry, score });
-                }
+            for (id, kind, name, hash, label, description, args, examples, source, signed_by, total) in rows {
+                let entry =
+                    entry_from_columns(&kind, name, hash, label, description, &args, &examples, &source, signed_by)?;
+                hits.push(Hit::Entry { id, entry, score: words.score_of(total as u32) });
             }
-            let sql = format!("SELECT id, owner, key, value, label, aliases FROM key_values WHERE 1 = 1{}", value_where.0);
-            let rows: Vec<ValueRow> = {
+            let mut params: Vec<SqlValue> = vec![SqlValue::Text(query.to_string())];
+            params.extend(value_where.1.iter().map(|p| SqlValue::Text(p.clone())));
+            params.push(SqlValue::Integer(limit));
+            let sql = format!(
+                "SELECT * FROM (SELECT id, owner, key, value, label, aliases,
+                        datumesh_value_total(?1, value, label, aliases) AS total
+                   FROM key_values WHERE 1 = 1{}) v
+                  WHERE total IS NOT NULL
+                  ORDER BY total DESC, owner || char(1) || key || char(1) || value LIMIT ?{}",
+                value_where.0,
+                params.len()
+            );
+            let rows: Vec<(i64, String, String, String, String, String, i64)> = {
                 let mut st = c.prepare(&sql).db()?;
-                let mapped = st.query_map(rusqlite::params_from_iter(value_where.1.iter()), value_columns_of).db()?;
+                let mapped = st
+                    .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+                    })
+                    .db()?;
                 mapped.collect::<rusqlite::Result<Vec<_>>>().db()?
             };
-            for (id, owner, key, value, label, aliases_text) in rows {
+            for (id, owner, key, value, label, aliases_text, total) in rows {
                 let aliases = parse_aliases(&aliases_text)?;
-                let score = {
-                    let mut fields: Vec<&str> = vec![&value, &label];
-                    fields.extend(aliases.iter().map(String::as_str));
-                    words.score(&fields)
-                };
-                if let Some(score) = score {
-                    hits.push(Hit::Value { id, owner, key, value, label, aliases, score });
-                }
+                hits.push(Hit::Value { id, owner, key, value, label, aliases, score: words.score_of(total as u32) });
             }
-            Ok(rank(hits, limit))
+            Ok(rank(hits, cap))
         })
     }
 
@@ -1529,7 +1631,84 @@ impl Store for SqliteStore {
                     covered
                 ],
             )?;
+            if n == 1 {
+                let results = crate::functions::result_counts(test.last_result.as_deref());
+                bump_counter(
+                    c,
+                    &test.fn_hash,
+                    "",
+                    1,
+                    results,
+                    test.last_run_at.as_deref(),
+                    (total.into(), covered.into()),
+                )?;
+            }
             Ok(n == 1)
+        })
+    }
+
+    fn function_test(&self, fn_hash: &str, case: &str) -> Result<Option<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        crate::functions::check_case(case)?;
+        self.run("function_test", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestOne.sql()).db()?;
+            let mut rows = st.query_map(rusqlite::params![fn_hash, case], function_test_row).db()?;
+            rows.next().transpose().db()
+        })
+    }
+
+    fn function_tests_failing(&self, fn_hash: &str, fn_name: Option<&str>, limit: usize) -> Result<Vec<FunctionTest>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("function_tests_failing", |c| {
+            let mut st = c.prepare_cached(L::FunctionTestsFailing.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![fn_hash, fn_name, limit], function_test_row).db()?;
+            rows.collect::<rusqlite::Result<Vec<FunctionTest>>>().db()
+        })
+    }
+
+    fn false_test_cells(&self, fn_hash: &str, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("false_test_cells", |c| {
+            let mut st = c.prepare_cached(L::FalseTestCells.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![fn_hash, limit], |r| Ok((r.get(0)?, r.get(1)?))).db()?;
+            rows.collect::<rusqlite::Result<Vec<(String, Vec<u8>)>>>().db()
+        })
+    }
+
+    fn dependants_of(&self, name: &str, at: &str, limit: usize) -> Result<Vec<(String, String)>> {
+        check_function_name(name, "name")?;
+        check_instant(at, "at")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("dependants_of", |c| {
+            let mut st = c.prepare_cached(L::DependantsOf.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![name, at, limit], |r| Ok((r.get(0)?, r.get(1)?))).db()?;
+            rows.collect::<rusqlite::Result<Vec<(String, String)>>>().db()
+        })
+    }
+
+    fn catalog_entries_all(&self, limit: usize) -> Result<Vec<(CatalogKind, String, String, String)>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("catalog_entries_all", |c| {
+            let mut st = c.prepare_cached(L::CatalogEntriesAll.sql()).db()?;
+            let rows = st.query_map([limit], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).db()?;
+            rows.map(|row| {
+                let (kind, name, label, description): (String, String, String, String) = row.db()?;
+                let kind =
+                    CatalogKind::parse(&kind).ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?;
+                Ok((kind, name, label, description))
+            })
+            .collect()
+        })
+    }
+
+    fn dictionary_values_ordered(&self, owner: &str, key: &str, limit: usize) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("dictionary_values_ordered", |c| {
+            let mut st = c.prepare_cached(L::DictionaryValuesOrdered.sql()).db()?;
+            let rows = st.query_map(rusqlite::params![owner, key, limit], |r| r.get::<_, String>(0)).db()?;
+            rows.collect::<rusqlite::Result<Vec<String>>>().db()
         })
     }
 
@@ -1555,7 +1734,19 @@ impl Store for SqliteStore {
         check_instant(run_at, "run_at")?;
         crate::functions::check_result(result)?;
         self.write("record_function_test", |c| {
+            let Some((old_name, old_result)) = function_test_old(c, fn_hash, case)? else { return Ok(false) };
             let n = exec(c, L::FunctionTestRecord, rusqlite::params![run_at, result, detail, fn_hash, case])?;
+            if n == 1 {
+                // The test moves within its row: the row's counts change by the difference.
+                let (before, after) = (
+                    crate::functions::result_counts(old_result.as_deref()),
+                    crate::functions::result_counts(Some(result)),
+                );
+                let row = old_name.unwrap_or_default();
+                let d = [after[0] - before[0], after[1] - before[1], after[2] - before[2], after[3] - before[3]];
+                bump_counter(c, fn_hash, &row, 0, d, None, (0, 0))?;
+                exec(c, L::CounterRunRecompute, rusqlite::params![fn_hash, row])?;
+            }
             Ok(n == 1)
         })
     }
@@ -1588,10 +1779,32 @@ impl Store for SqliteStore {
             return Ok(0);
         }
         self.write("name_function_tests", |c| {
-            let mut st = c.prepare_cached(L::FunctionTestName.sql()).db()?;
             let mut named = 0u64;
+            // The rows moved from unnamed to their names, with their results: [tests, pass,
+            // fail, error, not_run] per name (0.5.3: the counters move with them).
+            let mut moved: std::collections::BTreeMap<String, [i64; 5]> = std::collections::BTreeMap::new();
             for (case, name) in names {
-                named += st.execute(rusqlite::params![fn_hash, case, name]).db()? as u64;
+                let Some((old_name, result)) = function_test_old(c, fn_hash, case)? else { continue };
+                if old_name.is_some() {
+                    continue;
+                }
+                if exec(c, L::FunctionTestName, rusqlite::params![fn_hash, case, name])? == 1 {
+                    named += 1;
+                    let d = crate::functions::result_counts(result.as_deref());
+                    let e = moved.entry(name.clone()).or_insert([0; 5]);
+                    e[0] += 1;
+                    for (i, x) in d.iter().enumerate() {
+                        e[i + 1] += x;
+                    }
+                }
+            }
+            for (name, d) in &moved {
+                bump_counter(c, fn_hash, name, d[0], [d[1], d[2], d[3], d[4]], None, (0, 0))?;
+                bump_counter(c, fn_hash, "", -d[0], [-d[1], -d[2], -d[3], -d[4]], None, (0, 0))?;
+                exec(c, L::CounterRunRecompute, rusqlite::params![fn_hash, name])?;
+            }
+            if !moved.is_empty() {
+                exec(c, L::CounterRunRecompute, rusqlite::params![fn_hash, ""])?;
             }
             Ok(named)
         })
@@ -1673,6 +1886,31 @@ impl Store for SqliteStore {
             let rows = st.query_map(rusqlite::params![fn_hash, ns, fn_name, limit], |r| r.get::<_, Vec<u8>>(0)).db()?;
             rows.collect::<rusqlite::Result<Vec<Vec<u8>>>>().db()
         })
+    }
+
+    fn slice_values_page(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        after_cell_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            // A version slice is one cell's versions: paged here, from its values.
+            let mut values = self.slice_values(slice, asof)?;
+            values.retain(|x| after_cell_id.is_none_or(|a| x.version.cell_id.as_str() > a));
+            values.sort_by(|a, b| a.version.cell_id.cmp(&b.version.cell_id));
+            values.truncate(limit);
+            return Ok(values);
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let p = Pattern::of(&v)?;
+        self.run("slice_values_page", |c| values_page(&p, c, asof, after_cell_id, limit))
     }
 
     fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
@@ -1847,7 +2085,7 @@ impl Store for SqliteStore {
                 let mut st = c
                     .prepare(
                         "SELECT kind, name, label, CASE WHEN kind = 'function'
-                             THEN (SELECT count(*) FROM cells x WHERE x.fn_hash = e.hash) ELSE 0 END
+                             THEN (SELECT COALESCE(sum(x.n), 0) FROM cell_counts x WHERE x.fn_hash = e.hash) ELSE 0 END
                            FROM catalog_entries e ORDER BY kind, name",
                     )
                     .db()?;
@@ -2044,6 +2282,29 @@ fn in_key_order_parsed<T>(p: &Pattern, rows: Vec<(T, Args)>, cell_of: impl Fn(&T
 /// statement of `slice_values` with the key order and the LIMIT in SQL. The order of `cmp_keys`
 /// is, per key argument by name, the type's name, then the sort key (which sorts as the value
 /// does, a number's as the decimal does).
+/// The members' values as of `asof` in cell id order, after `after` (exclusive), at most
+/// `limit`: the statement of the members with the cell id order and the LIMIT in SQL (0.5.3).
+fn values_page(p: &Pattern, c: &Connection, asof: &str, after: Option<&str>, limit: i64) -> Result<Vec<SliceValue>> {
+    let (d, _) = drive(p, c, false)?;
+    let base = if d.is_some() { L::SliceValuesDrive } else { L::SliceValuesAll };
+    let sql = format!("{} AND (:after IS NULL OR c.cell_id > :after) ORDER BY c.cell_id LIMIT :limit", base.sql());
+    let mut binds: Vec<(String, SqlValue)> = params(p, asof, d).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    binds.push((":after".to_string(), after.map_or(SqlValue::Null, |a| SqlValue::Text(a.to_string()))));
+    binds.push((":limit".to_string(), SqlValue::Integer(limit)));
+    let mut st = c.prepare(&sql).db()?;
+    for (name, value) in &binds {
+        if let Some(i) = st.parameter_index(name).db()? {
+            st.raw_bind_parameter(i, value).db()?;
+        }
+    }
+    let mut rows = st.raw_query();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().db()? {
+        out.push(value_of(value_columns(r).db()?)?.0);
+    }
+    Ok(out)
+}
+
 fn values_limited(p: &Pattern, c: &Connection, asof: &str, limit: i64) -> Result<Vec<SliceValue>> {
     let (d, _) = drive(p, c, false)?;
     let base = if d.is_some() { L::SliceValuesDrive } else { L::SliceValuesAll };
@@ -2100,30 +2361,20 @@ fn changed_after(p: &Pattern, c: &Connection, asof: &str) -> Result<bool> {
     Ok(rows.next().db()?.is_some())
 }
 
-/// The columns of an entry row, as `entry_from_columns` takes them, with the id first.
-type EntryRow = (i64, String, String, Option<String>, String, String, String, String, String, Option<String>);
-
-fn entry_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<EntryRow> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
-}
-
-/// A dictionary value's row: id, owner, key, value, label, aliases (JSON).
-type ValueRow = (i64, String, String, String, String, String);
-
-fn value_columns_of(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueRow> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
-}
+/// A text search's entry hit as its columns: id, kind, name, hash, label, description, args,
+/// examples, source, signed_by, and the total score (0.5.3).
+type HitRow = (i64, String, String, Option<String>, String, String, String, String, String, Option<String>, i64);
 
 /// The `AND (...)` prefilter of a text search over `fields` (SQL expressions): one clause per
 /// word the SQL can match exactly (ASCII, no `"`, `\` or control characters: SQLite's LIKE
 /// folds ASCII only, and JSON text escapes those), with its parameters numbered from ?1.
-fn like_where_sqlite(words: &Words, fields: &[&str]) -> (String, Vec<String>) {
+fn like_where_sqlite(words: &Words, fields: &[&str], first: usize) -> (String, Vec<String>) {
     let mut sql = String::new();
     let mut params = Vec::new();
     for i in 0..words.len() {
         if let Some(p) = words.pattern(i, sqlite_safe) {
             params.push(p);
-            let n = params.len();
+            let n = first + params.len() - 1;
             let ors: Vec<String> = fields.iter().map(|f| format!("{f} LIKE ?{n} ESCAPE '!'")).collect();
             sql.push_str(&format!(" AND ({})", ors.join(" OR ")));
         }

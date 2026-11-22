@@ -59,3 +59,14 @@ pub(crate) fn check_test(t: &FunctionTest) -> Result<(i32, i32)> {
     }
     branch_counts(t.branches_total, t.branches_covered)
 }
+
+/// The deltas a test result makes to the counters of a function's tests (0.5.3): `[pass,
+/// fail, error, not_run]`, one 1 for the result (`None`, a test not run, is `not_run`).
+pub(crate) fn result_counts(result: Option<&str>) -> [i64; 4] {
+    match result {
+        Some("pass") => [1, 0, 0, 0],
+        Some("fail") => [0, 1, 0, 0],
+        Some("error") => [0, 0, 1, 0],
+        _ => [0, 0, 0, 1],
+    }
+}
