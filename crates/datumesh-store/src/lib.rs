@@ -963,6 +963,14 @@ pub trait Store: Resolver + sealed::Sealed {
         let _ = class;
         Err(Error::Unsupported("catalogue facets need a store of 0.5.3".into()))
     }
+    /// [`extensions_of`](Store::extensions_of) with at most `limit` entries: the first `limit` by name (CONTRACT-round-0.7 R11,
+    /// the bounded read of a describe). The backends read `limit` rows (`LIMIT`, with the index on `extends`). The default takes
+    /// them from `extensions_of`. Since 0.6.0.
+    fn extensions_of_limit(&self, class: &str, limit: usize) -> Result<Vec<CatalogEntryExt>> {
+        let mut all = self.extensions_of(class)?;
+        all.truncate(limit);
+        Ok(all)
+    }
 
     /// The number of cells of `ns`/`fn_name`/`fn_hash`: every cell with a stored receipt, a
     /// second version of a cell not counted again. Read from the counter (PK), not counted

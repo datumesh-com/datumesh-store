@@ -91,3 +91,11 @@ CREATE TRIGGER name_bindings_fn_hash_stored BEFORE INSERT ON name_bindings
 CREATE TRIGGER class_bindings_class_hash_stored BEFORE INSERT ON class_bindings
     WHEN NEW.class_hash IS NOT NULL AND NOT EXISTS (SELECT 1 FROM classes r WHERE r.class_hash = NEW.class_hash)
     BEGIN SELECT RAISE(ABORT, 'datumesh: INSERT on class_bindings refused: no such class is stored'); END;
+
+-- Extensions (R11): the functions whose extends is a class, by name, read with a LIMIT (extensions_of_limit); this
+-- partial index serves that read in name order.
+CREATE INDEX catalog_entries_extends ON catalog_entries (extends, name) WHERE extends IS NOT NULL;
+
+-- Catalogue source_name (R8, CONTRACT-round-0.7): the publisher's name for the entry's source,
+-- NULL when none. Written by upsert_catalog_ext, replaced by a republish; the 0.5.2 upsert leaves it.
+ALTER TABLE catalog_entries ADD COLUMN source_name TEXT;

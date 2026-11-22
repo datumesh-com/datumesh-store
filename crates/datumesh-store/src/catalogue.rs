@@ -135,12 +135,14 @@ pub struct CatalogEntryExt {
     pub facets: Facets,
     /// The class this function extends, when it extends one.
     pub extends: Option<String>,
+    /// The name of the entry's source as the publisher gives it, when it gives one. Since 0.6.0.
+    pub source_name: Option<String>,
 }
 
 impl CatalogEntryExt {
     /// The entry with no facets and no `extends`.
     pub fn new(entry: CatalogEntry) -> CatalogEntryExt {
-        CatalogEntryExt { entry, facets: Facets::new(), extends: None }
+        CatalogEntryExt { entry, facets: Facets::new(), extends: None, source_name: None }
     }
 }
 
@@ -160,6 +162,8 @@ pub struct FacetedEntry {
     /// The instant of the earliest binding of the name (of a class for a class, of a function
     /// or method otherwise); `None` when the name was never bound.
     pub first_bound: Option<String>,
+    /// The entry's `source_name`, when it has one. Since 0.6.0.
+    pub source_name: Option<String>,
 }
 
 /// The facet keys an entry may carry.
@@ -173,17 +177,23 @@ pub(crate) struct CatalogRow<'a> {
     pub(crate) entry: &'a CatalogEntry,
     pub(crate) facets: String,
     pub(crate) extends: Option<&'a str>,
+    pub(crate) source_name: Option<&'a str>,
 }
 
 impl<'a> CatalogRow<'a> {
     /// A row of the 0.5.2 call: no facets, no `extends` (the store keeps those of an existing row).
     pub(crate) fn plain(entry: &'a CatalogEntry) -> Self {
-        CatalogRow { entry, facets: "{}".to_string(), extends: None }
+        CatalogRow { entry, facets: "{}".to_string(), extends: None, source_name: None }
     }
 
     /// A row of the facets call, with its facets and `extends` as given.
     pub(crate) fn ext(e: &'a CatalogEntryExt) -> Self {
-        CatalogRow { entry: &e.entry, facets: facets_json(&e.facets), extends: e.extends.as_deref() }
+        CatalogRow {
+            entry: &e.entry,
+            facets: facets_json(&e.facets),
+            extends: e.extends.as_deref(),
+            source_name: e.source_name.as_deref(),
+        }
     }
 }
 
@@ -515,8 +525,13 @@ pub(crate) fn parse_facets(text: &str) -> Result<Facets> {
 }
 
 /// A catalogue entry with its stored facets and `extends`.
-pub(crate) fn entry_ext(entry: CatalogEntry, facets: &str, extends: Option<String>) -> Result<CatalogEntryExt> {
-    Ok(CatalogEntryExt { entry, facets: parse_facets(facets)?, extends })
+pub(crate) fn entry_ext(
+    entry: CatalogEntry,
+    facets: &str,
+    extends: Option<String>,
+    source_name: Option<String>,
+) -> Result<CatalogEntryExt> {
+    Ok(CatalogEntryExt { entry, facets: parse_facets(facets)?, extends, source_name })
 }
 
 /// The examples in canonical form; they must be a JSON array.

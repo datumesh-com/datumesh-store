@@ -743,10 +743,14 @@ impl SqliteStore {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        let replace = if replace_ext { ", facets = excluded.facets, extends = excluded.extends" } else { "" };
+        let replace = if replace_ext {
+            ", facets = excluded.facets, extends = excluded.extends, source_name = excluded.source_name"
+        } else {
+            ""
+        };
         let upsert = format!(
-            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
                  description = excluded.description, args = excluded.args, examples = excluded.examples,
                  source = excluded.source, signed_by = excluded.signed_by, updated_at = excluded.updated_at{replace}
@@ -774,7 +778,8 @@ impl SqliteStore {
                             e.source.as_str(),
                             e.signed_by,
                             row.facets,
-                            row.extends
+                            row.extends,
+                            row.source_name
                         ],
                         |r| r.get(0),
                     )
@@ -2140,20 +2145,21 @@ impl Store for SqliteStore {
                     "SELECT e.kind, e.name, e.hash, e.facets,
                             CASE WHEN e.kind = 'class'
                                  THEN (SELECT min(b.tx) FROM class_bindings b WHERE b.class_name = e.name)
-                                 ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END
+                                 ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END,
+                            e.source_name
                        FROM catalog_entries e
                       WHERE e.facets <> '{}'
                       ORDER BY e.kind, e.name",
                 )
                 .db()?;
-            type FacetRow = (String, String, Option<String>, String, Option<String>);
+            type FacetRow = (String, String, Option<String>, String, Option<String>, Option<String>);
             let rows: Vec<FacetRow> = st
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
                 .db()?
                 .collect::<rusqlite::Result<_>>()
                 .db()?;
             rows.into_iter()
-                .map(|(kind, name, hash, facets, first_bound)| {
+                .map(|(kind, name, hash, facets, first_bound, source_name)| {
                     Ok(FacetedEntry {
                         kind: CatalogKind::parse(&kind)
                             .ok_or_else(|| invalid("catalog", "a stored entry has a bad kind"))?,
@@ -2161,6 +2167,7 @@ impl Store for SqliteStore {
                         hash,
                         facets: parse_facets(&facets)?,
                         first_bound,
+                        source_name,
                     })
                 })
                 .collect()
@@ -2172,11 +2179,30 @@ impl Store for SqliteStore {
         self.run("extensions_of", |c| {
             let mut st = c
                 .prepare_cached(
-                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
                        FROM catalog_entries WHERE extends = ?1 ORDER BY name",
                 )
                 .db()?;
             let rows = st.query_map([class], ext_from_row).db()?.collect::<rusqlite::Result<Vec<_>>>().db()?;
+            rows.into_iter().collect()
+        })
+    }
+
+    fn extensions_of_limit(&self, class: &str, limit: usize) -> Result<Vec<CatalogEntryExt>> {
+        check_function_name(class, "class")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("extensions_of", |c| {
+            let mut st = c
+                .prepare_cached(
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
+                       FROM catalog_entries WHERE extends = ?1 ORDER BY name LIMIT ?2",
+                )
+                .db()?;
+            let rows = st
+                .query_map(rusqlite::params![class, limit], ext_from_row)
+                .db()?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .db()?;
             rows.into_iter().collect()
         })
     }
@@ -2510,11 +2536,11 @@ fn function_test_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FunctionTest> {
 
 /// The columns of a catalogue entry with its facets and `extends`, by kind and name.
 const CATALOG_EXT_SELECT_BY_KIND_NAME: &str =
-    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
        FROM catalog_entries WHERE kind = ?1 AND name = ?2";
 
-/// A catalogue entry with its facets and `extends` from a row with the eleven columns of
-/// [`CATALOG_EXT_SELECT_BY_KIND_NAME`] (or of any query with those columns in that order).
+/// A catalogue entry with its facets, `extends` and `source_name` from a row with the twelve
+/// columns of [`CATALOG_EXT_SELECT_BY_KIND_NAME`] (or of any query with those columns in that order).
 fn ext_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CatalogEntryExt>> {
     let entry = entry_from_columns(
         &r.get::<_, String>(0)?,
@@ -2529,7 +2555,8 @@ fn ext_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CatalogEntryEx
     );
     let facets: String = r.get(9)?;
     let extends: Option<String> = r.get(10)?;
-    Ok(entry.and_then(|entry| entry_ext(entry, &facets, extends)))
+    let source_name: Option<String> = r.get(11)?;
+    Ok(entry.and_then(|entry| entry_ext(entry, &facets, extends, source_name)))
 }
 
 #[cfg(test)]

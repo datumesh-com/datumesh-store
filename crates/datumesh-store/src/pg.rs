@@ -2106,7 +2106,8 @@ impl Store for PgStore {
                     "SELECT e.kind, e.name, e.hash, e.facets,
                         CASE WHEN e.kind = 'class'
                              THEN (SELECT min(b.tx) FROM class_bindings b WHERE b.class_name = e.name)
-                             ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END
+                             ELSE (SELECT min(b.tx) FROM name_bindings b WHERE b.fn_name = e.name) END,
+                        e.source_name
                    FROM catalog_entries e
                   WHERE e.facets::jsonb <> '{}'::jsonb
                   ORDER BY e.kind COLLATE \"C\", e.name COLLATE \"C\"",
@@ -2122,6 +2123,7 @@ impl Store for PgStore {
                     hash: r.try_get(2).db()?,
                     facets: parse_facets(&r.try_get::<_, String>(3).db()?)?,
                     first_bound: r.try_get(4).db()?,
+                    source_name: r.try_get(5).db()?,
                 });
             }
             Ok(out)
@@ -2135,9 +2137,29 @@ impl Store for PgStore {
             for r in c
                 .client
                 .query(
-                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
                    FROM catalog_entries WHERE extends = $1 ORDER BY name COLLATE \"C\"",
                     &[&class],
+                )
+                .db()?
+            {
+                out.push(ext_from_row(&r)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn extensions_of_limit(&self, class: &str, limit: usize) -> Result<Vec<CatalogEntryExt>> {
+        check_function_name(class, "class")?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("extensions_of", |c| {
+            let mut out = Vec::new();
+            for r in c
+                .client
+                .query(
+                    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
+                   FROM catalog_entries WHERE extends = $1 ORDER BY name COLLATE \"C\" LIMIT $2",
+                    &[&class, &limit],
                 )
                 .db()?
             {
@@ -2191,10 +2213,14 @@ impl PgStore {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        let replace = if replace_ext { ", facets = EXCLUDED.facets, extends = EXCLUDED.extends" } else { "" };
+        let replace = if replace_ext {
+            ", facets = EXCLUDED.facets, extends = EXCLUDED.extends, source_name = EXCLUDED.source_name"
+        } else {
+            ""
+        };
         let upsert = format!(
-            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+            "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
              ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
                  description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
                  source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, updated_at = now(){replace}
@@ -2232,6 +2258,7 @@ impl PgStore {
                             &e.signed_by,
                             &row.facets,
                             &row.extends,
+                            &row.source_name,
                         ],
                     )
                     .db()?;
@@ -2620,7 +2647,7 @@ fn function_test_row(r: &postgres::Row) -> Result<FunctionTest> {
 
 /// The columns of a catalogue entry with its facets and `extends`, by kind and name.
 const CATALOG_EXT_SELECT_BY_KIND_NAME: &str =
-    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends
+    "SELECT kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name
        FROM catalog_entries WHERE kind = $1 AND name = $2";
 
 /// A catalogue entry with its facets and `extends` from a row of [`CATALOG_EXT_SELECT_BY_KIND_NAME`]
@@ -2637,5 +2664,5 @@ fn ext_from_row(r: &postgres::Row) -> Result<CatalogEntryExt> {
         &r.try_get::<_, String>(7).db()?,
         r.try_get(8).db()?,
     )?;
-    entry_ext(entry, &r.try_get::<_, String>(9).db()?, r.try_get(10).db()?)
+    entry_ext(entry, &r.try_get::<_, String>(9).db()?, r.try_get(10).db()?, r.try_get(11).db()?)
 }

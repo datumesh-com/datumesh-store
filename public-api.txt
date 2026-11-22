@@ -178,6 +178,7 @@ impl core::marker::StructuralPartialEq for datumesh_store::CatalogEntry
 pub datumesh_store::CatalogEntryExt::entry: datumesh_store::CatalogEntry
 pub datumesh_store::CatalogEntryExt::extends: core::option::Option<alloc::string::String>
 pub datumesh_store::CatalogEntryExt::facets: datumesh_store::Facets
+pub datumesh_store::CatalogEntryExt::source_name: core::option::Option<alloc::string::String>
 impl datumesh_store::CatalogEntryExt
 pub fn datumesh_store::CatalogEntryExt::new(datumesh_store::CatalogEntry) -> datumesh_store::CatalogEntryExt
 impl core::clone::Clone for datumesh_store::CatalogEntryExt
@@ -267,6 +268,7 @@ pub datumesh_store::FacetedEntry::first_bound: core::option::Option<alloc::strin
 pub datumesh_store::FacetedEntry::hash: core::option::Option<alloc::string::String>
 pub datumesh_store::FacetedEntry::kind: datumesh_store::CatalogKind
 pub datumesh_store::FacetedEntry::name: alloc::string::String
+pub datumesh_store::FacetedEntry::source_name: core::option::Option<alloc::string::String>
 impl core::clone::Clone for datumesh_store::FacetedEntry
 pub fn datumesh_store::FacetedEntry::clone(&self) -> Self
 impl core::cmp::Eq for datumesh_store::FacetedEntry
@@ -370,6 +372,7 @@ pub fn datumesh_store::PgStore::dependants_of(&self, &str, &str, usize) -> datum
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::dictionary_values_ordered(&self, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
+pub fn datumesh_store::PgStore::extensions_of_limit(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
 pub fn datumesh_store::PgStore::false_test_cells(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>
 pub fn datumesh_store::PgStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::function_test(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::FunctionTest>>
@@ -532,6 +535,7 @@ pub fn datumesh_store::SqliteStore::dependants_of(&self, &str, &str, usize) -> d
 pub fn datumesh_store::SqliteStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::dictionary_values_ordered(&self, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
+pub fn datumesh_store::SqliteStore::extensions_of_limit(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
 pub fn datumesh_store::SqliteStore::false_test_cells(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>
 pub fn datumesh_store::SqliteStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::function_test(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::FunctionTest>>
@@ -675,6 +679,7 @@ pub fn datumesh_store::Store::dependants_of(&self, &str, &str, usize) -> datumes
 pub fn datumesh_store::Store::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::dictionary_values_ordered(&self, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
+pub fn datumesh_store::Store::extensions_of_limit(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
 pub fn datumesh_store::Store::false_test_cells(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>
 pub fn datumesh_store::Store::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::function_test(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::FunctionTest>>
@@ -762,6 +767,7 @@ pub fn datumesh_store::PgStore::dependants_of(&self, &str, &str, usize) -> datum
 pub fn datumesh_store::PgStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::dictionary_values_ordered(&self, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
+pub fn datumesh_store::PgStore::extensions_of_limit(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
 pub fn datumesh_store::PgStore::false_test_cells(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>
 pub fn datumesh_store::PgStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::function_test(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::FunctionTest>>
@@ -849,6 +855,7 @@ pub fn datumesh_store::SqliteStore::dependants_of(&self, &str, &str, usize) -> d
 pub fn datumesh_store::SqliteStore::dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::dictionary_values_ordered(&self, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::extensions_of(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
+pub fn datumesh_store::SqliteStore::extensions_of_limit(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::CatalogEntryExt>>
 pub fn datumesh_store::SqliteStore::false_test_cells(&self, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>>
 pub fn datumesh_store::SqliteStore::function_readers(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::function_test(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::FunctionTest>>

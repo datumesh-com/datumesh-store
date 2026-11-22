@@ -19,3 +19,12 @@ CREATE OR REPLACE FUNCTION datumesh_receipt_value(bytes bytea) RETURNS text
 -- untouched; a closed row is an ordinary row of the binding history (with written_at).
 ALTER TABLE name_bindings ALTER COLUMN fn_hash DROP NOT NULL;
 ALTER TABLE class_bindings ALTER COLUMN class_hash DROP NOT NULL;
+
+-- Extensions (R11, CONTRACT-round-0.7): the functions whose extends is a class, read with a LIMIT
+-- (`extensions_of_limit`). This partial index serves the filter on extends; the rows are sorted by name
+-- in byte order (COLLATE "C") after it, over the extends of one class only.
+CREATE INDEX catalog_entries_extends ON catalog_entries (extends, name) WHERE extends IS NOT NULL;
+
+-- Catalogue source_name (R8, CONTRACT-round-0.7): the publisher's name for the entry's source,
+-- NULL when none. Written by upsert_catalog_ext, replaced by a republish; the 0.5.2 upsert leaves it.
+ALTER TABLE catalog_entries ADD COLUMN source_name text COLLATE "C";
