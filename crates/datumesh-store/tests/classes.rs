@@ -438,7 +438,9 @@ fn bind_class_binds_each_method_in_the_same_transaction(b: Backend) {
     assert_eq!(s.resolve_class(&method_name(CLASS, "rate"), END).unwrap(), None);
 }
 
-fn a_subclass_binds_its_inherited_methods_too(b: Backend) {
+fn a_subclass_binds_only_its_own_methods_not_the_inherited_ones(b: Backend) {
+    // CONTRACT-classes-round K5 (the user's decision, BREAKING): binding S binds S/m only for the
+    // methods S adds or overrides. An inherited method's name under S is not bound.
     let db = TestDb::migrated(b);
     let s = db.bare_store();
     let p = fx_pair();
@@ -449,16 +451,53 @@ fn a_subclass_binds_its_inherited_methods_too(b: Backend) {
     s.put_class(&c.bytes).unwrap();
     s.bind_class(CLASS, &p.hash, T1).unwrap();
     s.bind_class(SUB, &c.hash, T2).unwrap();
-    // fx_forward/rate and fx_forward/spot are the parent's functions, fx_forward/forward its own.
-    for m in ["forward", "rate", "spot"] {
-        assert_eq!(bound_fn(&s, &method_name(SUB, m), END), Some((c.methods[m].clone(), T2.to_string())), "{m}");
-    }
+    // fx_forward/forward is its own and is bound.
+    assert_eq!(bound_fn(&s, &method_name(SUB, "forward"), END), Some((c.methods["forward"].clone(), T2.to_string())));
+    // rate and spot are the parent's functions: not bound under fx_forward.
     assert_eq!(c.methods["rate"], p.methods["rate"]);
+    assert_eq!(c.methods["spot"], p.methods["spot"]);
+    for m in ["rate", "spot"] {
+        assert_eq!(bound_fn(&s, &method_name(SUB, m), END), None, "{m}");
+    }
     // The parent's names are as they were.
     assert_eq!(bound_fn(&s, &method_name(CLASS, "rate"), END), Some((p.methods["rate"].clone(), T1.to_string())));
     assert_eq!(bound_fn(&s, &method_name(CLASS, "forward"), END), None);
     assert_eq!(s.resolve_class(SUB, END).unwrap(), Some(c.hash.clone()));
     assert_eq!(s.resolve_class(CLASS, END).unwrap(), Some(p.hash));
+}
+
+fn a_subclass_binds_the_methods_it_overrides(b: Backend) {
+    // K5: "S/m only for S's own methods: those it adds or overrides". An override is bound under S.
+    let db = TestDb::migrated(b);
+    let s = db.bare_store();
+    let p = fx_pair();
+    let rate2 = method_fn("rate overridden");
+    let forward = method_fn("forward");
+    let text = format!(
+        r#"{{"keys":{{}},"methods":{{"forward":"{}","rate":"{}"}},"order":[],"parent":"{}","steward":{{"namespace":"{HOST}","process":"https://{HOST}/classes/change"}}}}"#,
+        fn_hash_of(&forward),
+        fn_hash_of(&rate2),
+        p.hash
+    );
+    let mut env = env_with(HOST, &[&forward, &rate2], &[&p.flat]);
+    for f in &p.functions {
+        env.insert_function(FunctionDescriptor::from_json(f).unwrap());
+    }
+    let flat = datumesh_core::define_class(SUB, text.as_bytes(), &env).unwrap();
+    let c = built(flat, vec![forward, rate2]);
+    put_functions(&s, &p);
+    put_functions(&s, &c);
+    s.put_class(&p.bytes).unwrap();
+    s.put_class(&c.bytes).unwrap();
+    s.bind_class(CLASS, &p.hash, T1).unwrap();
+    s.bind_class(SUB, &c.hash, T2).unwrap();
+    assert_ne!(c.methods["rate"], p.methods["rate"]);
+    // The override and the addition are bound under the subclass; the inherited spot is not.
+    assert_eq!(bound_fn(&s, &method_name(SUB, "rate"), END), Some((c.methods["rate"].clone(), T2.to_string())));
+    assert_eq!(bound_fn(&s, &method_name(SUB, "forward"), END), Some((c.methods["forward"].clone(), T2.to_string())));
+    assert_eq!(bound_fn(&s, &method_name(SUB, "spot"), END), None);
+    // The parent's rate is untouched.
+    assert_eq!(bound_fn(&s, &method_name(CLASS, "rate"), END), Some((p.methods["rate"].clone(), T1.to_string())));
 }
 
 fn binding_a_new_version_of_a_class_rebinds_its_methods_from_that_tx(b: Backend) {
@@ -741,7 +780,8 @@ backends!(
     the_class_migration_is_additive_and_keeps_function_bindings,
     bind_class_binds_the_name_over_transaction_time,
     bind_class_binds_each_method_in_the_same_transaction,
-    a_subclass_binds_its_inherited_methods_too,
+    a_subclass_binds_only_its_own_methods_not_the_inherited_ones,
+    a_subclass_binds_the_methods_it_overrides,
     binding_a_new_version_of_a_class_rebinds_its_methods_from_that_tx,
     bind_class_needs_the_class_and_every_methods_descriptor_and_binds_nothing_otherwise,
     bind_class_is_all_or_nothing_when_a_method_name_cannot_take_the_tx,
