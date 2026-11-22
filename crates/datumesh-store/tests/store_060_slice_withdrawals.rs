@@ -92,14 +92,14 @@ fn before_the_withdrawal_is_in_effect_there_is_none(b: Backend) {
 fn a_withdrawal_outside_the_slices_range_is_not_counted(b: Backend) {
     let (_db, s, h) = world(b, "formula-eval/withdrawn-slice-count", "data.example.org/daily");
     let a = "2026-06-01T00:00:00.000000Z";
-    // 4 March is outside 5-10 March, and outside the exact cell of 5 March.
+    // 4 March is outside 5-10 March, and outside the one-day range of 5 March (a slice needs an open or ranged argument).
     assert_eq!(s.slice_withdrawn_latest(&daily(&h, &range("2026-03-05", "2026-03-10")), a).unwrap(), None);
-    assert_eq!(s.slice_withdrawn_latest(&daily(&h, r#"{"type":"date","value":"2026-03-05"}"#), a).unwrap(), None);
+    assert_eq!(s.slice_withdrawn_latest(&daily(&h, &range("2026-03-05", "2026-03-05")), a).unwrap(), None);
     // Inside the range, or the cell itself: counted.
     let want = Some((W_TX.to_string(), W_TX.to_string()));
     assert_eq!(s.slice_withdrawn_latest(&daily(&h, &range("2026-03-01", "2026-03-10")), a).unwrap(), want);
     assert_eq!(s.slice_withdrawn_latest(&daily(&h, &range("2026-03-04", "2026-03-04")), a).unwrap(), want);
-    assert_eq!(s.slice_withdrawn_latest(&daily(&h, r#"{"type":"date","value":"2026-03-04"}"#), a).unwrap(), want);
+    assert_eq!(s.slice_withdrawn_latest(&daily(&h, &range("2026-03-04", "2026-03-04")), a).unwrap(), want);
 }
 
 fn a_withdrawal_ended_by_a_later_value_is_not_counted(b: Backend) {
