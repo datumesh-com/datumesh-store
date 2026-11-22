@@ -211,9 +211,9 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
     };
     assert_eq!(last as usize, n_all);
-    assert_eq!(n_all, if b == Backend::Pg { 13 } else { 9 }, "migrations 1..=13 (SQLite 1..=9)");
-    // The counters are migration 12 (SQLite 8); the facets migration 13 (9) follows them.
-    let n_all = n_all - 1;
+    assert_eq!(n_all, if b == Backend::Pg { 14 } else { 10 }, "migrations 1..=14 (SQLite 1..=10)");
+    // The counters are migration 12 (SQLite 8); the facets migration 13 (9) and the withdrawals 14 (10) follow them.
+    let n_all = n_all - 2;
     migrate_to(&db, b, n_all - 1);
     assert!(text_of(&db, db.pick(
         "SELECT table_name::text FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('cell_counts', 'function_test_counts')",
@@ -263,7 +263,11 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, [n_all as u32, n_all as u32 + 1], "only migrations 12 and 13 (the facets) are applied");
+    assert_eq!(
+        applied,
+        [n_all as u32, n_all as u32 + 1, n_all as u32 + 2],
+        "only migrations 12, 13 (the facets) and 14 are applied"
+    );
 
     // cell_counts is filled from `cells`, once.
     let (counter, cells) = counter_vs_cells(&db);
@@ -315,7 +319,7 @@ fn a_fresh_store_has_the_counter_tables_empty(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.last().unwrap(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
     };
-    assert_eq!(last.version, if b == Backend::Pg { 13 } else { 9 });
+    assert_eq!(last.version, if b == Backend::Pg { 14 } else { 10 });
     assert_eq!(db.count("datumesh_schema_migrations"), last.version as i64);
 }
 

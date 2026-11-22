@@ -122,14 +122,14 @@ fn migrations_are_registered(b: Backend) {
             assert_eq!((m.version, m.name), (7, "0007_function_test_names.sql"));
         }
     }
-    // The facets migration is the last: 13 (9 on SQLite), after the released counters (12, and 8).
+    // The facets migration is 13 (9 on SQLite), after the released counters (12, and 8); the last is 0.6.0's withdrawals and closed names, 14 (10).
     match b {
         Backend::Pg => {
-            let last = migrate::MIGRATIONS.last().unwrap();
+            let last = &migrate::MIGRATIONS[12];
             assert_eq!((last.version, last.name), (13, "0013_catalogue_facets.sql"));
         }
         Backend::Sqlite => {
-            let last = migrate::sqlite::MIGRATIONS.last().unwrap();
+            let last = &migrate::sqlite::MIGRATIONS[8];
             assert_eq!((last.version, last.name), (9, "0009_catalogue_facets.sql"));
         }
     }

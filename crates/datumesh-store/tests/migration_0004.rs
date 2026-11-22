@@ -98,8 +98,8 @@ fn migration_4_backfills_receipt_values() {
     // 0.4.2, the audit column, migration 7; since 0.4.3, the cell index, migration 8; since
     // 0.5.0, the catalogue, migration 9; since 0.5.1, the function tests, migration 10; since
     // 0.5.2, the function test names and open keys, migration 11; since 0.5.3, the counters, 12;
-    // since 0.6.0, the facets, 13.
-    assert_eq!(migrate::apply(&s).unwrap(), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+    // since 0.6.0, the facets, 13, and the withdrawals and closed names, 14.
+    assert_eq!(migrate::apply(&s).unwrap(), [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
     assert_values_are_the_cores(&mut c, &all);
 
     let scratch = PgDb::empty();

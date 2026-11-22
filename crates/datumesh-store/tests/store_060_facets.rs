@@ -328,7 +328,8 @@ fn the_migrations_are_registered(b: Backend) {
         Backend::Pg => (13, "0013_catalogue_facets.sql"),
         Backend::Sqlite => (9, "0009_catalogue_facets.sql"),
     };
-    assert_eq!((ms.len() as u32, ms.last().unwrap().version, ms.last().unwrap().name), (v, v, n));
+    let m = &ms[v as usize - 1];
+    assert_eq!((ms.len() as u32, m.version, m.name), (v + 1, v, n));
     let db = TestDb::migrated(b);
     let c = columns(&db);
     assert!(c.contains(&"facets".to_string()) && c.contains(&"extends".to_string()), "{c:?}");
@@ -340,7 +341,11 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
         Backend::Pg => (migrate::MIGRATIONS[..11].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..7].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(all, old.len() + 2, "two migrations more than 0.5.2 on each backend (0.5.3's counters, facets)");
+    assert_eq!(
+        all,
+        old.len() + 3,
+        "three migrations more than 0.5.2 on each backend (0.5.3's counters, facets, withdrawals)"
+    );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) STRICT",
@@ -368,7 +373,11 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(datumesh_store::SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, [all as u32 - 1, all as u32], "only the counters and the new migration are applied");
+    assert_eq!(
+        applied,
+        [all as u32 - 2, all as u32 - 1, all as u32],
+        "only the counters, the facets and the withdrawals migration are applied"
+    );
     assert_eq!(db.count("catalog_entries"), 2, "old rows kept");
     assert_eq!(db.int("SELECT count(*) FROM catalog_entries WHERE facets = '{}' AND extends IS NULL"), 2);
     let s = db.bare_store();

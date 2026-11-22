@@ -31,7 +31,11 @@ fn a_store_of_0_5_1_keeps_its_function_tests_unnamed(b: Backend) {
         Backend::Pg => (migrate::MIGRATIONS[..10].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..6].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(all, old.len() + 3, "three migrations more than 0.5.1 on each backend (0.5.2, 0.5.3, facets)");
+    assert_eq!(
+        all,
+        old.len() + 4,
+        "four migrations more than 0.5.1 on each backend (0.5.2, 0.5.3, facets, withdrawals)"
+    );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))) STRICT",
@@ -71,8 +75,8 @@ fn a_store_of_0_5_1_keeps_its_function_tests_unnamed(b: Backend) {
     };
     assert_eq!(
         applied,
-        [all as u32 - 2, all as u32 - 1, all as u32],
-        "only the 0.5.2, 0.5.3 and facets migrations are applied"
+        [all as u32 - 3, all as u32 - 2, all as u32 - 1, all as u32],
+        "only the 0.5.2, 0.5.3, facets and withdrawals migrations are applied"
     );
 
     // The column, the table; every old row has a NULL name and reads back unchanged.
