@@ -278,3 +278,17 @@ fn the_api_has_catalogue_facets_and_extends() {
     assert!(has("pub datumesh_store::CatalogEntry::signed_by: core::option::Option<alloc::string::String>"));
     assert!(!api.lines().any(|l| l.starts_with("pub datumesh_store::CatalogEntry::facets")));
 }
+
+/// CONTRACT-classes-round (the K5 follow-up): `class_names_bound_to`, additively (`public-api.txt` is
+/// regenerated with the implementation). A new `Store` method with a default body.
+#[test]
+fn the_api_has_class_names_bound_to() {
+    let api = api();
+    let has = |item: &str| api.lines().any(|l| l == item);
+    for owner in ["Store", "PgStore", "SqliteStore"] {
+        let item = format!("pub fn datumesh_store::{owner}::class_names_bound_to(&self, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>");
+        assert!(has(&item), "missing: {item}");
+    }
+    // Additions only: the class accessors it joins are still there.
+    assert!(has("pub fn datumesh_store::Store::resolve_class_binding(&self, &str, &str) -> datumesh_store::Result<core::option::Option<datumesh_store::ClassBinding>>"));
+}
