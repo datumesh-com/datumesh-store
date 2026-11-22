@@ -78,6 +78,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0013_catalogue_facets.sql",
         sql: include_str!("../migrations/0013_catalogue_facets.sql"),
     },
+    Migration {
+        version: 14,
+        name: "0014_withdrawals_and_closed_names.sql",
+        sql: include_str!("../migrations/0014_withdrawals_and_closed_names.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -288,6 +293,11 @@ pub mod sqlite {
             version: 9,
             name: "0009_catalogue_facets.sql",
             sql: include_str!("../migrations/sqlite/0009_catalogue_facets.sql"),
+        },
+        Migration {
+            version: 10,
+            name: "0010_withdrawals_and_closed_names.sql",
+            sql: include_str!("../migrations/sqlite/0010_withdrawals_and_closed_names.sql"),
         },
     ];
 

@@ -146,6 +146,9 @@ pub struct Version {
     pub receipt_hash: String,
     /// The receipt's `asof` (an instant; never earlier than `tx`). Since 0.2.0.
     pub asof: String,
+    /// Whether the receipt is a withdrawal (8.1): the cell has no value from `asof` on. Since
+    /// 0.6.0; always `false` for a computed version.
+    pub withdrawn: bool,
 }
 
 /// One cell write of [`Store::put_cells`]: a receipt and, optionally, the version it
@@ -583,6 +586,21 @@ pub trait Store: Resolver + sealed::Sealed {
     /// parent does not have). An inherited method's name is not bound, so `S/m` of an inherited
     /// `m` answers `None`. Under 0.5.3 every flattened method was bound.
     fn bind_class(&self, class_name: &str, class_hash: &str, tx: &str) -> Result<()>;
+    /// Closes the latest binding of `name`, a function name or a class name, from `at` on: as
+    /// of `at` or later the name resolves to `None` (also through
+    /// [`resolve_binding`](Store::resolve_binding) and [`resolve_class_binding`](Store::resolve_class_binding)),
+    /// and as of an earlier instant the binding it had. Closing a class name closes its
+    /// method names (`<class name>/<m>`, the ones [`bind_class`](Store::bind_class) bound) from
+    /// the same `at`. The name may be bound again later ([`bind_name`](Store::bind_name),
+    /// [`bind_class`](Store::bind_class)), with a `tx` after `at`. Each close is one row of the
+    /// binding history (with `written_at`). `at` must be later than the latest binding of the
+    /// name; a name with no binding, or whose latest binding is closed, is [`Error::NotFound`]
+    /// (`what` is `binding`). A malformed instant is `E_CANON_INSTANT`. The default is
+    /// [`Error::Unsupported`]. Since 0.6.0.
+    fn close_binding(&self, name: &str, at: &str) -> Result<()> {
+        let _ = (name, at);
+        Err(Error::Unsupported("closing a binding needs a store of 0.6.0".into()))
+    }
     /// The class hash `class_name` meant as of `asof`: the hash of
     /// [`resolve_class_binding`](Store::resolve_class_binding)'s binding. `None` before the
     /// first binding, and for a name whose binding as of `asof` is a function's. Since 0.4.1.
@@ -1069,6 +1087,120 @@ mod sealed {
     impl Sealed for crate::PgStore {}
     #[cfg(feature = "sqlite")]
     impl Sealed for crate::SqliteStore {}
+}
+
+/// A receipt as the store reads it when it is put (crate-internal, since 0.6.0): a valued
+/// receipt, or a withdrawal (8.1), which has no value.
+pub(crate) struct Parsed {
+    /// The canonical (JCS) bytes, `sig` included: what the store keeps.
+    pub(crate) canonical: Vec<u8>,
+    pub(crate) hash: String,
+    pub(crate) cell_id: String,
+    pub(crate) tx: String,
+    pub(crate) asof: String,
+    pub(crate) fn_hash: String,
+    pub(crate) publisher: String,
+    /// The receipt's cell (its arguments are indexed by the SQLite store).
+    pub(crate) cell: Cell,
+    /// The signer's host (the namespace whose keys verify it).
+    pub(crate) host: String,
+    /// The slice entries (`slice:` inputs) and the receipt inputs (edges), in the receipt's order.
+    pub(crate) entries: Vec<String>,
+    pub(crate) inputs: Vec<String>,
+    /// The value's type and lexical form; `None` for a withdrawal.
+    pub(crate) value: Option<(String, String)>,
+}
+
+/// The `value_type` and `value` columns of a withdrawal: empty, which no valued receipt has
+/// (a receipt's type is a name). Since 0.6.0; both backends.
+pub(crate) const WITHDRAWN_VALUE: &str = "";
+
+/// Parses receipt bytes as a valued [`Receipt`] or, failing that, a [`Withdrawal`] (steps 1-4
+/// of either). The error is the receipt's when the bytes are neither.
+pub(crate) fn parse_receipt(bytes: &[u8]) -> Result<Parsed> {
+    // A receipt with a `withdrawn` member is a withdrawal: parsed by the core's `Withdrawal`
+    // alone, so its own error (not the receipt's) is the one refused.
+    let withdrawal = datumesh_core::json::parse(bytes).is_ok_and(|v| v.get("withdrawn").is_some());
+    if withdrawal {
+        let w = datumesh_core::Withdrawal::from_json(bytes)?;
+        return Ok(Parsed {
+            canonical: datumesh_core::json::parse(bytes)?.to_jcs(),
+            hash: w.hash().to_string(),
+            cell_id: w.cell().id(),
+            tx: w.tx().to_string(),
+            asof: w.asof().to_string(),
+            fn_hash: w.cell().fn_hash.clone(),
+            publisher: w.publisher().to_string(),
+            cell: w.cell().clone(),
+            host: w.signer_host().to_string(),
+            entries: Vec::new(),
+            inputs: Vec::new(),
+            value: None,
+        });
+    }
+    match datumesh_core::Receipt::from_json(bytes) {
+        Ok(r) => {
+            let (entries, inputs): (Vec<String>, Vec<String>) =
+                r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
+            let value = r.value();
+            Ok(Parsed {
+                canonical: datumesh_core::json::parse(bytes)?.to_jcs(),
+                hash: r.hash().to_string(),
+                cell_id: r.cell().id(),
+                tx: r.tx().to_string(),
+                asof: r.asof().to_string(),
+                fn_hash: r.cell().fn_hash.clone(),
+                publisher: r.publisher().to_string(),
+                cell: r.cell().clone(),
+                host: r.signer_host().to_string(),
+                entries,
+                inputs,
+                value: Some((value.ty().as_str().to_string(), value.lexical().to_string())),
+            })
+        }
+        Err(e) => {
+            let Ok(w) = datumesh_core::Withdrawal::from_json(bytes) else { return Err(e.into()) };
+            Ok(Parsed {
+                canonical: datumesh_core::json::parse(bytes)?.to_jcs(),
+                hash: w.hash().to_string(),
+                cell_id: w.cell().id(),
+                tx: w.tx().to_string(),
+                asof: w.asof().to_string(),
+                fn_hash: w.cell().fn_hash.clone(),
+                publisher: w.publisher().to_string(),
+                cell: w.cell().clone(),
+                host: w.signer_host().to_string(),
+                entries: Vec::new(),
+                inputs: Vec::new(),
+                value: None,
+            })
+        }
+    }
+}
+
+/// The value of stored receipt bytes: `Some` for a valued receipt, `None` for a withdrawal.
+/// An error when the bytes are neither.
+pub(crate) fn stored_value(bytes: &[u8]) -> std::result::Result<Option<Scalar>, datumesh_core::Error> {
+    match datumesh_core::Receipt::from_json(bytes) {
+        Ok(r) => Ok(Some(r.value().clone())),
+        Err(e) => match datumesh_core::Withdrawal::from_json(bytes) {
+            Ok(_) => Ok(None),
+            Err(_) => Err(e),
+        },
+    }
+}
+
+/// The error of closing a name with no binding to close (never bound, or closed already).
+pub(crate) fn unbound(name: &str) -> Error {
+    Error::NotFound { what: "binding", key: name.to_string() }
+}
+
+/// `Ok` when `at` is later than the latest binding `latest` of `key` (a closing's tx).
+pub(crate) fn later_than(what: &'static str, key: &str, at: &str, latest: &str) -> Result<()> {
+    if at <= latest {
+        return Err(Error::NotLater { what, key: key.to_string(), given: at.to_string(), latest: latest.to_string() });
+    }
+    Ok(())
 }
 
 /// A version and its receipt's bytes, for the default `*_with_receipt` methods.

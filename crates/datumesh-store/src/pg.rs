@@ -14,14 +14,15 @@ use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sql::Q;
 use crate::{
-    not_canonical_class, Binding, CatalogEntry, CatalogEntryExt, CatalogKind, CellWrite, ClassBinding, Dictionary,
-    DictionaryValue, EmbedRef, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding,
-    SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
+    later_than, not_canonical_class, parse_receipt, stored_value, unbound, Binding, CatalogEntry, CatalogEntryExt,
+    CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue, EmbedRef, Embedding, FacetedEntry, FunctionTest,
+    Hit, KeyValue, Namespace, Parsed, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry,
+    TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys, Manifest,
-    Receipt, Resolver, Scalar, Slice, Type,
+    Resolver, Scalar, Slice, Type,
 };
 
 /// The store on PostgreSQL, with a connection pool. `Send + Sync`: share one per process
@@ -120,13 +121,13 @@ impl PgStore {
         result
     }
 
-    /// Versions from rows of (tx, receipt_hash, asof).
+    /// Versions from rows of (tx, receipt_hash, asof, withdrawn).
     fn version_rows(rows: &[postgres::Row], cell_id: &str) -> Result<Vec<Version>> {
         rows.iter().map(|r| version_row(r, cell_id)).collect()
     }
 
     /// A version (and its receipt's bytes) from a query answering
-    /// (tx, receipt_hash, asof, bytes) for (cell_id, asof).
+    /// (tx, receipt_hash, asof, withdrawn, bytes) for (cell_id, asof).
     fn asof_with_receipt(
         &self,
         op: &'static str,
@@ -139,7 +140,7 @@ impl PgStore {
         self.run(op, |c| {
             let st = c.stmt(q)?;
             let Some(row) = c.client.query_opt(&st, &[&cell_id, &asof]).db()? else { return Ok(None) };
-            Ok(Some((version_row(&row, cell_id)?, row.try_get(3).db()?)))
+            Ok(Some((version_row(&row, cell_id)?, row.try_get(4).db()?)))
         })
     }
 
@@ -155,18 +156,37 @@ impl PgStore {
     }
 }
 
+/// A version from a row of (tx, receipt_hash, asof, withdrawn, ...).
 fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
     Ok(Version {
         cell_id: cell_id.to_string(),
         tx: r.try_get(0).db()?,
         receipt_hash: r.try_get(1).db()?,
         asof: r.try_get(2).db()?,
+        withdrawn: r.try_get(3).db()?,
     })
 }
 
-/// A member from a row of (tx, receipt_hash, asof, bytes, ...).
+/// A version from a row of (tx, receipt_hash, asof, ...) whose withdrawn versions are left out
+/// of the query (a member or a value of a slice).
+fn valued_version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
+    Ok(Version {
+        cell_id: cell_id.to_string(),
+        tx: r.try_get(0).db()?,
+        receipt_hash: r.try_get(1).db()?,
+        asof: r.try_get(2).db()?,
+        withdrawn: false,
+    })
+}
+
+/// A member from a row of (tx, receipt_hash, asof, bytes, ...): a slice's member, never withdrawn.
 fn member_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
-    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
+    Ok(SliceMember { version: valued_version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
+}
+
+/// A version-slice member from a row of (tx, receipt_hash, asof, withdrawn, bytes).
+fn versions_between_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
+    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(4).db()? })
 }
 
 /// A cell's arguments from the "name:type:value" items of the typed-argument index
@@ -196,7 +216,7 @@ fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
     let args = cell_args(r.try_get::<_, Vec<String>>(8).db()?)?;
     let cell = Cell { args, fn_hash: r.try_get(7).db()?, fn_name: r.try_get(6).db()?, ns: r.try_get(5).db()? };
-    Ok(SliceValue { version: version_row(r, cell_id)?, value: Scalar::from_lexical(ty, &value)?, cell })
+    Ok(SliceValue { version: valued_version_row(r, cell_id)?, value: Scalar::from_lexical(ty, &value)?, cell })
 }
 
 /// A cell from a row of (ns, fn, fn_hash, "name:type:value" of each argument).
@@ -272,8 +292,8 @@ impl Resolver for PgStore {
             let st = c.stmt(Q::ValueAsof)?;
             let Some(row) = c.client.query_opt(&st, &[&cell.id(), &asof]).db()? else { return Ok(None) };
             let bytes: Vec<u8> = row.try_get(0).db()?;
-            match Receipt::from_json(&bytes) {
-                Ok(r) => Ok(Some(r.value().clone())),
+            match stored_value(&bytes) {
+                Ok(value) => Ok(value),
                 Err(e) => {
                     tracing::error!(target: "datumesh_store", cell_id = %cell.id(), error = %e, "stored receipt does not parse");
                     Ok(None)
@@ -345,42 +365,6 @@ impl PgStore {
 /// Items per statement of `latest_many` and `receipts_many` (longer inputs are split).
 const MANY: usize = 10_000;
 
-/// One item of a `put_cells` call, parsed before its transaction: the receipt's canonical
-/// bytes and the columns `put_receipt` stores, with its edges.
-struct Prepared {
-    canonical: Vec<u8>,
-    hash: String,
-    cell_id: String,
-    tx: String,
-    asof: String,
-    fn_hash: String,
-    publisher: String,
-    host: String,
-    entries: Vec<String>,
-    inputs: Vec<String>,
-}
-
-fn prepare(bytes: &[u8]) -> Result<Prepared> {
-    // The steps `put_receipt` takes before its query, in its order.
-    let r = Receipt::from_json(bytes)?;
-    let canonical = json::parse(bytes)?.to_jcs();
-    // Receipt hashes are edges; slice entries (spec-0.4.0) slice edges.
-    let (entries, inputs): (Vec<String>, Vec<String>) =
-        r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
-    Ok(Prepared {
-        canonical,
-        hash: r.hash().to_string(),
-        cell_id: r.cell().id(),
-        tx: r.tx().to_string(),
-        asof: r.asof().to_string(),
-        fn_hash: r.cell().fn_hash.clone(),
-        publisher: r.publisher().to_string(),
-        host: r.signer_host().to_string(),
-        entries,
-        inputs,
-    })
-}
-
 /// The receipt's verdict against the keys of its signer host, as `put_receipt` gives it:
 /// `None` when it verifies.
 fn verdict(bytes: &[u8], keys: &Keys) -> Option<datumesh_core::Error> {
@@ -422,7 +406,7 @@ struct HostState {
 
 /// `put_cells` on one connection, in one transaction: the items in order, with the checks
 /// and the errors of `put_receipt` and `put_version` (see `Store::put_cells`).
-fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Prepared>>) -> Result<Vec<String>> {
+fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Parsed>>) -> Result<Vec<String>> {
     let version_cells = || {
         items
             .iter()
@@ -452,7 +436,7 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Prep
 
     // What the store holds for the call: the receipts (by hash), the namespaces of the signer
     // hosts and the latest tx of the version cells, all read after the locks.
-    let parsed: Vec<&Prepared> = prepared.iter().filter_map(|p| p.as_ref().ok()).collect();
+    let parsed: Vec<&Parsed> = prepared.iter().filter_map(|p| p.as_ref().ok()).collect();
     let mut hashes: Vec<&str> = parsed.iter().map(|p| p.hash.as_str()).collect();
     hashes.sort_unstable();
     hashes.dedup();
@@ -509,7 +493,7 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Prep
     // In item order, as the loop of put_receipt and put_version would run them, against the
     // state of the store plus the items before. The first failure is the call's error.
     let mut out: Vec<String> = Vec::with_capacity(items.len());
-    let mut new: Vec<Prepared> = Vec::new();
+    let mut new: Vec<Parsed> = Vec::new();
     let mut versions: Vec<(&str, &str, String)> = Vec::new();
     for (i, pr) in prepared.into_iter().enumerate() {
         let p = pr?;
@@ -618,7 +602,41 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Prep
 /// when the cell has none.
 fn latest_row(r: &postgres::Row, cell_id: &str) -> Result<Option<Version>> {
     let Some(tx) = r.try_get::<_, Option<String>>(0).db()? else { return Ok(None) };
-    Ok(Some(Version { cell_id: cell_id.to_string(), tx, receipt_hash: r.try_get(1).db()?, asof: r.try_get(2).db()? }))
+    Ok(Some(Version {
+        cell_id: cell_id.to_string(),
+        tx,
+        receipt_hash: r.try_get(1).db()?,
+        asof: r.try_get(2).db()?,
+        withdrawn: r.try_get(3).db()?,
+    }))
+}
+
+/// The method names a class binds (K5, as `bind_class` does): `<class name>/<m>` for each
+/// method the class adds or overrides (its function hash differs from its parent's), with the
+/// function hash.
+fn own_method_bindings(
+    t: &mut postgres::Transaction<'_>,
+    get: &postgres::Statement,
+    class_name: &str,
+    class_hash: &str,
+) -> Result<Vec<(String, String)>> {
+    let Some(row) = t.query_opt(get, &[&class_hash]).db()? else {
+        return Err(Error::NotFound { what: "class", key: class_hash.to_string() });
+    };
+    let flat = ClassDescriptor::from_json(&row.try_get::<_, Vec<u8>>(0).db()?)?;
+    let parent = match &flat.parent {
+        Some(p) => match t.query_opt(get, &[p]).db()? {
+            Some(row) => Some(ClassDescriptor::from_json(&row.try_get::<_, Vec<u8>>(0).db()?)?.methods),
+            None => None,
+        },
+        None => None,
+    };
+    let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
+    Ok(methods
+        .iter()
+        .filter(|(m, h)| parent.as_ref().and_then(|pm| pm.get(m)) != Some(h))
+        .map(|(m, h)| (format!("{class_name}/{m}"), h.clone()))
+        .collect())
 }
 
 impl Store for PgStore {
@@ -644,16 +662,14 @@ impl Store for PgStore {
     }
 
     fn put_receipt(&self, bytes: &[u8]) -> Result<String> {
-        // Steps 1-4 first: a receipt that is not one is refused without a query.
-        let r = Receipt::from_json(bytes)?;
-        // Steps 1-4 passed, so the text parses; its JCS is the canonical form.
-        let canonical = json::parse(bytes)?.to_jcs();
-        let hash = r.hash().to_string();
-        let cell_id = r.cell().id();
-        let host = r.signer_host().to_string();
-        // Receipt hashes are edges; slice entries (spec-0.4.0) slice edges.
-        let (entries, inputs): (Vec<String>, Vec<String>) =
-            r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
+        // Steps 1-4 first (a valued receipt or a withdrawal): one that is neither is refused
+        // without a query.
+        let p = parse_receipt(bytes)?;
+        let canonical = p.canonical.clone();
+        let hash = p.hash.clone();
+        let cell_id = p.cell_id.clone();
+        let host = p.host.clone();
+        let (entries, inputs) = (p.entries.clone(), p.inputs.clone());
         self.run("put_receipt", |c| {
             let ns = c.stmt(Q::NamespaceGet)?;
             let put = c.stmt(Q::ReceiptPut)?;
@@ -687,9 +703,7 @@ impl Store for PgStore {
                     datumesh_core::Error::new(ErrorCode::Signature, "$", "the receipt did not verify")
                 })));
             }
-            let n = t
-                .execute(&put, &[&hash, &canonical, &cell_id, &r.tx(), &r.asof(), &r.cell().fn_hash, &r.publisher()])
-                .db()?;
+            let n = t.execute(&put, &[&hash, &canonical, &cell_id, &p.tx, &p.asof, &p.fn_hash, &p.publisher]).db()?;
             if n == 0 {
                 let row = t.query_one(&get, &[&hash]).db()?;
                 let stored: Vec<u8> = row.try_get(0).db()?;
@@ -745,7 +759,7 @@ impl Store for PgStore {
             };
             // No new versions of a receipt signed by a suspended namespace.
             let stored: Vec<u8> = t.query_one(&get, &[&receipt_hash]).db()?.try_get(0).db()?;
-            let signer = Receipt::from_json(&stored)?.signer_host().to_string();
+            let signer = parse_receipt(&stored)?.host;
             if let Some(row) = t.query_opt(&ns, &[&signer]).db()? {
                 if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
                     return Err(Error::NamespaceSuspended { host: signer, suspended_at: since });
@@ -844,7 +858,7 @@ impl Store for PgStore {
             return Ok(Vec::new());
         }
         // Parsing (and so the first malformed receipt's error) is in item order below.
-        let prepared = parallel(items, |w| prepare(w.receipt));
+        let prepared = parallel(items, |w| parse_receipt(w.receipt));
         let hashes = self.run("put_cells", |c| put_cells_in(c, items, prepared))?;
         tracing::debug!(target: "datumesh_store", items = items.len(), "put_cells");
         Ok(hashes)
@@ -986,6 +1000,14 @@ impl Store for PgStore {
             };
             let (r_cell, r_tx, asof): (String, String, String) =
                 (row.try_get(0).db()?, row.try_get(1).db()?, row.try_get(2).db()?);
+            // A computed version states a value: a withdrawal is refused (0.6.0).
+            if row.try_get::<_, bool>(3).db()? {
+                return Err(Error::Invalid(datumesh_core::Error::new(
+                    ErrorCode::Schema,
+                    "$",
+                    "a withdrawal is not the receipt of a computed version",
+                )));
+            }
             if r_cell != cell_id {
                 return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
             }
@@ -1091,7 +1113,7 @@ impl Store for PgStore {
         self.run("versions_between", |c| {
             let st = c.stmt(Q::VersionsBetween)?;
             let rows = c.client.query(&st, &[&cell_id, &from, &to, &asof]).db()?;
-            rows.iter().map(|r| member_row(r, cell_id)).collect()
+            rows.iter().map(|r| versions_between_row(r, cell_id)).collect()
         })
     }
 
@@ -1269,6 +1291,64 @@ impl Store for PgStore {
         Ok(())
     }
 
+    fn close_binding(&self, name: &str, at: &str) -> Result<()> {
+        check_function_name(name, "name")?;
+        check_instant(at, "at")?;
+        self.run("close_binding", |c| {
+            let lock = c.stmt(Q::Lock)?;
+            let ns = c.stmt(Q::NamespaceGet)?;
+            let class_bound = c.stmt(Q::ClassNameBound)?;
+            let name_latest = c.stmt(Q::NameLatestRow)?;
+            let class_latest = c.stmt(Q::ClassBindingLatestRow)?;
+            let name_close = c.stmt(Q::NameClose)?;
+            let class_close = c.stmt(Q::ClassBindingClose)?;
+            let get = c.stmt(Q::ClassGet)?;
+            let mut t = c.client.transaction().db()?;
+            t.execute(&lock, &[&"names", &name]).db()?;
+            // No new writes under a suspended namespace: the host of the name.
+            let host = name_host(name);
+            if let Some(row) = t.query_opt(&ns, &[&host]).db()? {
+                if let Some(since) = row.try_get::<_, Option<String>>(2).db()? {
+                    return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
+                }
+            }
+            let class: bool = t.query_one(&class_bound, &[&name]).db()?.try_get(0).db()?;
+            if class {
+                // The class name, then the method names its binding bound and that are still bound.
+                let row = t.query_opt(&class_latest, &[&name]).db()?.ok_or_else(|| unbound(name))?;
+                let (tx, class_hash): (String, Option<String>) = (row.try_get(0).db()?, row.try_get(1).db()?);
+                let class_hash = class_hash.ok_or_else(|| unbound(name))?;
+                later_than("name", name, at, &tx)?;
+                let methods = own_method_bindings(&mut t, &get, name, &class_hash)?;
+                let mut closing: Vec<String> = Vec::new();
+                for (m, _) in &methods {
+                    t.execute(&lock, &[&"names", &m.as_str()]).db()?;
+                    if let Some(row) = t.query_opt(&name_latest, &[&m.as_str()]).db()? {
+                        let (mtx, mhash): (String, Option<String>) = (row.try_get(0).db()?, row.try_get(1).db()?);
+                        if mhash.is_some() {
+                            later_than("name", m, at, &mtx)?;
+                            closing.push(m.clone());
+                        }
+                    }
+                }
+                t.execute(&class_close, &[&name, &at]).db()?;
+                for m in &closing {
+                    t.execute(&name_close, &[&m.as_str(), &at]).db()?;
+                }
+            } else {
+                let row = t.query_opt(&name_latest, &[&name]).db()?.ok_or_else(|| unbound(name))?;
+                let (tx, fn_hash): (String, Option<String>) = (row.try_get(0).db()?, row.try_get(1).db()?);
+                fn_hash.ok_or_else(|| unbound(name))?;
+                later_than("name", name, at, &tx)?;
+                t.execute(&name_close, &[&name, &at]).db()?;
+            }
+            t.commit().db()?;
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", name, at, "close_binding");
+        Ok(())
+    }
+
     fn resolve_class(&self, class_name: &str, asof: &str) -> Result<Option<String>> {
         Ok(self.resolve_class_binding(class_name, asof)?.map(|b| b.class_hash))
     }
@@ -1279,7 +1359,9 @@ impl Store for PgStore {
         self.run("resolve_class_binding", |c| {
             let st = c.stmt(Q::ClassBindingAsof)?;
             let Some(row) = c.client.query_opt(&st, &[&class_name, &asof]).db()? else { return Ok(None) };
-            Ok(Some(ClassBinding { class_hash: row.try_get(0).db()?, tx: row.try_get(1).db()? }))
+            // A closed binding (0.6.0) has no class hash: the name is unbound from its tx on.
+            let Some(class_hash) = row.try_get::<_, Option<String>>(0).db()? else { return Ok(None) };
+            Ok(Some(ClassBinding { class_hash, tx: row.try_get(1).db()? }))
         })
     }
 
@@ -1299,7 +1381,9 @@ impl Store for PgStore {
         self.run("resolve_binding", |c| {
             let st = c.stmt(Q::BindingAsof)?;
             let Some(row) = c.client.query_opt(&st, &[&fn_name, &asof]).db()? else { return Ok(None) };
-            Ok(Some(Binding { fn_hash: row.try_get(0).db()?, tx: row.try_get(1).db()? }))
+            // A closed binding (0.6.0) has no function hash: the name is unbound from its tx on.
+            let Some(fn_hash) = row.try_get::<_, Option<String>>(0).db()? else { return Ok(None) };
+            Ok(Some(Binding { fn_hash, tx: row.try_get(1).db()? }))
         })
     }
 
@@ -1309,8 +1393,9 @@ impl Store for PgStore {
         self.run("resolve_name", |c| {
             let st = c.stmt(Q::NameAsof)?;
             let row = c.client.query_opt(&st, &[&fn_name, &asof]).db()?;
+            // NULL for a closed binding (0.6.0): the name means nothing from then on.
             Ok(match row {
-                Some(r) => Some(r.try_get(0).db()?),
+                Some(r) => r.try_get::<_, Option<String>>(0).db()?,
                 None => None,
             })
         })

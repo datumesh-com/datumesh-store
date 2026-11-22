@@ -17,15 +17,16 @@ use crate::error::{Db, Error, Result};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
 use crate::{
-    not_canonical_class, Binding, CatalogEntry, CatalogEntryExt, CatalogKind, ClassBinding, Dictionary,
-    DictionaryValue, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue, Namespace, PendingEmbedding, SliceMember,
-    SliceValue, Store, Summary, SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
+    later_than, not_canonical_class, parse_receipt, stored_value, unbound, Binding, CatalogEntry, CatalogEntryExt,
+    CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue,
+    Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary, Version,
+    FIND_MISSES_CAP, WITHDRAWN_VALUE,
 };
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     keys_from_response, sha256_hex, verify, Arg, Args, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys,
-    Manifest, Receipt, Resolver, Scalar, Slice, Type,
+    Manifest, Resolver, Scalar, Slice, Type,
 };
 
 /// How a [`SqliteStore`] opens and uses its connections.
@@ -342,7 +343,7 @@ impl SqliteStore {
         self.run(op, |c| {
             c.prepare_cached(q.sql())
                 .db()?
-                .query_row(rusqlite::params![cell_id, asof], |r| Ok((version_row(r, cell_id)?, r.get(3)?)))
+                .query_row(rusqlite::params![cell_id, asof], |r| Ok((version_row(r, cell_id)?, r.get(4)?)))
                 .optional()
                 .db()
         })
@@ -437,8 +438,41 @@ pub(crate) fn result_code_name(code: std::os::raw::c_int) -> String {
     name.to_string()
 }
 
+/// A version from a row of (tx, receipt_hash, asof, withdrawn, ...) (0.6.0: withdrawn is 0 or 1).
 fn version_row(r: &rusqlite::Row<'_>, cell_id: &str) -> rusqlite::Result<Version> {
-    Ok(Version { cell_id: cell_id.to_string(), tx: r.get(0)?, receipt_hash: r.get(1)?, asof: r.get(2)? })
+    Ok(Version {
+        cell_id: cell_id.to_string(),
+        tx: r.get(0)?,
+        receipt_hash: r.get(1)?,
+        asof: r.get(2)?,
+        withdrawn: r.get(3)?,
+    })
+}
+
+/// The latest binding row of `name` for `q` (tx, and the hash, NULL when the name is closed).
+fn latest_binding_row(c: &Connection, q: L, name: &str) -> Result<Option<(String, Option<String>)>> {
+    c.prepare_cached(q.sql()).db()?.query_row([name], |r| Ok((r.get(0)?, r.get(1)?))).optional().db()
+}
+
+/// The method names a class binds (K5, as `bind_class` does): `<class name>/<m>` for each
+/// method the class adds or overrides, with its function hash.
+fn own_method_bindings(c: &Connection, class_name: &str, class_hash: &str) -> Result<Vec<(String, String)>> {
+    let Some(bytes) = get_bytes(c, L::ClassGet, class_hash)? else {
+        return Err(Error::NotFound { what: "class", key: class_hash.to_string() });
+    };
+    let flat = ClassDescriptor::from_json(&bytes)?;
+    let parent = match &flat.parent {
+        Some(p) => {
+            get_bytes(c, L::ClassGet, p)?.map(|b| ClassDescriptor::from_json(&b)).transpose()?.map(|d| d.methods)
+        }
+        None => None,
+    };
+    let methods: Vec<(String, String)> = flat.methods.into_iter().collect();
+    Ok(methods
+        .iter()
+        .filter(|(m, h)| parent.as_ref().and_then(|pm| pm.get(m)) != Some(h))
+        .map(|(m, h)| (format!("{class_name}/{m}"), h.clone()))
+        .collect())
 }
 
 /// The host of a fully qualified function name (`host/name`): what precedes the last `/`.
@@ -657,8 +691,8 @@ impl Resolver for SqliteStore {
                 .optional()
                 .db()?;
             let Some(bytes) = bytes else { return Ok(None) };
-            match Receipt::from_json(&bytes) {
-                Ok(r) => Ok(Some(r.value().clone())),
+            match stored_value(&bytes) {
+                Ok(value) => Ok(value),
                 Err(e) => {
                     tracing::error!(target: "datumesh_store", cell_id = %cell.id(), error = %e, "stored receipt does not parse");
                     Ok(None)
@@ -787,15 +821,15 @@ impl Store for SqliteStore {
     }
 
     fn put_receipt(&self, bytes: &[u8]) -> Result<String> {
-        // Steps 1-4 first: a receipt that is not one is refused without a query.
-        let r = Receipt::from_json(bytes)?;
-        let canonical = json::parse(bytes)?.to_jcs();
-        let hash = r.hash().to_string();
-        let cell = r.cell();
-        let cell_id = cell.id();
-        let host = r.signer_host().to_string();
-        let (mut entries, mut inputs): (Vec<String>, Vec<String>) =
-            r.inputs().iter().cloned().partition(|e| e.starts_with("slice:"));
+        // Steps 1-4 first (a valued receipt or a withdrawal): one that is neither is refused
+        // without a query.
+        let p = parse_receipt(bytes)?;
+        let canonical = p.canonical.clone();
+        let hash = p.hash.clone();
+        let cell = &p.cell;
+        let cell_id = p.cell_id.clone();
+        let host = p.host.clone();
+        let (mut entries, mut inputs) = (p.entries.clone(), p.inputs.clone());
         entries.sort();
         entries.dedup();
         inputs.sort();
@@ -840,7 +874,11 @@ impl Store for SqliteStore {
                 if let Some(stored) = get_bytes(c, L::ReceiptGet, &hash)? {
                     return if stored == canonical { Ok(()) } else { Err(Error::Conflict { hash: hash.clone() }) };
                 }
-                let value = r.value();
+                // A withdrawal has no value: its columns are the empty text (0.6.0).
+                let (value_type, value) = match &p.value {
+                    Some((ty, lexical)) => (ty.as_str(), lexical.as_str()),
+                    None => (WITHDRAWN_VALUE, WITHDRAWN_VALUE),
+                };
                 exec(
                     c,
                     L::ReceiptPut,
@@ -848,12 +886,12 @@ impl Store for SqliteStore {
                         hash,
                         canonical,
                         cell_id,
-                        r.tx(),
+                        p.tx,
                         cell.fn_hash,
-                        r.publisher(),
-                        r.asof(),
-                        value.ty().as_str(),
-                        value.lexical()
+                        p.publisher,
+                        p.asof,
+                        value_type,
+                        value
                     ],
                 )?;
                 for i in &inputs {
@@ -918,7 +956,7 @@ impl Store for SqliteStore {
             // No new versions of a receipt signed by a suspended namespace.
             let stored = get_bytes(c, L::ReceiptGet, receipt_hash)?
                 .ok_or_else(|| Error::NotFound { what: "receipt", key: receipt_hash.to_string() })?;
-            let signer = Receipt::from_json(&stored)?.signer_host().to_string();
+            let signer = parse_receipt(&stored)?.host;
             if let Some(since) = read_namespace(c, &signer)?.and_then(|n| n.suspended_at) {
                 return Err(Error::NamespaceSuspended { host: signer, suspended_at: since });
             }
@@ -1075,7 +1113,10 @@ impl Store for SqliteStore {
         check_function_name(fn_name, "fn_name")?;
         check_instant(asof, "asof")?;
         self.run("resolve_name", |c| {
-            c.prepare_cached(L::NameAsof.sql()).db()?.query_row([fn_name, asof], |r| r.get(0)).optional().db()
+            // NULL for a closed binding (0.6.0): the name means nothing from then on.
+            let hash: Option<Option<String>> =
+                c.prepare_cached(L::NameAsof.sql()).db()?.query_row([fn_name, asof], |r| r.get(0)).optional().db()?;
+            Ok(hash.flatten())
         })
     }
 
@@ -1182,6 +1223,46 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn close_binding(&self, name: &str, at: &str) -> Result<()> {
+        check_function_name(name, "name")?;
+        check_instant(at, "at")?;
+        self.write("close_binding", |c| {
+            // No new writes under a suspended namespace: the host of the name.
+            let host = name_host(name);
+            if let Some(since) = read_namespace(c, host)?.and_then(|n| n.suspended_at) {
+                return Err(Error::NamespaceSuspended { host: host.to_string(), suspended_at: since });
+            }
+            if exists(c, L::ClassNameBound, name)? {
+                // The class name, then the method names its binding bound and that are still bound.
+                let (tx, class_hash) =
+                    latest_binding_row(c, L::ClassBindingLatestRow, name)?.ok_or_else(|| unbound(name))?;
+                let class_hash = class_hash.ok_or_else(|| unbound(name))?;
+                later_than("name", name, at, &tx)?;
+                let mut closing: Vec<String> = Vec::new();
+                for (m, _) in own_method_bindings(c, name, &class_hash)? {
+                    if let Some((mtx, mhash)) = latest_binding_row(c, L::NameLatestRow, &m)? {
+                        if mhash.is_some() {
+                            later_than("name", &m, at, &mtx)?;
+                            closing.push(m);
+                        }
+                    }
+                }
+                exec(c, L::ClassBindingClose, rusqlite::params![name, at])?;
+                for m in &closing {
+                    exec(c, L::NameClose, rusqlite::params![m, at])?;
+                }
+            } else {
+                let (tx, fn_hash) = latest_binding_row(c, L::NameLatestRow, name)?.ok_or_else(|| unbound(name))?;
+                fn_hash.ok_or_else(|| unbound(name))?;
+                later_than("name", name, at, &tx)?;
+                exec(c, L::NameClose, rusqlite::params![name, at])?;
+            }
+            Ok(())
+        })?;
+        tracing::debug!(target: "datumesh_store", name, at, "close_binding");
+        Ok(())
+    }
+
     fn resolve_class(&self, class_name: &str, asof: &str) -> Result<Option<String>> {
         Ok(self.resolve_class_binding(class_name, asof)?.map(|b| b.class_hash))
     }
@@ -1190,11 +1271,14 @@ impl Store for SqliteStore {
         check_function_name(class_name, "class_name")?;
         check_instant(asof, "asof")?;
         self.run("resolve_class_binding", |c| {
-            c.prepare_cached(L::ClassBindingAsof.sql())
+            // A closed binding (0.6.0) has no class hash: the name is unbound from its tx on.
+            let row: Option<(Option<String>, String)> = c
+                .prepare_cached(L::ClassBindingAsof.sql())
                 .db()?
-                .query_row([class_name, asof], |r| Ok(ClassBinding { class_hash: r.get(0)?, tx: r.get(1)? }))
+                .query_row([class_name, asof], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()
-                .db()
+                .db()?;
+            Ok(row.and_then(|(h, tx)| h.map(|class_hash| ClassBinding { class_hash, tx })))
         })
     }
 
@@ -1212,11 +1296,14 @@ impl Store for SqliteStore {
         check_function_name(fn_name, "fn_name")?;
         check_instant(asof, "asof")?;
         self.run("resolve_binding", |c| {
-            c.prepare_cached(L::BindingAsof.sql())
+            // A closed binding (0.6.0) has no function hash: the name is unbound from its tx on.
+            let row: Option<(Option<String>, String)> = c
+                .prepare_cached(L::BindingAsof.sql())
                 .db()?
-                .query_row([fn_name, asof], |r| Ok(Binding { fn_hash: r.get(0)?, tx: r.get(1)? }))
+                .query_row([fn_name, asof], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()
-                .db()
+                .db()?;
+            Ok(row.and_then(|(h, tx)| h.map(|fn_hash| Binding { fn_hash, tx })))
         })
     }
 
@@ -1225,15 +1312,23 @@ impl Store for SqliteStore {
         check_instant(tx, "tx")?;
         check_hex(receipt_hash, 64, "receipt_hash")?;
         let asof = self.write("put_computed", |c| {
-            let meta: Option<(String, String, String)> = c
+            let meta: Option<(String, String, String, bool)> = c
                 .prepare_cached(L::ReceiptMeta.sql())
                 .db()?
-                .query_row([receipt_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .query_row([receipt_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
                 .optional()
                 .db()?;
-            let Some((r_cell, r_tx, asof)) = meta else {
+            let Some((r_cell, r_tx, asof, withdrawn)) = meta else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
+            // A computed version states a value: a withdrawal is refused (0.6.0).
+            if withdrawn {
+                return Err(Error::Invalid(datumesh_core::Error::new(
+                    ErrorCode::Schema,
+                    "$",
+                    "a withdrawal is not the receipt of a computed version",
+                )));
+            }
             if r_cell != cell_id {
                 return Err(Error::Mismatch { what: "cell_id", expected: cell_id.to_string(), found: r_cell });
             }
@@ -1346,7 +1441,14 @@ impl Store for SqliteStore {
                 let cell_id: String = r.get(4)?;
                 Ok((
                     SliceMember {
-                        version: Version { cell_id, tx: r.get(0)?, receipt_hash: r.get(1)?, asof: r.get(2)? },
+                        // A slice's members leave the withdrawn versions out (the query does).
+                        version: Version {
+                            cell_id,
+                            tx: r.get(0)?,
+                            receipt_hash: r.get(1)?,
+                            asof: r.get(2)?,
+                            withdrawn: false,
+                        },
                         receipt: r.get(3)?,
                     },
                     r.get::<_, String>(5)?,
@@ -1365,7 +1467,7 @@ impl Store for SqliteStore {
             let mut st = c.prepare_cached(L::VersionsBetween.sql()).db()?;
             let rows = st
                 .query_map(rusqlite::params![cell_id, from, to, asof], |r| {
-                    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.get(3)? })
+                    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.get(4)? })
                 })
                 .db()?;
             rows.collect::<rusqlite::Result<Vec<SliceMember>>>().db()
@@ -2138,7 +2240,8 @@ fn value_of(c: ValueColumns) -> Result<(SliceValue, Args)> {
     let cell = Cell { args: args.clone(), fn_hash, fn_name, ns };
     Ok((
         SliceValue {
-            version: Version { cell_id, tx, receipt_hash, asof },
+            // A slice's values leave the withdrawn versions out (the query does).
+            version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false },
             value: Scalar::from_lexical(ty, &value)?,
             cell,
         },

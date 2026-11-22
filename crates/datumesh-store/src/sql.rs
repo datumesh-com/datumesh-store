@@ -82,14 +82,15 @@ macro_rules! slice_members {
                ",
             $from,
             "
-              CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, ",
+              CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '' AS withdrawn, ",
             $inner,
             "
                                     FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                                    WHERE v.cell_id = c.cell_id AND v.tx <= $5 AND r.asof <= $5
                                    ORDER BY v.tx DESC LIMIT 1) m
               WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND ",
-            slice_match!()
+            slice_match!(),
+            " AND NOT m.withdrawn"
         )
     };
 }
@@ -308,14 +309,14 @@ statements! {
                           ORDER BY c.cell_id LIMIT $4) k
                         CROSS JOIN LATERAL (SELECT v.receipt_hash FROM versions v WHERE v.cell_id = k.cell_id
                                              ORDER BY v.tx DESC LIMIT 1) m
-                        JOIN receipts r ON r.hash = m.receipt_hash
+                        JOIN receipts r ON r.hash = m.receipt_hash AND r.value_type <> ''
                         ORDER BY k.cell_id"
         => [TEXT, TEXT, TEXT, INT8];
     // The cells of a function name, from the counter (0.5.3; the PK, never a count over cells).
     StoredCellCount = "SELECT COALESCE((SELECT n FROM cell_counts WHERE fn_hash = $1 AND ns = $2 AND fn = $3), 0)"
         => [TEXT, TEXT, TEXT];
     // A version slice's versions, at most $4 (SQL LIMIT, in tx order).
-    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
                          FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx LIMIT $4"
         => [TEXT, TEXT, TEXT, INT8];
     // Dictionaries (0.5.2): exact lookups on the primary key (owner, key, value).
@@ -340,7 +341,7 @@ statements! {
         => [TEXT];
 
     ReceiptGet = "SELECT bytes FROM receipts WHERE hash = $1" => [TEXT];
-    ReceiptMeta = "SELECT cell_id, tx, asof FROM receipts WHERE hash = $1" => [TEXT];
+    ReceiptMeta = "SELECT cell_id, tx, asof, value_type = '' FROM receipts WHERE hash = $1" => [TEXT];
     ReceiptPut = "INSERT INTO receipts (hash, bytes, cell_id, tx, tx_at, asof, asof_at, fn_hash, publisher)
                   VALUES ($1, $2, $3, $4, datumesh_instant($4), $5, datumesh_instant($5), $6, $7)
                   ON CONFLICT (hash) DO NOTHING"
@@ -360,20 +361,20 @@ statements! {
     // a join, so that the versions table is looked at first (a missing column of it is still
     // reported as such).
     VersionLatestTx = "SELECT tx FROM versions WHERE cell_id = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
-    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
                      FROM versions v WHERE v.cell_id = $1 ORDER BY v.tx DESC LIMIT 1"
         => [TEXT];
-    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
                    FROM versions v WHERE v.cell_id = $1 AND v.tx <= $2 ORDER BY v.tx DESC LIMIT 1"
         => [TEXT, TEXT];
-    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
                     FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT];
     // A stored version answers as of A when its tx <= A and its receipt's asof <= A.
-    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '' FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                   WHERE v.cell_id = $1 AND v.tx <= $2 AND r.asof <= $2 ORDER BY v.tx DESC LIMIT 1"
         => [TEXT, TEXT];
-    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                          WHERE v.cell_id = $1 AND v.tx <= $2 AND r.asof <= $2 ORDER BY v.tx DESC LIMIT 1"
         => [TEXT, TEXT];
     VersionPut = "INSERT INTO versions (cell_id, tx, tx_at, receipt_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
@@ -390,10 +391,10 @@ statements! {
     ComputedGet = "SELECT receipt_hash FROM computed_versions WHERE cell_id = $1 AND tx = $2 AND asof = $3"
         => [TEXT, TEXT, TEXT];
     // The greatest asof <= A, ties the greatest tx.
-    ComputedAsof = "SELECT tx, receipt_hash, asof FROM computed_versions
+    ComputedAsof = "SELECT tx, receipt_hash, asof, false FROM computed_versions
                     WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1"
         => [TEXT, TEXT];
-    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, r.bytes FROM
+    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, false, r.bytes FROM
                                (SELECT tx, receipt_hash, asof FROM computed_versions
                                  WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1) c
                            JOIN receipts r ON r.hash = c.receipt_hash"
@@ -432,6 +433,10 @@ statements! {
         => [TEXT, BYTEA, TEXT];
 
     NameLatest = "SELECT tx FROM name_bindings WHERE fn_name = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
+    // The latest binding with its hash (NULL when the name is closed, 0.6.0).
+    NameLatestRow = "SELECT tx, fn_hash FROM name_bindings WHERE fn_name = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
+    NameClose = "INSERT INTO name_bindings (fn_name, tx, tx_at, fn_hash) VALUES ($1, $2, datumesh_instant($2), NULL)"
+        => [TEXT, TEXT];
     NamePut = "INSERT INTO name_bindings (fn_name, tx, tx_at, fn_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
         => [TEXT, TEXT, TEXT];
     NameAsof = "SELECT fn_hash FROM name_bindings WHERE fn_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
@@ -448,6 +453,10 @@ statements! {
         => [TEXT, BYTEA];
     ClassGet = "SELECT bytes FROM classes WHERE class_hash = $1" => [TEXT];
     ClassBindingLatest = "SELECT tx FROM class_bindings WHERE class_name = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
+    ClassBindingLatestRow = "SELECT tx, class_hash FROM class_bindings WHERE class_name = $1 ORDER BY tx DESC LIMIT 1"
+        => [TEXT];
+    ClassBindingClose = "INSERT INTO class_bindings (class_name, tx, tx_at, class_hash) VALUES ($1, $2, datumesh_instant($2), NULL)"
+        => [TEXT, TEXT];
     ClassBindingPut = "INSERT INTO class_bindings (class_name, tx, tx_at, class_hash) VALUES ($1, $2, datumesh_instant($2), $3)"
         => [TEXT, TEXT, TEXT];
     ClassBindingAsof = "SELECT class_hash, tx FROM class_bindings WHERE class_name = $1 AND tx <= $2 ORDER BY tx DESC LIMIT 1"
@@ -472,7 +481,7 @@ statements! {
     SliceDependents = "SELECT receipt_hash FROM slice_edges WHERE entry = $1 ORDER BY receipt_hash" => [TEXT];
 
     // A version slice: the stored versions with from <= tx <= to answering as of A.
-    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                        WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT, TEXT];
 
@@ -508,7 +517,8 @@ statements! {
                                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
                                            WHERE a.cell_id = c.cell_id ORDER BY a.name)
                                FROM versions v JOIN receipts r ON r.hash = v.receipt_hash JOIN cells c ON c.cell_id = v.cell_id
-                              WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4 ORDER BY v.tx"
+                              WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4
+                                AND r.value_type <> '' ORDER BY v.tx"
         => [TEXT, TEXT, TEXT, TEXT];
     // computed_cells (0.4.2): the cells of a slice with a computed version as of A, $16 at most;
     // the columns are the cell's namespace, function name, function hash and "name:type:value"
@@ -553,7 +563,8 @@ statements! {
 
     // Batched reads (0.4.3). One row per input, in input order (`ord`): latest_many's version
     // of each cell (its tx, receipt hash and the receipt's asof), receipts_many's bytes.
-    VersionLatestMany = "SELECT l.tx, l.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = l.receipt_hash)
+    VersionLatestMany = "SELECT l.tx, l.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = l.receipt_hash),
+                                    (SELECT r.value_type = '' FROM receipts r WHERE r.hash = l.receipt_hash)
                          FROM unnest($1::text[]) WITH ORDINALITY AS u(id, ord)
                          LEFT JOIN LATERAL (SELECT v.tx, v.receipt_hash FROM versions v
                                              WHERE v.cell_id = u.id ORDER BY v.tx DESC LIMIT 1) l ON true
