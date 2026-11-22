@@ -111,13 +111,16 @@ fn migration_makes_the_catalogue_tables_and_no_embeddings_without_vectors(b: Bac
 }
 
 fn migrations_are_registered(b: Backend) {
-    let last = match b {
-        Backend::Pg => migrate::MIGRATIONS.last().unwrap(),
-        Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
-    };
+    // Migration 11 (7 on SQLite) is no longer the last: 0.5.3 added the counters (12, and 8).
     match b {
-        Backend::Pg => assert_eq!((last.version, last.name), (11, "0011_function_test_names.sql")),
-        Backend::Sqlite => assert_eq!((last.version, last.name), (7, "0007_function_test_names.sql")),
+        Backend::Pg => {
+            let m = &migrate::MIGRATIONS[10];
+            assert_eq!((m.version, m.name), (11, "0011_function_test_names.sql"));
+        }
+        Backend::Sqlite => {
+            let m = &migrate::sqlite::MIGRATIONS[6];
+            assert_eq!((m.version, m.name), (7, "0007_function_test_names.sql"));
+        }
     }
 }
 
