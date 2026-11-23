@@ -2401,24 +2401,44 @@ impl Pattern {
     }
 
     /// A page of the members' values as of `asof` in sort-key order, after `after` (exclusive),
-    /// at most `limit` (CONTRACT-0.5.1 S2): the statement of `values` with the key order and the
-    /// LIMIT in SQL. Its candidates are the function's cells in the index on (fn_hash, ns, fn,
-    /// sort_key), so withdrawn and absent members are filtered before the LIMIT counts.
+    /// at most `limit` (CONTRACT-0.5.1 S2). The statement reads the sort-key range of the
+    /// slice's leading arguments (`slices::key_bounds`) when there is one: O(limit) rows. Else
+    /// its candidates are driven by the most selective bound argument, as `values` drives them,
+    /// and ordered by key (O(members)); else the index is walked from its start. Membership is
+    /// checked in SQL before the LIMIT, so withdrawn and absent members do not count.
     fn values_by_key(&self, c: &mut Conn, asof: &str, after: Option<&[u8]>, limit: i64) -> Result<Vec<SliceValue>> {
+        let bounds = crate::slices::key_bounds(&self.args);
+        let drive = if bounds.is_some() { None } else { self.drive(c, false)?.0 };
         let [names, kinds, types, los, his] = self.columns();
         let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
         let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
-        let (after_sql, limit_at) = if after.is_some() { (" AND c.sort_key > $16", 17) } else { ("", 16) };
-        let sql = format!("{}{} ORDER BY c.sort_key LIMIT ${limit_at}", Q::SliceValuesAll.sql(), after_sql);
-        let mut param_types = Q::SliceValuesAll.types().to_vec();
-        if after.is_some() {
-            param_types.push(postgres::types::Type::BYTEA);
+        let (base, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::SliceValuesAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::SliceValuesNum } else { Q::SliceValuesText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        // The parameters after the base statement's $1-$15, in order: the key range, the cursor,
+        // then the LIMIT.
+        let mut extra: Vec<Vec<u8>> = Vec::new();
+        let mut sql = base.sql().to_string();
+        if let Some((lo, hi)) = &bounds {
+            extra.push(lo.clone());
+            sql += &format!(" AND c.sort_key >= ${}", 15 + extra.len());
+            if let Some(hi) = hi {
+                extra.push(hi.clone());
+                sql += &format!(" AND c.sort_key < ${}", 15 + extra.len());
+            }
         }
+        if let Some(a) = after {
+            extra.push(a.to_vec());
+            sql += &format!(" AND c.sort_key > ${}", 15 + extra.len());
+        }
+        sql += &format!(" ORDER BY c.sort_key LIMIT ${}", 16 + extra.len());
+        let mut param_types = base.types().to_vec();
+        param_types.extend(std::iter::repeat_n(postgres::types::Type::BYTEA, extra.len()));
         param_types.push(postgres::types::Type::INT8);
-        let st = c.client.prepare_typed(sql.as_str(), &param_types).db()?;
-        // The drive's parameters are unused here (the statement reads every cell of the function).
-        let (d_name, d_ty, d_lo, d_hi) = ("", "", "", "");
-        let after_bytes: &[u8] = after.unwrap_or(&[]);
         let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![
             &self.fn_hash,
             &self.ns,
@@ -2436,11 +2456,24 @@ impl Pattern {
             &d_lo,
             &d_hi,
         ];
-        if after.is_some() {
-            params.push(&after_bytes);
+        for bytes in &extra {
+            params.push(bytes);
         }
         params.push(&limit);
-        let rows = c.client.query(&st, &params).db()?;
+        // A key range is read in key order: PostgreSQL cannot estimate a bytea range, takes it for
+        // a few rows, and would bitmap and sort every member of it, so a key range's page is read
+        // with bitmap scans off (for this read only, in its transaction).
+        let rows = if bounds.is_some() {
+            let mut t = c.client.transaction().db()?;
+            t.batch_execute("SET LOCAL enable_bitmapscan = off").db()?;
+            let st = t.prepare_typed(sql.as_str(), &param_types).db()?;
+            let rows = t.query(&st, &params).db()?;
+            t.commit().db()?;
+            rows
+        } else {
+            let st = c.client.prepare_typed(sql.as_str(), &param_types).db()?;
+            c.client.query(&st, &params).db()?
+        };
         rows.iter()
             .map(|r| {
                 let cell_id: String = r.try_get(10).db()?;

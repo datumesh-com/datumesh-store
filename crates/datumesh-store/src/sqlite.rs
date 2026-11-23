@@ -2496,9 +2496,11 @@ fn values_page(p: &Pattern, c: &Connection, asof: &str, after: Option<&str>, lim
     Ok(out)
 }
 
-/// A page of the members of a slice of cells in sort-key order (CONTRACT-0.5.1 S2): from the
-/// first key, or after `after` (exclusive), at most `limit`; the statement reads the index of
-/// the function's cells on (fn_hash, ns, fn, sort_key), and withdrawn members do not count.
+/// A page of the members of a slice of cells in sort-key order (CONTRACT-0.5.1 S2), after
+/// `after` (exclusive), at most `limit`. The candidates are the sort-key range of the slice's
+/// leading arguments when there is one (`slices::key_bounds`: O(limit) rows); else those of its
+/// most selective bound argument, ordered by key (O(members)); else the function's index walked
+/// from its start. Withdrawn and absent members are left out before the LIMIT counts them.
 fn slice_page_rows(
     p: &Pattern,
     c: &Connection,
@@ -2506,14 +2508,25 @@ fn slice_page_rows(
     after: Option<&[u8]>,
     limit: i64,
 ) -> Result<Vec<SliceValue>> {
-    let base = if after.is_some() { L::SlicePageAfter } else { L::SlicePageFirst };
-    let mut binds: Vec<(String, SqlValue)> =
-        params(p, asof, None).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    binds.push((":limit".to_string(), SqlValue::Integer(limit)));
+    let bounds = crate::slices::key_bounds(&p.args);
+    let d = if bounds.is_some() { None } else { drive(p, c, false)?.0 };
+    let mut sql = if d.is_some() { L::SliceValuesDrive.sql().to_string() } else { L::SliceKeyBase.sql().to_string() };
+    let mut binds: Vec<(String, SqlValue)> = params(p, asof, d).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    if let Some((lo, hi)) = &bounds {
+        sql += " AND c.sort_key >= :lo";
+        binds.push((":lo".to_string(), SqlValue::Blob(lo.clone())));
+        if let Some(hi) = hi {
+            sql += " AND c.sort_key < :hi";
+            binds.push((":hi".to_string(), SqlValue::Blob(hi.clone())));
+        }
+    }
     if let Some(a) = after {
+        sql += " AND c.sort_key > :after";
         binds.push((":after".to_string(), SqlValue::Blob(a.to_vec())));
     }
-    let mut st = c.prepare_cached(base.sql()).db()?;
+    sql += " ORDER BY c.sort_key LIMIT :limit";
+    binds.push((":limit".to_string(), SqlValue::Integer(limit)));
+    let mut st = c.prepare(&sql).db()?;
     for (name, value) in &binds {
         if let Some(i) = st.parameter_index(name).db()? {
             st.raw_bind_parameter(i, value).db()?;

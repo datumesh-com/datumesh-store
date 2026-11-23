@@ -443,11 +443,9 @@ statements! {
     SliceValuesAll = slice_members!(value_cols!(), from_all!(), where_all!());
     SliceValuesDrive = slice_members!(value_cols!(), from_drive!(), where_drive!());
     // A page of a slice in key order (CONTRACT-0.5.1 S2): the candidates of the function's
-    // index on (fn_hash, ns, fn, sort_key), from the first key or after `:after` (exclusive).
-    SlicePageFirst = concat!(slice_members!(value_cols!(), "cells c INDEXED BY cells_sort_key", where_all!()),
-                             " ORDER BY c.sort_key LIMIT :limit");
-    SlicePageAfter = concat!(slice_members!(value_cols!(), "cells c INDEXED BY cells_sort_key", "c.sort_key > :after"),
-                             " ORDER BY c.sort_key LIMIT :limit");
+    // index on (fn_hash, ns, fn, sort_key); the caller appends the key range, the cursor and the
+    // ORDER BY ... LIMIT.
+    SliceKeyBase = slice_members!(value_cols!(), "cells c INDEXED BY cells_sort_key", where_all!());
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbe = "SELECT count(*) FROM (SELECT 1 FROM cell_args
                    WHERE fn_hash = ?1 AND name = ?2 AND type = ?3 AND sort_key BETWEEN ?4 AND ?5 LIMIT 10001)";

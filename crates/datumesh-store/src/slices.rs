@@ -189,6 +189,48 @@ mod tests {
 /// complemented, which reverses their order. Any other type is its text (a 0 byte written as 0
 /// 0xFF) and a 0 0 terminator. Cells of one function have the same argument names, so a fixed
 /// argument adds the same bytes to every member's key.
+/// The sort-key range a page of a slice's members reads (CONTRACT-0.5.1 S2). The members' keys
+/// begin with the items of the leading fixed arguments (name order), so those give a prefix; a
+/// range on the argument after them makes the keys between its two items' prefixes a contiguous
+/// range; an open argument ends the range. `Some((lo, hi))`: the keys `lo <= key < hi` (`hi` is
+/// `None` when no key is above, a prefix of 0xFF bytes); `None` when no argument bounds the
+/// leading run (no fixed argument first and no range first).
+pub(crate) fn key_bounds(args: &[Constraint]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let mut prefix = Vec::new();
+    let mut i = 0;
+    while i < args.len() && args[i].kind == Kind::Value {
+        prefix.extend(sort_item(&args[i].ty, &args[i].lo));
+        i += 1;
+    }
+    if i == args.len() || args[i].kind == Kind::Open {
+        if i == 0 {
+            return None;
+        }
+        let hi = successor(&prefix);
+        return Some((prefix, hi));
+    }
+    let a = &args[i];
+    let mut lo = prefix.clone();
+    lo.extend(sort_item(&a.ty, &a.lo));
+    let mut hi = prefix;
+    hi.extend(sort_item(&a.ty, &a.hi));
+    Some((lo, successor(&hi)))
+}
+
+/// The least byte string above every string with prefix `v` (`None` when there is none).
+fn successor(v: &[u8]) -> Option<Vec<u8>> {
+    let mut s = v.to_vec();
+    while let Some(&last) = s.last() {
+        if last == 0xff {
+            s.pop();
+        } else {
+            *s.last_mut()? = last + 1;
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// One argument's part of the key: its type's name, then its value (see above). Also the SQLite
 /// function `datumesh_sort_item`, which the cells' trigger joins.
 pub(crate) fn sort_item(ty: &str, value: &str) -> Vec<u8> {
