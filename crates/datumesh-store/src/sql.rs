@@ -523,11 +523,11 @@ statements! {
     SliceWithdrawnText = slice_withdrawn!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceWithdrawnNum = slice_withdrawn!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesAll = slice_members!(no_with!(), from_all!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesText = slice_members!(drive_text!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesNum = slice_members!(drive_num!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
-                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name)") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+                    ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbeText = "SELECT count(*) FROM (SELECT 1 FROM cell_args a
                        WHERE a.fn_hash = $1 AND a.name = $2 AND a.type = $3 AND a.value BETWEEN $4 AND $5 LIMIT 10001) x"
@@ -540,7 +540,7 @@ statements! {
     // 0.3.2: a version slice's values.
     VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.ns, c.fn, c.fn_hash,
                                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
-                                           WHERE a.cell_id = c.cell_id ORDER BY a.name)
+                                           WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key
                                FROM versions v JOIN receipts r ON r.hash = v.receipt_hash JOIN cells c ON c.cell_id = v.cell_id
                               WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.tx <= $4 AND r.asof <= $4
                                 AND r.value_type <> '' ORDER BY v.tx"

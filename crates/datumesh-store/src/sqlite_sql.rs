@@ -129,12 +129,12 @@ macro_rules! member_cols {
 }
 
 /// A member's value columns: (tx, receipt_hash, asof, value_type, value, cell_id,
-/// arguments, ns, fn, fn_hash).
+/// arguments, ns, fn, fn_hash, sort_key).
 macro_rules! value_cols {
     () => {
         "v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                                                              FROM cell_args a WHERE a.cell_id = c.cell_id),
-         c.ns, c.fn, c.fn_hash"
+         c.ns, c.fn, c.fn_hash, c.sort_key"
     };
 }
 
@@ -420,11 +420,12 @@ statements! {
     VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', r.bytes FROM versions v CROSS JOIN receipts r
                        WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND v.tx <= ?4
                          AND r.hash = v.receipt_hash AND r.asof <= ?4 ORDER BY v.tx";
-    // Its values: (tx, receipt_hash, asof, value_type, value, cell_id, arguments, ns, fn, fn_hash).
+    // Its values: (tx, receipt_hash, asof, value_type, value, cell_id, arguments, ns, fn, fn_hash,
+    // sort_key).
     VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.cell_id,
                                     (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                        FROM cell_args a WHERE a.cell_id = c.cell_id),
-                                    c.ns, c.fn, c.fn_hash
+                                    c.ns, c.fn, c.fn_hash, c.sort_key
                                FROM versions v CROSS JOIN receipts r CROSS JOIN cells c
                               WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND v.tx <= ?4
                                 AND r.hash = v.receipt_hash AND r.asof <= ?4
@@ -441,6 +442,12 @@ statements! {
     SliceMembersDrive = slice_members!(member_cols!(), from_drive!(), where_drive!());
     SliceValuesAll = slice_members!(value_cols!(), from_all!(), where_all!());
     SliceValuesDrive = slice_members!(value_cols!(), from_drive!(), where_drive!());
+    // A page of a slice in key order (CONTRACT-0.5.1 S2): the candidates of the function's
+    // index on (fn_hash, ns, fn, sort_key), from the first key or after `:after` (exclusive).
+    SlicePageFirst = concat!(slice_members!(value_cols!(), "cells c INDEXED BY cells_sort_key", where_all!()),
+                             " ORDER BY c.sort_key LIMIT :limit");
+    SlicePageAfter = concat!(slice_members!(value_cols!(), "cells c INDEXED BY cells_sort_key", "c.sort_key > :after"),
+                             " ORDER BY c.sort_key LIMIT :limit");
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbe = "SELECT count(*) FROM (SELECT 1 FROM cell_args
                    WHERE fn_hash = ?1 AND name = ?2 AND type = ?3 AND sort_key BETWEEN ?4 AND ?5 LIMIT 10001)";

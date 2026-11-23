@@ -420,6 +420,7 @@ pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice
 pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
+pub fn datumesh_store::PgStore::slice_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&[u8]>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
@@ -471,6 +472,7 @@ pub fn datumesh_store::SliceMember::hash<__H: core::hash::Hasher>(&self, &mut __
 impl core::marker::StructuralPartialEq for datumesh_store::SliceMember
 #[non_exhaustive] pub struct datumesh_store::SliceValue
 pub datumesh_store::SliceValue::cell: datumesh_core::model::Cell
+pub datumesh_store::SliceValue::sort_key: alloc::vec::Vec<u8>
 pub datumesh_store::SliceValue::value: datumesh_core::model::Scalar
 pub datumesh_store::SliceValue::version: datumesh_store::Version
 impl core::clone::Clone for datumesh_store::SliceValue
@@ -584,6 +586,7 @@ pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::s
 pub fn datumesh_store::SqliteStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
+pub fn datumesh_store::SqliteStore::slice_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&[u8]>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
@@ -729,6 +732,7 @@ pub fn datumesh_store::Store::slice_changed_after(&self, &datumesh_core::slice::
 pub fn datumesh_store::Store::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::Store::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
+pub fn datumesh_store::Store::slice_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&[u8]>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::Store::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::Store::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::Store::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
@@ -818,6 +822,7 @@ pub fn datumesh_store::PgStore::slice_changed_after(&self, &datumesh_core::slice
 pub fn datumesh_store::PgStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::PgStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
+pub fn datumesh_store::PgStore::slice_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&[u8]>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::PgStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
@@ -907,6 +912,7 @@ pub fn datumesh_store::SqliteStore::slice_changed_after(&self, &datumesh_core::s
 pub fn datumesh_store::SqliteStore::slice_dependents(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_entries(&self, &str) -> datumesh_store::Result<alloc::vec::Vec<alloc::string::String>>
 pub fn datumesh_store::SqliteStore::slice_members(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
+pub fn datumesh_store::SqliteStore::slice_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&[u8]>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values(&self, &datumesh_core::slice::Slice, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_limit(&self, &datumesh_core::slice::Slice, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
 pub fn datumesh_store::SqliteStore::slice_values_page(&self, &datumesh_core::slice::Slice, &str, core::option::Option<&str>, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceValue>>
@@ -926,5 +932,6 @@ pub fn datumesh_store::SqliteStore::version_asof(&self, &str, &str) -> datumesh_
 pub fn datumesh_store::SqliteStore::versions(&self, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Version>>
 pub fn datumesh_store::SqliteStore::versions_between(&self, &str, &str, &str, &str) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::SliceMember>>
 pub fn datumesh_store::SqliteStore::versions_limit(&self, &str, &str, &str, usize) -> datumesh_store::Result<alloc::vec::Vec<datumesh_store::Version>>
+pub fn datumesh_store::sort_key(&[(&str, &str, &str)]) -> alloc::vec::Vec<u8>
 pub type datumesh_store::Facets = alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::vec::Vec<alloc::string::String>>
 pub type datumesh_store::Result<T> = core::result::Result<T, datumesh_store::Error>

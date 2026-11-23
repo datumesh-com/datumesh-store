@@ -180,3 +180,100 @@ mod tests {
         }
     }
 }
+
+/// The sort key of a cell (CONTRACT-0.5.1 S1) is the concatenation, over its arguments in
+/// ascending name order, of [`sort_item`]: each part self-delimiting, so that the bytes compare
+/// as [`cmp_keys`] compares the members' `type:value` items. A number is a sign byte (1
+/// negative, 2 zero, 3 positive), then its exponent `e` (`0.d1d2... x 10^e`) plus 2^31 in four
+/// bytes, then its significant digits and a 0 byte; a negative number's bytes after the sign are
+/// complemented, which reverses their order. Any other type is its text (a 0 byte written as 0
+/// 0xFF) and a 0 0 terminator. Cells of one function have the same argument names, so a fixed
+/// argument adds the same bytes to every member's key.
+/// One argument's part of the key: its type's name, then its value (see above). Also the SQLite
+/// function `datumesh_sort_item`, which the cells' trigger joins.
+pub(crate) fn sort_item(ty: &str, value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    push_escaped(&mut out, ty.as_bytes());
+    if ty == "number" {
+        push_decimal(&mut out, value);
+    } else {
+        push_escaped(&mut out, value.as_bytes());
+    }
+    out
+}
+
+fn push_escaped(out: &mut Vec<u8>, text: &[u8]) {
+    for &b in text {
+        if b == 0 {
+            out.extend([0, 0xff]);
+        } else {
+            out.push(b);
+        }
+    }
+    out.extend([0, 0]);
+}
+
+/// A canonical decimal (SPEC 3.1) as its sort bytes (see [`sort_item`]).
+fn push_decimal(out: &mut Vec<u8>, lexical: &str) {
+    let (negative, magnitude) = match lexical.strip_prefix('-') {
+        Some(m) => (true, m),
+        None => (false, lexical),
+    };
+    let (int, frac) = magnitude.split_once('.').unwrap_or((magnitude, ""));
+    let all = format!("{int}{frac}");
+    let significant = all.trim_start_matches('0');
+    let digits = significant.trim_end_matches('0');
+    if digits.is_empty() {
+        out.push(2);
+        return;
+    }
+    let zeros = all.len() - significant.len();
+    let exponent = int.len() as i64 - zeros as i64;
+    let mut body = u32::try_from(exponent + (1i64 << 31)).unwrap_or(0).to_be_bytes().to_vec();
+    body.extend(digits.bytes());
+    body.push(0);
+    if negative {
+        out.push(1);
+        out.extend(body.iter().map(|b| !b));
+    } else {
+        out.push(3);
+        out.extend(body);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::sort_item;
+
+    /// A cell's key: its arguments' parts in name order.
+    fn cell_sort_key<const N: usize>(args: [(&str, &str, &str); N]) -> Vec<u8> {
+        let mut sorted = args.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        sorted.iter().flat_map(|(_, t, v)| sort_item(t, v)).collect()
+    }
+
+    fn key(v: &str) -> Vec<u8> {
+        cell_sort_key([("k", "number", v)])
+    }
+
+    #[test]
+    fn numbers_sort_as_decimals() {
+        let order = [
+            "-100", "-10.5", "-10", "-1.5", "-1", "-0.5", "-0.001", "0", "0.001", "0.5", "1", "1.5", "2", "10", "10.5",
+            "100",
+        ];
+        for w in order.windows(2) {
+            assert!(key(w[0]) < key(w[1]), "{} < {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn a_prefix_sorts_first() {
+        let a = cell_sort_key([("a", "string", "a"), ("b", "string", "z")]);
+        let b = cell_sort_key([("a", "string", "ab"), ("b", "string", "")]);
+        assert!(a < b);
+        let n1 = cell_sort_key([("a", "number", "1"), ("b", "string", "a")]);
+        let n2 = cell_sort_key([("a", "number", "12"), ("b", "string", "")]);
+        assert!(n1 < n2);
+    }
+}

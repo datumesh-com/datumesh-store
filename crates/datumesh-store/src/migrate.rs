@@ -83,6 +83,7 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "0014_withdrawals_and_closed_names.sql",
         sql: include_str!("../migrations/0014_withdrawals_and_closed_names.sql"),
     },
+    Migration { version: 15, name: "0015_sort_key.sql", sql: include_str!("../migrations/0015_sort_key.sql") },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -299,7 +300,19 @@ pub mod sqlite {
             name: "0010_withdrawals_and_closed_names.sql",
             sql: include_str!("../migrations/sqlite/0010_withdrawals_and_closed_names.sql"),
         },
+        Migration {
+            version: 11,
+            name: "0011_sort_key.sql",
+            sql: include_str!("../migrations/sqlite/0011_sort_key.sql"),
+        },
     ];
+
+    /// The sort key of the cells already stored (migration 11, after its SQL): each cell's key
+    /// from its arguments, by the registered `datumesh_sort_item` (the cell_args trigger does
+    /// the same for each new argument).
+    const SORT_KEY_BACKFILL: &str = "UPDATE cells SET sort_key = coalesce(unhex((
+        SELECT group_concat(hex(datumesh_sort_item(a.type, a.value)), '' ORDER BY a.name)
+          FROM cell_args a WHERE a.cell_id = cells.cell_id)), x'');";
 
     const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -346,6 +359,9 @@ pub mod sqlite {
                     None => {}
                 }
                 c.execute_batch(m.sql).db()?;
+                if m.version == 11 {
+                    c.execute_batch(SORT_KEY_BACKFILL).db()?;
+                }
                 c.execute(
                     "INSERT INTO datumesh_schema_migrations (version, name, checksum) VALUES (?1, ?2, ?3)",
                     rusqlite::params![m.version, m.name, m.checksum()],
@@ -428,6 +444,7 @@ pub mod sqlite {
     /// has in addition; empty when they agree.
     pub fn check(live: &SqliteStore) -> Result<Vec<String>> {
         let scratch = Connection::open_in_memory().db()?;
+        crate::sqlite::register_text_functions(&scratch)?;
         apply_conn(&scratch)?;
         let mut want = catalog_conn(&scratch)?;
         let mut have = catalog(live)?;

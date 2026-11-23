@@ -515,9 +515,16 @@ fn exists(c: &Connection, q: L, key: &str) -> Result<bool> {
 /// and `datumesh_value_total` give a row's total score in tens for a query (see `Words` and
 /// `field_score`), or NULL when a word is in none of the row's fields. The search orders and
 /// cuts by them in SQL.
-fn register_text_functions(c: &Connection) -> Result<()> {
+pub(crate) fn register_text_functions(c: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    // The sort key's part of one argument (0.6.4): the cells' trigger joins these parts.
+    c.create_scalar_function("datumesh_sort_item", 2, flags, |ctx| {
+        let ty: String = ctx.get(0)?;
+        let value: String = ctx.get(1)?;
+        Ok(crate::slices::sort_item(&ty, &value))
+    })
+    .db()?;
     c.create_scalar_function("datumesh_entry_total", 5, flags, |ctx| {
         let Some(words) = Words::new(&ctx.get::<String>(0)?) else { return Ok(None::<i64>) };
         let name: String = ctx.get(1)?;
@@ -2034,6 +2041,20 @@ impl Store for SqliteStore {
         self.run("slice_values_page", |c| values_page(&p, c, asof, after_cell_id, limit))
     }
 
+    fn slice_page(&self, slice: &Slice, asof: &str, after: Option<&[u8]>, limit: usize) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Err(Error::Unsupported("a version slice has no key order to page by".into()));
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let p = Pattern::of(&v)?;
+        self.run("slice_page", |c| slice_page_rows(&p, c, asof, after, limit))
+    }
+
     fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
         check_instant(asof, "asof")?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -2265,16 +2286,28 @@ impl Store for SqliteStore {
 }
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,
-/// arguments, ns, fn, fn_hash).
-type ValueColumns = (String, String, String, String, String, String, String, String, String, String);
+/// arguments, ns, fn, fn_hash, sort_key).
+type ValueColumns = (String, String, String, String, String, String, String, String, String, String, Vec<u8>);
 
 fn value_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueColumns> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+    ))
 }
 
 /// A member's value and cell, rebuilt from the typed-argument index (with its arguments).
 fn value_of(c: ValueColumns) -> Result<(SliceValue, Args)> {
-    let (tx, receipt_hash, asof, ty, value, cell_id, args, ns, fn_name, fn_hash) = c;
+    let (tx, receipt_hash, asof, ty, value, cell_id, args, ns, fn_name, fn_hash, sort_key) = c;
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
     let args = args_of(&args)?;
     let cell = Cell { args: args.clone(), fn_hash, fn_name, ns };
@@ -2284,6 +2317,7 @@ fn value_of(c: ValueColumns) -> Result<(SliceValue, Args)> {
             version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false },
             value: Scalar::from_lexical(ty, &value)?,
             cell,
+            sort_key,
         },
         args,
     ))
@@ -2449,6 +2483,37 @@ fn values_page(p: &Pattern, c: &Connection, asof: &str, after: Option<&str>, lim
     binds.push((":after".to_string(), after.map_or(SqlValue::Null, |a| SqlValue::Text(a.to_string()))));
     binds.push((":limit".to_string(), SqlValue::Integer(limit)));
     let mut st = c.prepare(&sql).db()?;
+    for (name, value) in &binds {
+        if let Some(i) = st.parameter_index(name).db()? {
+            st.raw_bind_parameter(i, value).db()?;
+        }
+    }
+    let mut rows = st.raw_query();
+    let mut out = Vec::new();
+    while let Some(r) = rows.next().db()? {
+        out.push(value_of(value_columns(r).db()?)?.0);
+    }
+    Ok(out)
+}
+
+/// A page of the members of a slice of cells in sort-key order (CONTRACT-0.5.1 S2): from the
+/// first key, or after `after` (exclusive), at most `limit`; the statement reads the index of
+/// the function's cells on (fn_hash, ns, fn, sort_key), and withdrawn members do not count.
+fn slice_page_rows(
+    p: &Pattern,
+    c: &Connection,
+    asof: &str,
+    after: Option<&[u8]>,
+    limit: i64,
+) -> Result<Vec<SliceValue>> {
+    let base = if after.is_some() { L::SlicePageAfter } else { L::SlicePageFirst };
+    let mut binds: Vec<(String, SqlValue)> =
+        params(p, asof, None).into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    binds.push((":limit".to_string(), SqlValue::Integer(limit)));
+    if let Some(a) = after {
+        binds.push((":after".to_string(), SqlValue::Blob(a.to_vec())));
+    }
+    let mut st = c.prepare_cached(base.sql()).db()?;
     for (name, value) in &binds {
         if let Some(i) = st.parameter_index(name).db()? {
             st.raw_bind_parameter(i, value).db()?;

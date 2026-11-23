@@ -2,6 +2,16 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.6.4
+
+Additive (CONTRACT-0.5.1 S1 to S3; migrations 15 (PostgreSQL) and 11 (SQLite)). A page of a slice in key order, and the bindings of a class by its hash.
+
+- **A stored sort key per cell.** `cells.sort_key` (bytea on PostgreSQL, BLOB on SQLite, never NULL: empty for a cell with no arguments) is the cell's arguments in ascending name order, each as its type's name and then its value, encoded so that the bytes compare as the slice order does: a number by value (a sign byte, then the exponent, the digits and a terminator; a negative's bytes complemented), any other type by its bytes, with a shorter prefix first. The order is the one `slice_values` gives. `SliceValue` gains the public field `sort_key: Vec<u8>` (`SliceValue` is `#[non_exhaustive]`); `slice_values` and the other value readers fill it.
+- **`Store::slice_page(slice, asof, after, limit)`**: the members whose sort key is after `after` (exclusive; all when `None`), in key order, at most `limit`, with the membership of `slice_values` (a withdrawn or not-yet-present member is left out and does not count against `limit`). A walk of pages, each from the last member's key, gives `slice_values` member for member. A version slice has no key order: `Error::Unsupported`. The trait method has a default (built on `slice_values`); both stores read the index `cells (fn_hash, ns, fn, sort_key)`.
+- **Class bindings by hash.** Index `class_bindings (class_hash, class_name, tx)`.
+- **Migrations.** PostgreSQL 15: the cells-insert trigger (still counting cells per function, as migration 12) computes the key; the rows already there are filled in SQL. SQLite 11: a trigger on `cell_args` refreshes the cell's key after each argument; the rows already there are filled in SQL. On SQLite, `cells` keeps its append-only guard for its identity columns; the key column alone may be filled, once per row, by these migrations and their trigger.
+- The SQLite connections register the scalar function `datumesh_sort_item(type, value)` (the key's part of one argument), which the trigger uses.
+
 ## 0.6.3
 
 The content of 0.6.0. 0.6.2's tag stopped on the CI step that imports the whole vector directory (receipt/relayed-full beside stored-number again); the step now leaves relayed-full out. Earlier: 0.6.0's tag stopped on a conformance test recomputing the new withdrawal vector of spec-0.7.0 (the test now skips withdrawals); 0.6.1's on the TLS command test importing receipt/relayed-full beside stored-number (one cell, one tx) and on two items unused without the `sqlite` feature. The tags v0.6.0, v0.6.1 and v0.6.2 stay where they are.

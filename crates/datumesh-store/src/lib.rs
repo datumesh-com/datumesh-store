@@ -131,6 +131,17 @@ pub use pool::PoolOptions;
 #[cfg(feature = "sqlite")]
 pub use sqlite::{SqliteOptions, SqliteStore};
 
+/// The sort key of a cell (CONTRACT-0.5.1 S1; SPEC 5.6 and 15.13): its arguments as
+/// `(name, type, lexical form)`, in ascending name order, encoded as `cells.sort_key` is stored
+/// (the same bytes on PostgreSQL and SQLite) and as [`SliceValue::sort_key`] returns them. Keys
+/// compare as bytes. An empty `args` gives the empty key of a cell with no arguments. Since
+/// 0.6.4.
+pub fn sort_key(args: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut sorted: Vec<&(&str, &str, &str)> = args.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    sorted.iter().flat_map(|(_, ty, value)| slices::sort_item(ty, value)).collect()
+}
+
 /// A version of a cell: from transaction time `tx` on, the cell's value is that of the
 /// receipt `receipt_hash`, which states it as of `asof`.
 ///
@@ -193,6 +204,9 @@ pub struct SliceValue {
     /// The member's cell, with its arguments (from the store's typed-argument index; equal
     /// to the receipt's `cell`, and `cell.id()` is `version.cell_id`).
     pub cell: Cell,
+    /// The member's sort key (the cell's, see [`Store::slice_page`]): the byte order of the
+    /// keys is the order of [`Store::slice_values`]. Since 0.6.4.
+    pub sort_key: Vec<u8>,
 }
 
 /// A name binding: from transaction time `tx` on, a fully qualified function name means the
@@ -1047,6 +1061,24 @@ pub trait Store: Resolver + sealed::Sealed {
             }
         }
         Ok(out)
+    }
+    /// A page of the members of `slice` as of `asof` in sort-key order (CONTRACT-0.5.1 S2):
+    /// those whose [`SliceValue::sort_key`] is greater than `after` (exclusive; all of them
+    /// when `None`), at most `limit`, with the same membership as
+    /// [`slice_values`](Store::slice_values) (fixed arguments, ranges, the latest version as of
+    /// `asof`, withdrawals left out), so that a walk of pages, each from the last member's key,
+    /// gives `slice_values` member for member. A version slice has no key order to page by:
+    /// [`Error::Unsupported`]. The default takes all of `slice_values` and pages them; the
+    /// stores read the index of the function's cells. Since 0.6.4.
+    fn slice_page(&self, slice: &Slice, asof: &str, after: Option<&[u8]>, limit: usize) -> Result<Vec<SliceValue>> {
+        if slice.is_version_slice() {
+            return Err(Error::Unsupported("a version slice has no key order to page by".into()));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let values = self.slice_values(slice, asof)?;
+        Ok(values.into_iter().filter(|v| after.is_none_or(|a| v.sort_key.as_slice() > a)).take(limit).collect())
     }
     /// A page of the members of `slice` as of `asof`, by cell id ascending: those whose cell
     /// id is after `after_cell_id` (exclusive, when given), at most `limit`, with one value

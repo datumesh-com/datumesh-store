@@ -216,7 +216,13 @@ fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
     let args = cell_args(r.try_get::<_, Vec<String>>(8).db()?)?;
     let cell = Cell { args, fn_hash: r.try_get(7).db()?, fn_name: r.try_get(6).db()?, ns: r.try_get(5).db()? };
-    Ok(SliceValue { version: valued_version_row(r, cell_id)?, value: Scalar::from_lexical(ty, &value)?, cell })
+    let sort_key: Vec<u8> = r.try_get(9).db()?;
+    Ok(SliceValue {
+        version: valued_version_row(r, cell_id)?,
+        value: Scalar::from_lexical(ty, &value)?,
+        cell,
+        sort_key,
+    })
 }
 
 /// A cell from a row of (ns, fn, fn_hash, "name:type:value" of each argument).
@@ -2005,6 +2011,20 @@ impl Store for PgStore {
         })
     }
 
+    fn slice_page(&self, slice: &Slice, asof: &str, after: Option<&[u8]>, limit: usize) -> Result<Vec<SliceValue>> {
+        check_instant(asof, "asof")?;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Err(Error::Unsupported("a version slice has no key order to page by".into()));
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_page", |c| pattern.values_by_key(c, asof, after, limit))
+    }
+
     fn slice_values_limit(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<SliceValue>> {
         check_instant(asof, "asof")?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
@@ -2314,7 +2334,7 @@ impl Pattern {
     /// The members' values as of `asof`, in key order.
     fn values(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceValue>> {
         let qs = [Q::SliceValuesAll, Q::SliceValuesText, Q::SliceValuesNum];
-        self.rows(c, asof, qs, 9, value_row, |m| &m.version.cell_id)
+        self.rows(c, asof, qs, 10, value_row, |m| &m.version.cell_id)
     }
 
     /// The members' values as of `asof`, in key order, at most `limit`: the statement of
@@ -2374,7 +2394,56 @@ impl Pattern {
         let rows = c.client.query(&st, &params).db()?;
         rows.iter()
             .map(|r| {
-                let cell_id: String = r.try_get(9).db()?;
+                let cell_id: String = r.try_get(10).db()?;
+                value_row(r, &cell_id)
+            })
+            .collect()
+    }
+
+    /// A page of the members' values as of `asof` in sort-key order, after `after` (exclusive),
+    /// at most `limit` (CONTRACT-0.5.1 S2): the statement of `values` with the key order and the
+    /// LIMIT in SQL. Its candidates are the function's cells in the index on (fn_hash, ns, fn,
+    /// sort_key), so withdrawn and absent members are filtered before the LIMIT counts.
+    fn values_by_key(&self, c: &mut Conn, asof: &str, after: Option<&[u8]>, limit: i64) -> Result<Vec<SliceValue>> {
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let (after_sql, limit_at) = if after.is_some() { (" AND c.sort_key > $16", 17) } else { ("", 16) };
+        let sql = format!("{}{} ORDER BY c.sort_key LIMIT ${limit_at}", Q::SliceValuesAll.sql(), after_sql);
+        let mut param_types = Q::SliceValuesAll.types().to_vec();
+        if after.is_some() {
+            param_types.push(postgres::types::Type::BYTEA);
+        }
+        param_types.push(postgres::types::Type::INT8);
+        let st = c.client.prepare_typed(sql.as_str(), &param_types).db()?;
+        // The drive's parameters are unused here (the statement reads every cell of the function).
+        let (d_name, d_ty, d_lo, d_hi) = ("", "", "", "");
+        let after_bytes: &[u8] = after.unwrap_or(&[]);
+        let mut params: Vec<&(dyn postgres::types::ToSql + Sync)> = vec![
+            &self.fn_hash,
+            &self.ns,
+            &self.fn_name,
+            &nargs,
+            &asof,
+            &names,
+            &kinds,
+            &types,
+            &los,
+            &his,
+            &keys,
+            &d_name,
+            &d_ty,
+            &d_lo,
+            &d_hi,
+        ];
+        if after.is_some() {
+            params.push(&after_bytes);
+        }
+        params.push(&limit);
+        let rows = c.client.query(&st, &params).db()?;
+        rows.iter()
+            .map(|r| {
+                let cell_id: String = r.try_get(10).db()?;
                 value_row(r, &cell_id)
             })
             .collect()
@@ -2421,7 +2490,7 @@ impl Pattern {
         let rows = c.client.query(&st, &params).db()?;
         rows.iter()
             .map(|r| {
-                let cell_id: String = r.try_get(9).db()?;
+                let cell_id: String = r.try_get(10).db()?;
                 value_row(r, &cell_id)
             })
             .collect()
