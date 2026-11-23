@@ -202,6 +202,10 @@ fn stored_vectors_recompute_through_the_store(b: Backend) {
         if desc.get("code").and_then(|c| c.get("lang")).and_then(|l| l.as_str()) != Some("stored") {
             continue;
         }
+        // A withdrawal has no inputs: step 7 never runs for it (spec-0.7.0, 10.1), so it has nothing to recompute.
+        if common::is_withdrawal(&input(&v)) {
+            continue;
+        }
         let id = str_of(&v, "id");
         let db = TestDb::migrated(b);
         let s = db.bare_store();
