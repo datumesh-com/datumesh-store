@@ -319,7 +319,7 @@ fn a_fresh_store_has_the_counter_tables_empty(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.last().unwrap(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
     };
-    assert_eq!(last.version, if b == Backend::Pg { 14 } else { 10 });
+    assert_eq!(last.version, if b == Backend::Pg { 15 } else { 11 });
     assert_eq!(db.count("datumesh_schema_migrations"), last.version as i64);
 }
 

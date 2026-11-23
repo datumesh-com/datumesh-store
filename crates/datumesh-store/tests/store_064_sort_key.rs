@@ -70,12 +70,19 @@ fn keys_ascend(vs: &[SliceValue]) {
     }
 }
 
-/// A deterministic shuffle: index order i * 7 mod n (n coprime to 7), so insertion order is
+/// A deterministic shuffle: index order i * stride mod n (stride coprime to n, from 7 up), so insertion order is
 /// neither key order nor its reverse.
 fn shuffled<T: Clone>(v: &[T]) -> Vec<T> {
     let n = v.len();
-    assert!(n % 7 != 0);
-    (0..n).map(|i| v[(i * 7) % n].clone()).collect()
+    // A stride coprime with n makes i -> i * stride mod n a permutation.
+    let gcd = |mut a: usize, mut b: usize| {
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        a
+    };
+    let stride = (7..).find(|&k| gcd(k, n.max(1)) == 1).unwrap();
+    (0..n).map(|i| v[(i * stride) % n].clone()).collect()
 }
 
 /// One-argument function `f(k: <t>)` with the cells `ks` (lexical forms, given in any order);
