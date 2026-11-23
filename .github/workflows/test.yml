@@ -47,9 +47,13 @@ jobs:
           cargo run -q -p datumesh-store-cli --locked -- migrate
           cargo run -q -p datumesh-store-cli --locked -- migrate
           cargo run -q -p datumesh-store-cli --locked -- migrate --check
+      # The spec vectors are independent: receipt/relayed-full and receipt/stored-number are two
+      # stored versions of one cell at one tx (since spec-0.6.0), which one store cannot hold
+      # (NotLater). The import takes every vector but relayed-full.
       - name: import the spec vectors, export
         run: |
-          cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
+          mkdir -p "$RUNNER_TEMP/vectors" && cp -r spec/vectors/. "$RUNNER_TEMP/vectors/" && rm "$RUNNER_TEMP/vectors/receipt/relayed-full.json"
+          cargo run -q -p datumesh-store-cli --locked -- import "$RUNNER_TEMP/vectors"
           cargo run -q -p datumesh-store-cli --locked -- export > export.jsonl
           wc -l export.jsonl
       # The same on a SQLite file (DATABASE_URL a path, then a sqlite: URL).
@@ -60,7 +64,7 @@ jobs:
           cargo run -q -p datumesh-store-cli --locked -- migrate
           cargo run -q -p datumesh-store-cli --locked -- migrate
           DATABASE_URL="sqlite:$DATABASE_URL" cargo run -q -p datumesh-store-cli --locked -- migrate --check
-          cargo run -q -p datumesh-store-cli --locked -- import spec/vectors
+          cargo run -q -p datumesh-store-cli --locked -- import "$RUNNER_TEMP/vectors"
           cargo run -q -p datumesh-store-cli --locked -- export > export-sqlite.jsonl
           # The same lines but the namespaces' validated_at (the time of each import).
           cmp <(grep -v '^{"namespace"' export.jsonl) <(grep -v '^{"namespace"' export-sqlite.jsonl)
