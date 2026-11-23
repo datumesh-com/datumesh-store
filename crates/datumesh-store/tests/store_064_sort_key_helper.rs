@@ -71,9 +71,10 @@ fn one(name: &'static str, t: Type, vals: &[String]) -> Vec<Vec<Arg>> {
 }
 
 fn single_argument_cells_have_the_helpers_key(b: Backend) {
-    let mut nums: Vec<String> = ["0", "1", "-1", "0.5", "-0.5", "2", "-2", "9", "10", "-10", "10.5", "99", "100", "-100", "0.001", "-0.001"]
-        .map(String::from)
-        .to_vec();
+    let mut nums: Vec<String> =
+        ["0", "1", "-1", "0.5", "-0.5", "2", "-2", "9", "10", "-10", "10.5", "99", "100", "-100", "0.001", "-0.001"]
+            .map(String::from)
+            .to_vec();
     nums.push(format!("1{}", "0".repeat(100)));
     nums.push(format!("-1{}", "0".repeat(100)));
     nums.push(format!("0.{}1", "0".repeat(124)));
@@ -94,14 +95,18 @@ fn single_argument_cells_have_the_helpers_key(b: Backend) {
     }
     let n = check(b, &[("k", Type::Number)], one("k", Type::Number, &nums));
     assert!(n > 50);
-    let dates: Vec<String> = ["0001-01-01", "1999-12-31", "2000-01-01", "2024-02-29", "2024-03-01", "9999-12-31"].map(String::from).to_vec();
+    let dates: Vec<String> =
+        ["0001-01-01", "1999-12-31", "2000-01-01", "2024-02-29", "2024-03-01", "9999-12-31"].map(String::from).to_vec();
     check(b, &[("k", Type::Date)], one("k", Type::Date, &dates));
-    let instants: Vec<String> = ["0001-01-01T00:00:00.000000Z", "2024-03-15T16:00:00.000001Z", "9999-12-31T23:59:59.999999Z"]
-        .map(String::from)
-        .to_vec();
+    let instants: Vec<String> =
+        ["0001-01-01T00:00:00.000000Z", "2024-03-15T16:00:00.000001Z", "9999-12-31T23:59:59.999999Z"]
+            .map(String::from)
+            .to_vec();
     check(b, &[("k", Type::Instant)], one("k", Type::Instant, &instants));
     let strings: Vec<String> =
-        ["", " ", "A", "Z", "a", "a b", "aa", "ab", "abc", "b", "é", "Ünï", "日本", "\u{1F600}", "x\"y\\z"].map(String::from).to_vec();
+        ["", " ", "A", "Z", "a", "a b", "aa", "ab", "abc", "b", "é", "Ünï", "日本", "\u{1F600}", "x\"y\\z"]
+            .map(String::from)
+            .to_vec();
     check(b, &[("k", Type::String)], one("k", Type::String, &strings));
     check(b, &[("k", Type::Boolean)], one("k", Type::Boolean, &["false".into(), "true".into()]));
 }

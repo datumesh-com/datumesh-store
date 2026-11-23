@@ -32,7 +32,6 @@ use datumesh_store::{CellWrite, SliceValue};
 
 const T: &str = "2024-01-01T00:00:00.000000Z";
 const END: &str = "9999-12-31T23:59:59.999999Z";
-const BIG: usize = 1_000_000;
 
 fn slice_of(h: &str, f: &str, args: &[(&str, &str)]) -> datumesh_core::Slice {
     let a: Vec<String> = args.iter().map(|(n, s)| format!(r#""{n}":{s}"#)).collect();
@@ -125,8 +124,10 @@ fn two_open_world(db: &TestDb) -> (TStore, String, Vec<String>) {
     // Insert in a scrambled order.
     let n = rows.len();
     let scrambled: Vec<&(i64, String, String)> = (0..n).map(|i| &rows[(i * 7919) % n]).collect();
-    let cells: Vec<Vec<(&str, Scalar)>> =
-        scrambled.iter().map(|(a, b, _)| vec![("a", sc(Type::Number, &hundredths(*a))), ("b", sc(Type::String, b))]).collect();
+    let cells: Vec<Vec<(&str, Scalar)>> = scrambled
+        .iter()
+        .map(|(a, b, _)| vec![("a", sc(Type::Number, &hundredths(*a))), ("b", sc(Type::String, b))])
+        .collect();
     let values: Vec<String> = scrambled.iter().map(|r| r.2.clone()).collect();
     put_all(&s, "f", &h, &cells, &values);
     let mut sorted = rows.clone();
@@ -175,8 +176,10 @@ fn fixed_open_world(db: &TestDb) -> (TStore, String, Vec<Vec<(i64, String)>>) {
     }
     let n = rows.len();
     let scrambled: Vec<&(String, i64, String)> = (0..n).map(|i| &rows[(i * 7919) % n]).collect();
-    let cells: Vec<Vec<(&str, Scalar)>> =
-        scrambled.iter().map(|(g, n, _)| vec![("g", sc(Type::String, g)), ("n", sc(Type::Number, &hundredths(*n)))]).collect();
+    let cells: Vec<Vec<(&str, Scalar)>> = scrambled
+        .iter()
+        .map(|(g, n, _)| vec![("g", sc(Type::String, g)), ("n", sc(Type::Number, &hundredths(*n)))])
+        .collect();
     let values: Vec<String> = scrambled.iter().map(|r| r.2.clone()).collect();
     put_all(&s, "f", &h, &cells, &values);
     (s, h, per_group)
@@ -292,7 +295,9 @@ fn quote_receipt(quote: &str, value: &str, tx: &str) -> (String, Vec<u8>) {
     let base = Receipt::from_json(&input(&v)).unwrap();
     let text = String::from_utf8(base.cell().canonical()).unwrap();
     assert!(text.contains(r#""value":"USD""#));
-    let cell = datumesh_core::Cell::from_json(text.replace(r#""value":"USD""#, &format!(r#""value":"{quote}""#)).as_bytes()).unwrap();
+    let cell =
+        datumesh_core::Cell::from_json(text.replace(r#""value":"USD""#, &format!(r#""value":"{quote}""#)).as_bytes())
+            .unwrap();
     let r = ReceiptBuilder::new()
         .cell(cell.clone())
         .value(sc(Type::Number, value))

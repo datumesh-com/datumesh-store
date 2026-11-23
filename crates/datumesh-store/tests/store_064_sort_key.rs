@@ -148,9 +148,10 @@ fn numbers_are_ordered_by_value_not_by_text(b: Backend) {
 }
 
 fn dates_are_ordered_chronologically(b: Backend) {
-    let want: Vec<String> = ["0001-01-01", "1999-12-31", "2000-01-01", "2024-02-29", "2024-03-01", "2024-12-31", "9999-12-31"]
-        .map(String::from)
-        .to_vec();
+    let want: Vec<String> =
+        ["0001-01-01", "1999-12-31", "2000-01-01", "2024-02-29", "2024-03-01", "2024-12-31", "9999-12-31"]
+            .map(String::from)
+            .to_vec();
     single_arg_order(b, Type::Date, shuffled(&want), want.clone());
     let mut rev = want.clone();
     rev.reverse();
@@ -173,10 +174,29 @@ fn instants_are_ordered_chronologically(b: Backend) {
 fn strings_are_ordered_by_bytes_under_c_collation(b: Backend) {
     // Byte order, which is not any locale's: capitals before lower case, a space before both,
     // a prefix before its extensions, and non-ASCII (UTF-8 lead bytes >= 0xC3) after ASCII.
-    let mut want: Vec<String> =
-        ["", " ", "-", "0", "A", "B", "Z", "_", "a", "a b", "aa", "ab", "abc", "b", "z", "é", "Ünï", "日本", "\u{1F600}"]
-            .map(String::from)
-            .to_vec();
+    let mut want: Vec<String> = [
+        "",
+        " ",
+        "-",
+        "0",
+        "A",
+        "B",
+        "Z",
+        "_",
+        "a",
+        "a b",
+        "aa",
+        "ab",
+        "abc",
+        "b",
+        "z",
+        "é",
+        "Ünï",
+        "日本",
+        "\u{1F600}",
+    ]
+    .map(String::from)
+    .to_vec();
     want.sort_by(|x, y| x.as_bytes().cmp(y.as_bytes()));
     assert_eq!(want.first().map(String::as_str), Some(""));
     assert!(want.iter().position(|x| x == "Z") < want.iter().position(|x| x == "a"));
@@ -241,9 +261,19 @@ fn mixed_multi_argument_keys_order_by_name_then_by_type(b: Backend) {
     assert_eq!(got, order);
     keys_ascend(&vs);
     // Fixing arguments keeps the order of the open ones (and the members' keys are the same).
-    let fixed = slice_of(&h, "f", &[("a", r#""*""#), ("b", r#"{"type":"string","value":"ab"}"#), ("c", r#""*""#), ("d", r#"{"type":"date","value":"2024-01-01"}"#)]);
+    let fixed = slice_of(
+        &h,
+        "f",
+        &[
+            ("a", r#""*""#),
+            ("b", r#"{"type":"string","value":"ab"}"#),
+            ("c", r#""*""#),
+            ("d", r#"{"type":"date","value":"2024-01-01"}"#),
+        ],
+    );
     let fv = s.slice_page(&fixed, END, None, BIG).unwrap();
-    let want: Vec<usize> = order.iter().copied().filter(|&i| tuples[i].1 == "ab" && tuples[i].3 == "2024-01-01").collect();
+    let want: Vec<usize> =
+        order.iter().copied().filter(|&i| tuples[i].1 == "ab" && tuples[i].3 == "2024-01-01").collect();
     assert_eq!(want.len(), 12);
     assert_eq!(values_of(&fv).iter().map(|v| v.parse::<usize>().unwrap()).collect::<Vec<_>>(), want);
     for m in &fv {
@@ -263,7 +293,8 @@ fn the_name_order_not_the_declaration_order_makes_the_key(b: Backend) {
     let values: Vec<String> = (0..rows.len()).map(|i| i.to_string()).collect();
     put_all(&s, "f", &h, &cells, &values);
     let sl = slice_of(&h, "f", &[("zeta", r#""*""#), ("alpha", r#""*""#)]);
-    let got: Vec<usize> = values_of(&s.slice_page(&sl, END, None, BIG).unwrap()).iter().map(|v| v.parse().unwrap()).collect();
+    let got: Vec<usize> =
+        values_of(&s.slice_page(&sl, END, None, BIG).unwrap()).iter().map(|v| v.parse().unwrap()).collect();
     // (a,2) (a,10) (b,-1) (b,1)
     assert_eq!(got, [1, 2, 3, 0]);
 }
@@ -286,7 +317,9 @@ fn a_shorter_prefix_sorts_first_whatever_follows(b: Backend) {
     let values: Vec<String> = (0..rows.len()).map(|i| i.to_string()).collect();
     put_all(&s, "f", &h, &cells, &values);
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_by(|&p, &q| (rows[p].0.as_bytes(), rows[p].1.as_bytes()).cmp(&(rows[q].0.as_bytes(), rows[q].1.as_bytes())));
+    order.sort_by(|&p, &q| {
+        (rows[p].0.as_bytes(), rows[p].1.as_bytes()).cmp(&(rows[q].0.as_bytes(), rows[q].1.as_bytes()))
+    });
     let sl = slice_of(&h, "f", &[("s1", r#""*""#), ("s2", r#""*""#)]);
     let vs = s.slice_page(&sl, END, None, BIG).unwrap();
     let got: Vec<usize> = values_of(&vs).iter().map(|v| v.parse().unwrap()).collect();
@@ -300,7 +333,8 @@ fn a_shorter_prefix_sorts_first_whatever_follows(b: Backend) {
     let values2: Vec<String> = (0..rows2.len()).map(|i| i.to_string()).collect();
     put_all(&s, "g", &h2, &cells2, &values2);
     let sl2 = slice_of(&h2, "g", &[("n", r#""*""#), ("t", r#""*""#)]);
-    let got2: Vec<usize> = values_of(&s.slice_page(&sl2, END, None, BIG).unwrap()).iter().map(|v| v.parse().unwrap()).collect();
+    let got2: Vec<usize> =
+        values_of(&s.slice_page(&sl2, END, None, BIG).unwrap()).iter().map(|v| v.parse().unwrap()).collect();
     assert_eq!(got2, [3, 2, 1, 0, 4]);
 }
 
@@ -329,7 +363,10 @@ fn the_key_is_a_column_of_cells_and_slice_page_returns_it(b: Backend) {
     let c = slice_cell("f", &h, &[("k", sc(Type::Number, "3"))]);
     put_member(&s, &c, "4", "2024-02-01T00:00:00.000000Z", "2024-02-01T00:00:00.000000Z");
     let again = s.slice_page(&slice_of(&h, "f", &[("k", r#""*""#)]), END, None, BIG).unwrap();
-    assert_eq!(again.iter().map(|v| v.sort_key.clone()).collect::<Vec<_>>(), vs.iter().map(|v| v.sort_key.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        again.iter().map(|v| v.sort_key.clone()).collect::<Vec<_>>(),
+        vs.iter().map(|v| v.sort_key.clone()).collect::<Vec<_>>()
+    );
     assert_eq!(db.count("cells"), 3);
 }
 
@@ -410,7 +447,13 @@ fn the_migration_fills_sort_keys_on_existing_rows(b: Backend) {
     for k in ks {
         put_member(&s, &slice_cell("f", &h1, &[("k", sc(Type::Number, k))]), k, T, T);
     }
-    put_member(&s, &slice_cell("f", &h1, &[("k", sc(Type::Number, "2"))]), "2.5", "2024-02-01T00:00:00.000000Z", "2024-02-01T00:00:00.000000Z");
+    put_member(
+        &s,
+        &slice_cell("f", &h1, &[("k", sc(Type::Number, "2"))]),
+        "2.5",
+        "2024-02-01T00:00:00.000000Z",
+        "2024-02-01T00:00:00.000000Z",
+    );
     let gs = [("10", "a"), ("2", "b"), ("2", "a"), ("-1", "z")];
     for (n, t) in gs {
         put_member(&s, &slice_cell("g", &h2, &[("n", sc(Type::Number, n)), ("t", sc(Type::String, t))]), "1", T, T);
@@ -480,10 +523,7 @@ fn pg_class_bindings_by_hash_use_the_index() {
     let mut c = db.client();
     c.batch_execute("SET enable_seqscan = off").unwrap();
     let rows = c
-        .query(
-            "EXPLAIN SELECT class_name, tx FROM class_bindings WHERE class_hash = 'ab' ORDER BY class_name, tx",
-            &[],
-        )
+        .query("EXPLAIN SELECT class_name, tx FROM class_bindings WHERE class_hash = 'ab' ORDER BY class_name, tx", &[])
         .unwrap();
     let plan: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
     let text = plan.join("\n");
