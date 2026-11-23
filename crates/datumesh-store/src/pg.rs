@@ -2409,6 +2409,8 @@ impl Pattern {
     fn values_by_key(&self, c: &mut Conn, asof: &str, after: Option<&[u8]>, limit: i64) -> Result<Vec<SliceValue>> {
         let bounds = crate::slices::key_bounds(&self.args);
         let drive = if bounds.is_some() { None } else { self.drive(c, false)?.0 };
+        // A key range, or the whole index from its start: read in key order (O(limit) rows).
+        let walk = bounds.is_some() || drive.is_none();
         let [names, kinds, types, los, his] = self.columns();
         let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
         let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
@@ -2460,10 +2462,11 @@ impl Pattern {
             params.push(bytes);
         }
         params.push(&limit);
-        // A key range is read in key order: PostgreSQL cannot estimate a bytea range, takes it for
-        // a few rows, and would bitmap and sort every member of it, so a key range's page is read
-        // with bitmap scans off (for this read only, in its transaction).
-        let rows = if bounds.is_some() {
+        // A key range or an index walk is read in key order: PostgreSQL cannot estimate a bytea
+        // range or the membership checks, takes them for a few rows, and would bitmap and sort
+        // every member, so such a page is read with bitmap scans off (for this read only, in its
+        // transaction). Seen on a fresh catalogue of 6,144 subjects: the first page sorted them all.
+        let rows = if walk {
             let mut t = c.client.transaction().db()?;
             t.batch_execute("SET LOCAL enable_bitmapscan = off").db()?;
             let st = t.prepare_typed(sql.as_str(), &param_types).db()?;
