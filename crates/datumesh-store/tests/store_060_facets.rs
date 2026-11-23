@@ -343,8 +343,8 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
     };
     assert_eq!(
         all,
-        old.len() + 3,
-        "three migrations more than 0.5.2 on each backend (0.5.3's counters, facets, withdrawals)"
+        old.len() + 4,
+        "four migrations more than 0.5.2 on each backend (0.5.3's counters, facets, withdrawals, sort keys)"
     );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
@@ -375,8 +375,8 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
     };
     assert_eq!(
         applied,
-        [all as u32 - 2, all as u32 - 1, all as u32],
-        "only the counters, the facets and the withdrawals migration are applied"
+        [all as u32 - 3, all as u32 - 2, all as u32 - 1, all as u32],
+        "only the counters, the facets, the withdrawals and the sort-key migration are applied"
     );
     assert_eq!(db.count("catalog_entries"), 2, "old rows kept");
     assert_eq!(db.int("SELECT count(*) FROM catalog_entries WHERE facets = '{}' AND extends IS NULL"), 2);

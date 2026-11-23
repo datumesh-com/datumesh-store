@@ -211,9 +211,9 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
     };
     assert_eq!(last as usize, n_all);
-    assert_eq!(n_all, if b == Backend::Pg { 14 } else { 10 }, "migrations 1..=14 (SQLite 1..=10)");
-    // The counters are migration 12 (SQLite 8); the facets migration 13 (9) and the withdrawals 14 (10) follow them.
-    let n_all = n_all - 2;
+    assert_eq!(n_all, if b == Backend::Pg { 15 } else { 11 }, "migrations 1..=15 (SQLite 1..=11)");
+    // The counters are migration 12 (SQLite 8); the facets migration 13 (9) and the withdrawals 14 (10) and the sort keys 15 (11) follow them.
+    let n_all = n_all - 3;
     migrate_to(&db, b, n_all - 1);
     assert!(text_of(&db, db.pick(
         "SELECT table_name::text FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('cell_counts', 'function_test_counts')",
@@ -265,8 +265,8 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
     };
     assert_eq!(
         applied,
-        [n_all as u32, n_all as u32 + 1, n_all as u32 + 2],
-        "only migrations 12, 13 (the facets) and 14 are applied"
+        [n_all as u32, n_all as u32 + 1, n_all as u32 + 2, n_all as u32 + 3],
+        "only migrations 12, 13 (the facets), 14 and 15 are applied"
     );
 
     // cell_counts is filled from `cells`, once.
