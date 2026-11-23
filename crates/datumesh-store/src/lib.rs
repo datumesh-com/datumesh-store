@@ -1119,6 +1119,7 @@ pub(crate) struct Parsed {
     pub(crate) fn_hash: String,
     pub(crate) publisher: String,
     /// The receipt's cell (its arguments are indexed by the SQLite store).
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     pub(crate) cell: Cell,
     /// The signer's host (the namespace whose keys verify it).
     pub(crate) host: String,
@@ -1126,11 +1127,13 @@ pub(crate) struct Parsed {
     pub(crate) entries: Vec<String>,
     pub(crate) inputs: Vec<String>,
     /// The value's type and lexical form; `None` for a withdrawal.
+    #[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
     pub(crate) value: Option<(String, String)>,
 }
 
 /// The `value_type` and `value` columns of a withdrawal: empty, which no valued receipt has
 /// (a receipt's type is a name). Since 0.6.0; both backends.
+#[cfg_attr(not(feature = "sqlite"), allow(dead_code))]
 pub(crate) const WITHDRAWN_VALUE: &str = "";
 
 /// Parses receipt bytes as a valued [`Receipt`] or, failing that, a [`Withdrawal`] (steps 1-4

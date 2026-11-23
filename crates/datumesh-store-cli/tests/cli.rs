@@ -349,7 +349,8 @@ fn every_command_works_over_tls_with_the_ca() {
     assert!(out.contains("applied migration 1"), "{out}");
     let out = ok(&tls(&["migrate", "--check"]));
     assert!(out.contains("no drift"), "{out}");
-    let vectors = spec_vectors();
+    // Without receipt/relayed-full, for the reason vectors_without_slices gives (spec-0.7.0).
+    let vectors = vector_set("tls", |g, f| !(g == "receipt" && f == "relayed-full.json"));
     ok(&tls(&["import", vectors.to_str().unwrap()]));
     let export = ok(&tls(&["export"]));
     assert!(export.lines().any(|l| l.starts_with("{\"receipt\"")), "{export}");

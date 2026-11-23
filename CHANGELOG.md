@@ -2,9 +2,11 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
-## 0.6.1
+## 0.6.2
 
-The content of 0.6.0, which never reached crates.io: its tag's workflow stopped on a conformance test that recomputed the new withdrawal vector of spec-0.7.0 (a withdrawal has nothing to recompute; the test now skips it). The tag `v0.6.0` stays.
+The content of 0.6.0, which never reached crates.io, nor did 0.6.1: 0.6.0's tag stopped on a conformance test recomputing the new withdrawal vector of spec-0.7.0 (the test now skips withdrawals); 0.6.1's on the TLS command test importing receipt/relayed-full beside stored-number (one cell, one tx) and on two items unused without the `sqlite` feature. Both tags stay where they are.
+
+## 0.6.1 (tagged, not published)
 
 ## 0.6.0 (tagged, not published)
 
