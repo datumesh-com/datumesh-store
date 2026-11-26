@@ -111,15 +111,21 @@ fn put_version_not_later_is_a_typed_error(b: Backend) {
             other => panic!("{tx}: another receipt: {other:?}"),
         }
     }
-    // An earlier, never-seen tx with its own receipt: still refused.
+    // An earlier, never-seen tx with its own receipt: accepted since the B5 follow-up (decided 27 Nov:
+    // the recorded time strictly increases per cell, so a new version is never refused for its
+    // time), recorded after the latest.
     let r0 = stored_number_at("1.08", "2024-03-14T16:00:00.000000Z");
     let h0 = s.put_receipt(&r0).unwrap();
-    assert!(matches!(s.put_version(&cell, "2024-03-14T16:00:00.000000Z", &h0), Err(Error::NotLater { .. })));
+    s.put_version(&cell, "2024-03-14T16:00:00.000000Z", &h0).expect("a new version is not refused for its time");
+    let latest = s.latest(&cell).unwrap().unwrap();
+    assert_eq!(latest.receipt_hash, h0, "recorded after the latest");
+    assert!(latest.recorded > TX2.to_string());
     // A later one is accepted.
     let r3 = stored_number_at("1.0894", "2024-03-19T10:00:00.000000Z");
     let h3 = s.put_receipt(&r3).unwrap();
     s.put_version(&cell, "2024-03-19T10:00:00.000000Z", &h3).unwrap();
     assert_eq!(s.latest(&cell).unwrap().unwrap().tx, "2024-03-19T10:00:00.000000Z");
+    assert_eq!(s.versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap().len(), 4);
 }
 
 fn bind_name_not_later_is_a_typed_error(b: Backend) {

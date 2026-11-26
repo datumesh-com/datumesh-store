@@ -279,7 +279,7 @@ fn put_cells_same_cell_twice_with_increasing_tx_stores_both(b: Backend) {
     let vs = s.versions(&c.id(), &day(1), &day(2)).unwrap();
     assert_eq!(vs.iter().map(|v| v.receipt_hash.clone()).collect::<Vec<_>>(), hashes);
     assert_eq!(s.latest(&c.id()).unwrap().unwrap().tx, day(2));
-    // A later call continues the history, and an earlier tx is refused.
+    // A later call continues the history.
     s.put_cells(&writes(&[item(&c, "3", &day(3), &day(3))])).unwrap();
     assert_eq!(db.count("versions"), 3);
     // The same tx as the latest is not later.
@@ -288,48 +288,56 @@ fn put_cells_same_cell_twice_with_increasing_tx_stores_both(b: Backend) {
 }
 
 fn put_cells_same_cell_not_later_in_the_same_call_is_not_later(b: Backend) {
+    // Another receipt at the same (cell, signed tx) in one call: NotLater, as the loop is. An earlier
+    // signed tx of the cell with its own receipt is no longer refused (B5 follow-up, decided 27 Nov:
+    // the recorded time strictly increases per cell, so a new version is never refused for its time):
+    // both versions are stored.
     let db = TestDb::migrated(b);
     let (s, h) = setup(&db);
     let c = cell_of(&h, 1, "a");
     let other = cell_of(&h, 2, "b");
-    for second_tx in [day(2), day(1)] {
-        let items = vec![
-            item(&other, "9", &day(1), &day(1)),
-            item(&c, "1", &day(2), &day(2)),
-            item(&c, "2", &second_tx, &second_tx),
-        ];
-        let got = s.put_cells(&writes(&items)).unwrap_err();
-        match &got {
-            Error::NotLater { what: "version", key, given, latest } => {
-                assert_eq!((key, given, latest), (&c.id(), &second_tx, &day(2)));
-            }
-            e => panic!("not NotLater: {e:?}"),
+    let items =
+        vec![item(&other, "9", &day(1), &day(1)), item(&c, "1", &day(2), &day(2)), item(&c, "2", &day(2), &day(2))];
+    let got = s.put_cells(&writes(&items)).unwrap_err();
+    match &got {
+        Error::NotLater { what: "version", key, given, latest } => {
+            assert_eq!((key, given, latest), (&c.id(), &day(2), &day(2)));
         }
-        // The same as the loop on a fresh store.
-        let db2 = TestDb::migrated(b);
-        let (s2, _) = setup(&db2);
-        assert_eq!(format!("{got:?}"), show(loop_put(&s2, &items)));
-        if b == Backend::Pg {
-            assert_eq!(db.count("receipts"), 0);
-            assert_eq!(db.count("versions"), 0);
-        } else {
-            break; // SQLite need not be atomic: the first round may have stored rows
-        }
+        e => panic!("not NotLater: {e:?}"),
     }
+    let db2 = TestDb::migrated(b);
+    let (s2, _) = setup(&db2);
+    assert_eq!(format!("{got:?}"), show(loop_put(&s2, &items)));
+    if b == Backend::Pg {
+        assert_eq!(db.count("receipts"), 0);
+        assert_eq!(db.count("versions"), 0);
+    }
+    let db = TestDb::migrated(b);
+    let (s, h) = setup(&db);
+    let c = cell_of(&h, 1, "a");
+    let items = vec![item(&c, "1", &day(2), &day(2)), item(&c, "2", &day(1), &day(1))];
+    s.put_cells(&writes(&items)).expect("an earlier signed tx in the same call is stored");
+    assert_eq!(s.versions(&c.id(), &day(1), &day(2)).unwrap().len(), 2);
 }
 
 fn put_cells_not_later_than_a_stored_version(b: Backend) {
+    // A new version signed before a stored one: accepted since the B5 follow-up (decided 27 Nov),
+    // recorded after it; another receipt at the stored version's own tx stays NotLater.
     let db = TestDb::migrated(b);
     let (s, h) = setup(&db);
     let c = cell_of(&h, 1, "a");
     put_one(&s, &c, "1", &day(5), &day(5));
     let items = vec![item(&c, "2", &day(4), &day(4))];
-    let e = s.put_cells(&writes(&items)).unwrap_err();
-    assert!(matches!(e, Error::NotLater { what: "version", .. }), "{e:?}");
+    s.put_cells(&writes(&items)).expect("a new version is not refused for its time");
+    let latest = s.latest(&c.id()).unwrap().unwrap();
+    assert_eq!(latest.tx, day(4), "recorded after day 5's version, so it is the latest");
+    assert!(latest.recorded > day(5));
+    let same_tx = vec![item(&c, "3", &day(5), &day(5))];
+    assert!(matches!(s.put_cells(&writes(&same_tx)).unwrap_err(), Error::NotLater { what: "version", .. }));
     // A receipt only (no version) at that tx is fine.
     let loose = vec![(receipt_of(&c, "3", &day(4), &day(4), &[]), None)];
     s.put_cells(&writes(&loose)).unwrap();
-    assert_eq!(s.latest(&c.id()).unwrap().unwrap().tx, day(5));
+    assert_eq!(s.versions(&c.id(), &day(1), &day(9)).unwrap().len(), 2);
 }
 
 fn put_cells_bad_signature_is_put_receipts_error_and_atomic(b: Backend) {

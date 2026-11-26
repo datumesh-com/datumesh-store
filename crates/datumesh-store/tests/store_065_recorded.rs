@@ -228,13 +228,13 @@ fn the_backdating_rule_is_enforced_on_recorded(b: Backend) {
     assert_eq!((latest.receipt_hash.as_str(), latest.tx.as_str(), latest.recorded.as_str()), (corr.as_str(), T1, T4));
     assert_eq!(s.stored_asof(&c.id(), T3).unwrap().unwrap().tx, T2, "as of T3 the first version answers");
     assert_eq!(s.stored_asof(&c.id(), T5).unwrap().unwrap().receipt_hash, corr);
-    // Not recorded later than the latest (the clock has not moved): refused.
+    // The clock has not moved: since the B5 follow-up (decided 27 Nov) the recorded time strictly
+    // increases per cell, max(signed tx, clock, the cell's latest recorded + 1 µs), so a new version is
+    // never refused for its time: recorded 1 µs after the latest.
     let again = s.put_receipt(&slice_receipt(&c, "12", T3, T3)).unwrap();
-    match s.put_version(&c.id(), T3, &again) {
-        Err(datumesh_store::Error::NotLater { .. }) => {}
-        other => panic!("recorded at the latest version's time: {other:?}"),
-    }
-    assert_eq!(s.versions(&c.id(), T1, END).unwrap().len(), 2);
+    s.put_version(&c.id(), T3, &again).expect("a new version on a clock that has not moved is accepted");
+    assert_eq!(s.latest(&c.id()).unwrap().unwrap().recorded, "2024-01-04T00:00:00.000001Z");
+    assert_eq!(s.versions(&c.id(), T1, END).unwrap().len(), 3);
 }
 
 fn migration_17_gives_existing_rows_recorded_equal_to_tx(b: Backend) {
