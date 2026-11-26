@@ -238,6 +238,61 @@ fn tenor2(h: &str) -> datumesh_core::Slice {
     ))
 }
 
+/// PostgreSQL only: seq follows commit order. A writer that took a lower seq must not commit after a
+/// reader has seen a higher one, or the reuse check (slice_seq == seen_seq) misses its version. The
+/// store's own writers run concurrently while a reader takes, in one statement (one snapshot), the
+/// highest committed seq S and how many versions are committed; at the end, no version with a seq at
+/// or below some S may have appeared after it. A probabilistic test: it fails when the ordering is
+/// broken often enough to be seen (8 writers, 1,600 versions, the reader looping), and passing does
+/// not prove the rule. The public API has no hook to hold a writer between its nextval and its
+/// commit: a deterministic test would need one (a test-only pause after the seq is taken), or the
+/// lock's key, to hold the fixed advisory lock from a raw session and watch a writer wait.
+#[test]
+fn pg_seq_follows_commit_order_under_concurrent_writers() {
+    let db = TestDb::migrated(Backend::Pg);
+    let s = slice_store(&db);
+    let h = function(&s, "f");
+    drop(s);
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let snapshots = std::thread::scope(|sc| {
+        let writers: Vec<_> = (0..8u32)
+            .map(|t| {
+                let st = db.open_again();
+                let h = h.clone();
+                sc.spawn(move || {
+                    for i in 0..200u32 {
+                        put_member(&st, &cell(&h, t * 1000 + i, 1), "1", T1, T1);
+                    }
+                })
+            })
+            .collect();
+        let d = done.clone();
+        let db = &db;
+        let reader = sc.spawn(move || {
+            let mut c = db.pg().client();
+            let mut out = Vec::new();
+            while !d.load(std::sync::atomic::Ordering::SeqCst) {
+                let row =
+                    c.query_one("SELECT COALESCE(max(seq), 0)::bigint, count(*)::bigint FROM versions", &[]).unwrap();
+                out.push((row.get::<_, i64>(0), row.get::<_, i64>(1)));
+            }
+            out
+        });
+        for w in writers {
+            w.join().unwrap();
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        reader.join().unwrap()
+    });
+    assert_eq!(db.count("versions"), 1600);
+    assert!(snapshots.len() > 10, "the reader ran during the writes: {}", snapshots.len());
+    let mut c = db.pg().client();
+    for (top, seen) in snapshots {
+        let now: i64 = c.query_one("SELECT count(*)::bigint FROM versions WHERE seq <= $1", &[&top]).unwrap().get(0);
+        assert_eq!(now, seen, "a version with seq <= {top} committed after a reader saw {top}");
+    }
+}
+
 fn migrate_to(db: &TestDb, b: Backend, up_to: usize) {
     let old: Vec<&migrate::Migration> = match b {
         Backend::Pg => migrate::MIGRATIONS[..up_to].iter().collect(),
