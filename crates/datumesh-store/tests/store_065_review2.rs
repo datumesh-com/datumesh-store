@@ -1,0 +1,97 @@
+//! Store 0.6.5, the fixes from the second review of Part G (CONTRACT-guard-patch.md, "Decided 27 Nov:
+//! fixes from the second review"): A1, B2/B3 and B6. Failing tests: not written yet.
+//!
+//! API assumed (named by the decision):
+//!
+//! ```text
+//! fn later_bound(&self, cell_id: &str, recorded: &str) -> Result<Option<String>>;
+//!     // the minimum of max(asof, recorded) over the cell's versions recorded after `recorded`
+//! impl PoolOptions { pub fn barrier_timeout(self, d: Duration) -> Self; }   // default 5 s
+//! fn slice_member_hashes_within(&self, slice: &Slice, asof: &str, limit: usize, timeout: Duration)
+//!     -> Result<Vec<String>>;   // the rebuild listing under a statement timeout
+//! ```
+
+#[macro_use]
+mod common;
+
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use common::*;
+use datumesh_core::{Cell, Type};
+use datumesh_store::{CellWrite, PoolOptions, SqliteOptions, SqliteStore};
+
+const T1: &str = "2024-01-01T00:00:00.000000Z";
+const T2: &str = "2024-01-02T00:00:00.000000Z";
+const T3: &str = "2024-01-03T00:00:00.000000Z";
+const T4: &str = "2024-01-04T00:00:00.000000Z";
+const T5: &str = "2024-01-05T00:00:00.000000Z";
+const LOCK_KEY: i64 = 7412030007;
+
+#[derive(Clone)]
+struct Clock(Arc<Mutex<String>>);
+
+impl Clock {
+    fn at(t: &str) -> Clock {
+        Clock(Arc::new(Mutex::new(t.to_string())))
+    }
+    fn set(&self, t: &str) {
+        *self.0.lock().unwrap() = t.to_string();
+    }
+    fn f(&self) -> datumesh_store::RecordingClock {
+        let c = self.0.clone();
+        Arc::new(move || c.lock().unwrap().clone())
+    }
+}
+
+fn rec_store(db: &TestDb, clock: &Clock) -> TStore {
+    let s = match db.backend {
+        Backend::Pg => {
+            TStore(Arc::new(db.pg().bare_store_with(PoolOptions::new().max_size(4).recording_clock(clock.f()))))
+        }
+        Backend::Sqlite => TStore(Arc::new(
+            SqliteStore::open_with(&db.lite().path, SqliteOptions::new().max_size(4).recording_clock(clock.f()))
+                .unwrap(),
+        )),
+    };
+    s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
+    s
+}
+
+fn function(s: &TStore) -> String {
+    s.put_descriptor(&stored_descriptor(&[("k", Type::Number)], "f")).unwrap()
+}
+
+fn kcell(h: &str, k: u32) -> Cell {
+    slice_cell("f", h, &[("k", sc(Type::Number, &k.to_string()))])
+}
+
+// ---- A1: later_bound ----------------------------------------------------------------------------
+
+fn later_bound_is_the_least_start_of_the_versions_recorded_later(b: Backend) {
+    // v1 signed and recorded T1; v2 signed T2 with asof T5 (late-signed); v3 signed and recorded T3.
+    let db = TestDb::migrated(b);
+    let s = slice_store(&db);
+    let h = function(&s);
+    let c = kcell(&h, 1);
+    put_member(&s, &c, "1", T1, T1);
+    put_member(&s, &c, "2", T2, T5);
+    put_member(&s, &c, "3", T3, T3);
+    // After v1: v2 starts at max(T5, T2) = T5, v3 at T3: the least is T3 (not the next version's T5).
+    assert_eq!(s.later_bound(&c.id(), T1).unwrap().as_deref(), Some(T3));
+    assert_eq!(s.later_bound(&c.id(), T2).unwrap().as_deref(), Some(T3));
+    assert_eq!(s.later_bound(&c.id(), T3).unwrap(), None, "nothing recorded after the last");
+    // With a recording clock: a version recorded later than it was signed starts at its recorded time.
+    let db = TestDb::migrated(b);
+    let clock = Clock::at(T1);
+    let s = rec_store(&db, &clock);
+    let h = function(&s);
+    let c = kcell(&h, 1);
+    put_member(&s, &c, "1", T1, T1);
+    clock.set(T4);
+    put_member(&s, &c, "2", T2, T2);
+    assert_eq!(s.later_bound(&c.id(), T1).unwrap().as_deref(), Some(T4), "max(asof T2, recorded T4)");
+    assert!(matches!(s.later_bound("nope", T1), Err(datumesh_store::Error::Invalid(_))));
+}
+
+backends!(later_bound_is_the_least_start_of_the_versions_recorded_later);
