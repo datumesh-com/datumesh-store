@@ -319,15 +319,15 @@ fn apply_rest(db: &TestDb, b: Backend) -> Vec<u32> {
     }
 }
 
-fn migration_16_and_12_are_the_last_and_named(b: Backend) {
+fn migration_16_and_12_are_the_member_sets(b: Backend) {
+    // The member sets are migration 16 (SQLite 12); the recorded time follows (17 / 13, G9).
     let ms = match b {
         Backend::Pg => migrate::MIGRATIONS,
         Backend::Sqlite => migrate::sqlite::MIGRATIONS,
     };
-    let last = ms.last().unwrap();
     let want = if b == Backend::Pg { (16, "0016_member_sets.sql") } else { (12, "0012_member_sets.sql") };
-    assert_eq!((last.version, last.name), want);
-    assert_eq!(ms.len() as u32, want.0);
+    let m = ms.get(want.0 as usize - 1).expect("the migration");
+    assert_eq!((m.version, m.name), want);
 }
 
 fn a_0_6_4_store_with_a_manifest_migrates_untouched(b: Backend) {
@@ -364,7 +364,7 @@ fn a_0_6_4_store_with_a_manifest_migrates_untouched(b: Backend) {
     assert_eq!((before_manifests.len(), before_members.len()), (1, 3));
     drop(s);
 
-    assert_eq!(apply_rest(&db, b), [new], "only the member-set migration is applied");
+    assert_eq!(apply_rest(&db, b), [new, new + 1], "the member sets, then the recorded time (G9)");
 
     // G7: nothing stored changes.
     assert_eq!(
@@ -416,6 +416,6 @@ backends!(
     malformed_rows_are_refused_by_the_store,
     the_database_checks_the_entry,
     the_table_is_append_only,
-    migration_16_and_12_are_the_last_and_named,
+    migration_16_and_12_are_the_member_sets,
     a_0_6_4_store_with_a_manifest_migrates_untouched,
 );

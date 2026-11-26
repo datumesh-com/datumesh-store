@@ -329,7 +329,7 @@ fn the_migrations_are_registered(b: Backend) {
         Backend::Sqlite => (9, "0009_catalogue_facets.sql"),
     };
     let m = &ms[v as usize - 1];
-    assert_eq!((ms.len() as u32, m.version, m.name), (v + 3, v, n)); // withdrawals (14/10), sort keys (15/11) and member sets (16/12) follow
+    assert_eq!((ms.len() as u32, m.version, m.name), (v + 4, v, n)); // withdrawals (14/10), sort keys (15/11), member sets (16/12), recorded (17/13) follow
     let db = TestDb::migrated(b);
     let c = columns(&db);
     assert!(c.contains(&"facets".to_string()) && c.contains(&"extends".to_string()), "{c:?}");
