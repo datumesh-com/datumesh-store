@@ -238,13 +238,9 @@ pub(crate) fn check_member_entry(entry: &str) -> Result<(&str, &str)> {
 
 /// Checks a member-set row as the store accepts it (G2): its entry, the ids and function hash,
 /// the slice bytes (a canonical slice object of the slice id and function hash) and the instants.
-/// The receipt hashes of `members` ordered by their recorded time (then hash), at most `limit`: the
-/// order of `slice_member_hashes`. Used by the overrides for version slices and by the default.
-pub(crate) fn hashes_by_recorded(mut members: Vec<SliceMember>, limit: usize) -> Vec<String> {
-    members.sort_by(|a, b| {
-        (a.version.recorded.as_str(), a.version.receipt_hash.as_str())
-            .cmp(&(b.version.recorded.as_str(), b.version.receipt_hash.as_str()))
-    });
+/// The receipt hashes of `members`, at most `limit`, in no particular order: the result of
+/// `slice_member_hashes` for a version slice (and of the default).
+pub(crate) fn hashes_limited(mut members: Vec<SliceMember>, limit: usize) -> Vec<String> {
     members.truncate(limit);
     members.into_iter().map(|m| m.version.receipt_hash).collect()
 }
@@ -677,10 +673,12 @@ pub trait Store: Resolver + sealed::Sealed {
         Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no barrier here")))
     }
 
-    /// The receipt hashes of the members of a slice as of `asof`, ordered by their recorded time, at most
-    /// `limit` (the engine's member list, without the slice's values). Since 0.6.5.
+    /// The receipt hashes of the members of a slice as of `asof`, at most `limit`, in no particular order
+    /// (the engine sorts them, and uses the limit only to see whether there are more). Members are selected
+    /// as of `asof` by recorded time, the rules of `slice_members`; no values or receipt bytes are read.
+    /// Since 0.6.5.
     fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
-        Ok(hashes_by_recorded(self.slice_members(slice, asof)?, limit))
+        Ok(hashes_limited(self.slice_members(slice, asof)?, limit))
     }
 
     /// The first version of `cell_id` recorded after `recorded` (one row, the memo bound), or `None`.

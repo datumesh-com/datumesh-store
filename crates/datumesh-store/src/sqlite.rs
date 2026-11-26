@@ -930,7 +930,7 @@ impl Store for SqliteStore {
         check_instant(asof, "asof")?;
         let v = slice.to_value();
         if version_slice(slice, &v)?.is_some() {
-            return Ok(crate::hashes_by_recorded(self.slice_members(slice, asof)?, limit));
+            return Ok(crate::hashes_limited(self.slice_members(slice, asof)?, limit));
         }
         let p = Pattern::of(&v)?;
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);

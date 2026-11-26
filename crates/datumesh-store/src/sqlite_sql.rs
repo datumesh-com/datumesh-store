@@ -362,12 +362,12 @@ statements! {
     SliceSeqDrive = slice_seq!(from_drive!(), where_drive!());
     // A version slice's cell: the highest seq of its versions, 0 when none.
     VersionSeqMax = "SELECT coalesce(max(seq), 0) FROM versions WHERE cell_id = ?1";
-    // The members' receipt hashes as of :asof, by recorded time, at most :limit (slice_member_hashes): the
-    // members of slice_members with the hash as the only column.
+    // The members' receipt hashes as of :asof, at most :limit, in no particular order (slice_member_hashes):
+    // the members of slice_members with the hash as the only column.
     MemberHashesAll = concat!(slice_members!("v.receipt_hash", from_all!(), where_all!()),
-        " ORDER BY coalesce(v.recorded, v.tx), v.receipt_hash LIMIT :limit");
+        " LIMIT :limit");
     MemberHashesDrive = concat!(slice_members!("v.receipt_hash", from_drive!(), where_drive!()),
-        " ORDER BY coalesce(v.recorded, v.tx), v.receipt_hash LIMIT :limit");
+        " LIMIT :limit");
     // The receipt a cell's version at a signed tx holds (review item 3).
     VersionAt = "SELECT receipt_hash FROM versions WHERE cell_id = ?1 AND tx = ?2";
     // The first version of a cell recorded after an instant (review: the memo bound reads one row).

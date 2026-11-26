@@ -790,7 +790,7 @@ impl Store for PgStore {
         check_instant(asof, "asof")?;
         let v = slice.to_value();
         if version_slice(slice, &v)?.is_some() {
-            return Ok(crate::hashes_by_recorded(self.slice_members(slice, asof)?, limit));
+            return Ok(crate::hashes_limited(self.slice_members(slice, asof)?, limit));
         }
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let pattern = Pattern::of(&v)?;
@@ -2817,7 +2817,7 @@ impl Pattern {
         rows.iter().map(cell_row).collect()
     }
 
-    /// The members' receipt hashes as of `asof`, by recorded time, at most `limit` (one statement; see
+    /// The members' receipt hashes as of `asof`, at most `limit`, in no particular order (one statement; see
     /// MemberHashesAll). The statement's parameters are those of computed_cells.
     fn member_hashes(&self, c: &mut Conn, asof: &str, limit: i64) -> Result<Vec<String>> {
         let (drive, _) = self.drive(c, false)?;

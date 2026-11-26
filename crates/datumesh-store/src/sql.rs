@@ -572,14 +572,14 @@ statements! {
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesNum = slice_members!(drive_num!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    // The members' receipt hashes as of $5, by recorded time, at most $16 (slice_member_hashes, review
-    // follow-up): the members of slice_members with the hash as the only column read, the same member
-    // rules, and the LIMIT in SQL (one row per member, no receipt bytes or values).
-    MemberHashesAll = concat!(slice_members!(no_with!(), from_all!(), "r.hash", "m.hash"), " ORDER BY m.recorded, m.receipt_hash LIMIT $16")
+    // The receipt hashes of the members as of $5, at most $16, in no particular order (slice_member_hashes):
+    // the members of slice_members with the hash as the only column read, the same member rules, and the
+    // LIMIT in SQL (one row per member, no receipt bytes or values, no sort).
+    MemberHashesAll = concat!(slice_members!(no_with!(), from_all!(), "r.hash", "m.hash"), " LIMIT $16")
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    MemberHashesText = concat!(slice_members!(drive_text!(), from_drive!(), "r.hash", "m.hash"), " ORDER BY m.recorded, m.receipt_hash LIMIT $16")
+    MemberHashesText = concat!(slice_members!(drive_text!(), from_drive!(), "r.hash", "m.hash"), " LIMIT $16")
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    MemberHashesNum = concat!(slice_members!(drive_num!(), from_drive!(), "r.hash", "m.hash"), " ORDER BY m.recorded, m.receipt_hash LIMIT $16")
+    MemberHashesNum = concat!(slice_members!(drive_num!(), from_drive!(), "r.hash", "m.hash"), " LIMIT $16")
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbeText = "SELECT count(*) FROM (SELECT 1 FROM cell_args a
