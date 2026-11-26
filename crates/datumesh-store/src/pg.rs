@@ -16,8 +16,8 @@ use crate::sql::Q;
 use crate::{
     later_than, not_canonical_class, parse_receipt, stored_value, unbound, Binding, CatalogEntry, CatalogEntryExt,
     CatalogKind, CellWrite, ClassBinding, Dictionary, DictionaryValue, EmbedRef, Embedding, FacetedEntry, FunctionTest,
-    Hit, KeyValue, Namespace, Parsed, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry,
-    TestSummary, Version, FIND_MISSES_CAP,
+    Hit, KeyValue, MemberSet, Namespace, Parsed, PendingEmbedding, SliceMember, SliceValue, Store, Summary,
+    SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
 };
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -37,6 +37,8 @@ pub struct PgStore {
     /// Whether the `embeddings` table exists (the `vector` extension was available when the
     /// schema was migrated), looked at when the store was opened.
     vectors: bool,
+    /// The recording clock (G9): the version's recorded time is the greater of its tx and this.
+    clock: Option<crate::RecordingClock>,
 }
 
 impl std::fmt::Debug for PgStore {
@@ -68,12 +70,15 @@ impl PgStore {
     pub fn connect_with(url: &str, options: PoolOptions) -> Result<PgStore> {
         let config = url.parse::<postgres::Config>().db()?;
         let connector = Connector::new(config, &options)?;
-        PgStore::from_pool(Pool::new(Box::new(move || connector.connect()), options))
+        let clock = options.recording_clock.clone();
+        let mut store = PgStore::from_pool(Pool::new(Box::new(move || connector.connect()), options))?;
+        store.clock = clock;
+        Ok(store)
     }
 
     /// A store on `pool`, after opening one connection.
     pub(crate) fn from_pool(pool: Pool) -> Result<PgStore> {
-        let mut store = PgStore { pool, vectors: false };
+        let mut store = PgStore { pool, vectors: false, clock: None };
         let vectors: bool = {
             let mut c = store.pool.get()?;
             c.client.query_one("SELECT to_regclass('embeddings') IS NOT NULL", &[]).db()?.try_get(0).db()?
@@ -127,7 +132,7 @@ impl PgStore {
     }
 
     /// A version (and its receipt's bytes) from a query answering
-    /// (tx, receipt_hash, asof, withdrawn, bytes) for (cell_id, asof).
+    /// (tx, receipt_hash, asof, withdrawn, recorded, bytes) for (cell_id, asof).
     fn asof_with_receipt(
         &self,
         op: &'static str,
@@ -140,7 +145,7 @@ impl PgStore {
         self.run(op, |c| {
             let st = c.stmt(q)?;
             let Some(row) = c.client.query_opt(&st, &[&cell_id, &asof]).db()? else { return Ok(None) };
-            Ok(Some((version_row(&row, cell_id)?, row.try_get(4).db()?)))
+            Ok(Some((version_row(&row, cell_id)?, row.try_get(5).db()?)))
         })
     }
 
@@ -156,7 +161,7 @@ impl PgStore {
     }
 }
 
-/// A version from a row of (tx, receipt_hash, asof, withdrawn, ...).
+/// A version from a row of (tx, receipt_hash, asof, withdrawn, recorded, ...).
 fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
     Ok(Version {
         cell_id: cell_id.to_string(),
@@ -164,11 +169,12 @@ fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
         receipt_hash: r.try_get(1).db()?,
         asof: r.try_get(2).db()?,
         withdrawn: r.try_get(3).db()?,
+        recorded: r.try_get(4).db()?,
     })
 }
 
-/// A version from a row of (tx, receipt_hash, asof, ...) whose withdrawn versions are left out
-/// of the query (a member or a value of a slice).
+/// A version from a row of (tx, receipt_hash, asof, recorded, ...) whose withdrawn versions are
+/// left out of the query (a member or a value of a slice).
 fn valued_version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
     Ok(Version {
         cell_id: cell_id.to_string(),
@@ -176,17 +182,18 @@ fn valued_version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
         receipt_hash: r.try_get(1).db()?,
         asof: r.try_get(2).db()?,
         withdrawn: false,
+        recorded: r.try_get(3).db()?,
     })
 }
 
 /// A member from a row of (tx, receipt_hash, asof, bytes, ...): a slice's member, never withdrawn.
 fn member_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
-    Ok(SliceMember { version: valued_version_row(r, cell_id)?, receipt: r.try_get(3).db()? })
+    Ok(SliceMember { version: valued_version_row(r, cell_id)?, receipt: r.try_get(4).db()? })
 }
 
 /// A version-slice member from a row of (tx, receipt_hash, asof, withdrawn, bytes).
 fn versions_between_row(r: &postgres::Row, cell_id: &str) -> Result<SliceMember> {
-    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(4).db()? })
+    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.try_get(5).db()? })
 }
 
 /// A cell's arguments from the "name:type:value" items of the typed-argument index
@@ -206,17 +213,17 @@ fn cell_args(items: Vec<String>) -> Result<datumesh_core::Args> {
     Ok(args)
 }
 
-/// A member's value and cell from a row of (tx, receipt_hash, asof, value_type, value, ns,
-/// fn, fn_hash, "name:type:value" of each argument, ...): the cell is rebuilt from the
+/// A member's value and cell from a row of (tx, receipt_hash, asof, recorded, value_type, value,
+/// ns, fn, fn_hash, "name:type:value" of each argument, sort key): the cell is rebuilt from the
 /// typed-argument index.
 fn value_row(r: &postgres::Row, cell_id: &str) -> Result<SliceValue> {
     let bad =
         |what: &str| Error::Invalid(datumesh_core::Error::new(ErrorCode::CanonType, "$", format!("a stored {what}")));
-    let (ty, value): (String, String) = (r.try_get(3).db()?, r.try_get(4).db()?);
+    let (ty, value): (String, String) = (r.try_get(4).db()?, r.try_get(5).db()?);
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
-    let args = cell_args(r.try_get::<_, Vec<String>>(8).db()?)?;
-    let cell = Cell { args, fn_hash: r.try_get(7).db()?, fn_name: r.try_get(6).db()?, ns: r.try_get(5).db()? };
-    let sort_key: Vec<u8> = r.try_get(9).db()?;
+    let args = cell_args(r.try_get::<_, Vec<String>>(9).db()?)?;
+    let cell = Cell { args, fn_hash: r.try_get(8).db()?, fn_name: r.try_get(7).db()?, ns: r.try_get(6).db()? };
+    let sort_key: Vec<u8> = r.try_get(10).db()?;
     Ok(SliceValue {
         version: valued_version_row(r, cell_id)?,
         value: Scalar::from_lexical(ty, &value)?,
@@ -412,7 +419,20 @@ struct HostState {
 
 /// `put_cells` on one connection, in one transaction: the items in order, with the checks
 /// and the errors of `put_receipt` and `put_version` (see `Store::put_cells`).
-fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Parsed>>) -> Result<Vec<String>> {
+/// Whether the versions table has the recorded column (migration 17). A store on an older schema
+/// writes versions by tx, as 0.6.4 did, and migration 17 backfills their recorded time (decision B).
+fn has_recorded(c: &mut Conn) -> Result<bool> {
+    let st = c.stmt(Q::HasRecorded)?;
+    c.client.query_one(&st, &[]).db()?.try_get(0).db()
+}
+
+fn put_cells_in(
+    c: &mut Conn,
+    items: &[CellWrite<'_>],
+    prepared: Vec<Result<Parsed>>,
+    clock: Option<&crate::RecordingClock>,
+    has: bool,
+) -> Result<Vec<String>> {
     let version_cells = || {
         items
             .iter()
@@ -422,11 +442,11 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Pars
     let st_lock = c.stmt(Q::VersionLocksMany)?;
     let st_get = c.stmt(Q::ReceiptsGetMany)?;
     let st_ns = c.stmt(Q::NamespacesGetMany)?;
-    let st_latest = c.stmt(Q::VersionsLatestTxMany)?;
+    let st_latest = c.stmt(if has { Q::VersionsLatestTxMany } else { Q::VersionsLatestTxManyLegacy })?;
     let st_put = c.stmt(Q::ReceiptsPutMany)?;
     let st_edges = c.stmt(Q::EdgesPutMany)?;
     let st_slice_edges = c.stmt(Q::SliceEdgesPutMany)?;
-    let st_versions = c.stmt(Q::VersionsPutMany)?;
+    let st_versions = c.stmt(if has { Q::VersionsPutMany } else { Q::VersionsPutManyLegacy })?;
     let mut t = c.client.transaction().db()?;
 
     // The version locks, in item order (as put_version takes them; one statement).
@@ -500,7 +520,7 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Pars
     // state of the store plus the items before. The first failure is the call's error.
     let mut out: Vec<String> = Vec::with_capacity(items.len());
     let mut new: Vec<Parsed> = Vec::new();
-    let mut versions: Vec<(&str, &str, String)> = Vec::new();
+    let mut versions: Vec<(&str, &str, String, String)> = Vec::new();
     for (i, pr) in prepared.into_iter().enumerate() {
         let p = pr?;
         let host_state = namespaces.get(&p.host);
@@ -536,18 +556,19 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Pars
             if p.tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: p.tx.clone() });
             }
+            let recorded = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
             if let Some(l) = latest.get(cell) {
-                if tx <= l.as_str() {
+                if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell.to_string(),
-                        given: tx.to_string(),
+                        given: recorded.clone(),
                         latest: l.clone(),
                     });
                 }
             }
-            latest.insert(cell.to_string(), tx.to_string());
-            versions.push((cell, tx, p.hash.clone()));
+            latest.insert(cell.to_string(), recorded.clone());
+            versions.push((cell, tx, p.hash.clone(), recorded));
         }
         out.push(p.hash.clone());
         if !is_stored {
@@ -598,14 +619,19 @@ fn put_cells_in(c: &mut Conn, items: &[CellWrite<'_>], prepared: Vec<Result<Pars
         let cells: Vec<&str> = versions.iter().map(|v| v.0).collect();
         let txs: Vec<&str> = versions.iter().map(|v| v.1).collect();
         let hashes: Vec<&str> = versions.iter().map(|v| v.2.as_str()).collect();
-        t.execute(&st_versions, &[&cells, &txs, &hashes]).db()?;
+        if has {
+            let recorded: Vec<&str> = versions.iter().map(|v| v.3.as_str()).collect();
+            t.execute(&st_versions, &[&cells, &txs, &hashes, &recorded]).db()?;
+        } else {
+            t.execute(&st_versions, &[&cells, &txs, &hashes]).db()?;
+        }
     }
     t.commit().db()?;
     Ok(out)
 }
 
-/// The version of `cell_id` in a row of `VersionLatestMany` (tx, receipt hash, asof), `None`
-/// when the cell has none.
+/// The version of `cell_id` in a row of `VersionLatestMany` (tx, receipt hash, asof, withdrawn,
+/// recorded), `None` when the cell has none.
 fn latest_row(r: &postgres::Row, cell_id: &str) -> Result<Option<Version>> {
     let Some(tx) = r.try_get::<_, Option<String>>(0).db()? else { return Ok(None) };
     Ok(Some(Version {
@@ -614,6 +640,7 @@ fn latest_row(r: &postgres::Row, cell_id: &str) -> Result<Option<Version>> {
         receipt_hash: r.try_get(1).db()?,
         asof: r.try_get(2).db()?,
         withdrawn: r.try_get(3).db()?,
+        recorded: r.try_get(4).db()?,
     }))
 }
 
@@ -646,6 +673,73 @@ fn own_method_bindings(
 }
 
 impl Store for PgStore {
+    fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
+        let members = i32::try_from(set.members).map_err(|_| {
+            Error::Invalid(datumesh_core::Error::new(
+                datumesh_core::ErrorCode::Schema,
+                "$",
+                "members is over the limit",
+            ))
+        })?;
+        self.run("put_member_set", |c| {
+            let st = c.stmt(Q::MemberSetPut)?;
+            let n = c
+                .client
+                .execute(
+                    &st,
+                    &[
+                        &set.entry,
+                        &set.slice_id,
+                        &set.members_hash,
+                        &set.fn_hash,
+                        &set.slice,
+                        &members,
+                        &set.tx,
+                        &set.asof,
+                    ],
+                )
+                .db()?;
+            Ok(n == 1)
+        })
+    }
+
+    fn member_set_checked(&self, entry: &str) -> Result<Option<MemberSet>> {
+        self.run("member_set", |c| {
+            let st = c.stmt(Q::MemberSetGet)?;
+            let Some(row) = c.client.query_opt(&st, &[&entry]).db()? else { return Ok(None) };
+            let members: i32 = row.try_get(4).db()?;
+            Ok(Some(MemberSet {
+                entry: entry.to_string(),
+                slice_id: row.try_get(0).db()?,
+                members_hash: row.try_get(1).db()?,
+                fn_hash: row.try_get(2).db()?,
+                slice: row.try_get(3).db()?,
+                members: u64::try_from(members).unwrap_or(0),
+                tx: row.try_get(5).db()?,
+                asof: row.try_get(6).db()?,
+            }))
+        })
+    }
+
+    fn put_slice_definition_checked(&self, slice: &Slice) -> Result<bool> {
+        let (id, fn_hash, bytes) = (slice.id(), slice.fn_hash(), slice.canonical());
+        self.run("put_slice_definition", |c| {
+            let st = c.stmt(Q::SliceDefinitionPut)?;
+            Ok(c.client.execute(&st, &[&id, &fn_hash, &bytes]).db()? == 1)
+        })
+    }
+
+    fn slice_definition_checked(&self, slice_id: &str) -> Result<Option<Slice>> {
+        let bytes: Option<Vec<u8>> = self.run("slice_definition", |c| {
+            let st = c.stmt(Q::SliceDefinitionGet)?;
+            match c.client.query_opt(&st, &[&slice_id]).db()? {
+                Some(row) => Ok(Some(row.try_get(0).db()?)),
+                None => Ok(None),
+            }
+        })?;
+        bytes.map(|b| Slice::from_json(&b).map_err(Error::Invalid)).transpose()
+    }
+
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
         // spec-0.4.0's descriptor: `signature.order` and argument `extent` allowed.
         let d = FunctionDescriptor::from_json(bytes)?;
@@ -752,12 +846,14 @@ impl Store for PgStore {
         check_instant(tx, "tx")?;
         check_hex(receipt_hash, 64, "receipt_hash")?;
         self.run("put_version", |c| {
+            let has = has_recorded(c)?;
+            let recorded = if has { crate::recorded_at(self.clock.as_ref(), tx) } else { tx.to_string() };
             let lock = c.stmt(Q::Lock)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let ns = c.stmt(Q::NamespaceGet)?;
-            let latest = c.stmt(Q::VersionLatestTx)?;
-            let put = c.stmt(Q::VersionPut)?;
+            let latest = c.stmt(if has { Q::VersionLatestTx } else { Q::VersionLatestTxLegacy })?;
+            let put = c.stmt(if has { Q::VersionPut } else { Q::VersionPutLegacy })?;
             let mut t = c.client.transaction().db()?;
             t.execute(&lock, &[&"versions", &cell_id]).db()?;
             let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
@@ -780,16 +876,20 @@ impl Store for PgStore {
             }
             if let Some(row) = t.query_opt(&latest, &[&cell_id]).db()? {
                 let l: String = row.try_get(0).db()?;
-                if tx <= l.as_str() {
+                if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell_id.to_string(),
-                        given: tx.to_string(),
+                        given: recorded.clone(),
                         latest: l,
                     });
                 }
             }
-            t.execute(&put, &[&cell_id, &tx, &receipt_hash]).db()?;
+            if has {
+                t.execute(&put, &[&cell_id, &tx, &receipt_hash, &recorded]).db()?;
+            } else {
+                t.execute(&put, &[&cell_id, &tx, &receipt_hash]).db()?;
+            }
             t.commit().db()?;
             Ok(())
         })?;
@@ -865,7 +965,11 @@ impl Store for PgStore {
         }
         // Parsing (and so the first malformed receipt's error) is in item order below.
         let prepared = parallel(items, |w| parse_receipt(w.receipt));
-        let hashes = self.run("put_cells", |c| put_cells_in(c, items, prepared))?;
+        let clock = self.clock.as_ref();
+        let hashes = self.run("put_cells", |c| {
+            let has = has_recorded(c)?;
+            put_cells_in(c, items, prepared, clock, has)
+        })?;
         tracing::debug!(target: "datumesh_store", items = items.len(), "put_cells");
         Ok(hashes)
     }
@@ -2328,13 +2432,13 @@ impl Pattern {
     /// The members as of `asof`, in key order.
     fn members(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceMember>> {
         let qs = [Q::SliceMembersAll, Q::SliceMembersText, Q::SliceMembersNum];
-        self.rows(c, asof, qs, 4, member_row, |m| &m.version.cell_id)
+        self.rows(c, asof, qs, 5, member_row, |m| &m.version.cell_id)
     }
 
     /// The members' values as of `asof`, in key order.
     fn values(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceValue>> {
         let qs = [Q::SliceValuesAll, Q::SliceValuesText, Q::SliceValuesNum];
-        self.rows(c, asof, qs, 10, value_row, |m| &m.version.cell_id)
+        self.rows(c, asof, qs, 11, value_row, |m| &m.version.cell_id)
     }
 
     /// The members' values as of `asof`, in key order, at most `limit`: the statement of
@@ -2394,7 +2498,7 @@ impl Pattern {
         let rows = c.client.query(&st, &params).db()?;
         rows.iter()
             .map(|r| {
-                let cell_id: String = r.try_get(10).db()?;
+                let cell_id: String = r.try_get(11).db()?;
                 value_row(r, &cell_id)
             })
             .collect()
@@ -2479,7 +2583,7 @@ impl Pattern {
         };
         rows.iter()
             .map(|r| {
-                let cell_id: String = r.try_get(10).db()?;
+                let cell_id: String = r.try_get(11).db()?;
                 value_row(r, &cell_id)
             })
             .collect()
@@ -2526,7 +2630,7 @@ impl Pattern {
         let rows = c.client.query(&st, &params).db()?;
         rows.iter()
             .map(|r| {
-                let cell_id: String = r.try_get(10).db()?;
+                let cell_id: String = r.try_get(11).db()?;
                 value_row(r, &cell_id)
             })
             .collect()

@@ -19,8 +19,8 @@ use crate::sqlite_sql::L;
 use crate::{
     later_than, not_canonical_class, parse_receipt, stored_value, unbound, Binding, CatalogEntry, CatalogEntryExt,
     CatalogKind, ClassBinding, Dictionary, DictionaryValue, Embedding, FacetedEntry, FunctionTest, Hit, KeyValue,
-    Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary, Version,
-    FIND_MISSES_CAP, WITHDRAWN_VALUE,
+    MemberSet, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary,
+    Version, FIND_MISSES_CAP, WITHDRAWN_VALUE,
 };
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
@@ -32,11 +32,34 @@ use datumesh_core::{
 /// How a [`SqliteStore`] opens and uses its connections.
 ///
 /// Builder style: `SqliteOptions::new().busy_timeout(Duration::from_secs(5))`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct SqliteOptions {
     max_size: usize,
     busy_timeout: Duration,
     durable: bool,
+    pub(crate) recording_clock: Option<crate::RecordingClock>,
+}
+
+impl PartialEq for SqliteOptions {
+    fn eq(&self, other: &SqliteOptions) -> bool {
+        self.max_size == other.max_size
+            && self.busy_timeout == other.busy_timeout
+            && self.durable == other.durable
+            && crate::same_clock(&self.recording_clock, &other.recording_clock)
+    }
+}
+
+impl Eq for SqliteOptions {}
+
+impl std::fmt::Debug for SqliteOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteOptions")
+            .field("max_size", &self.max_size)
+            .field("busy_timeout", &self.busy_timeout)
+            .field("durable", &self.durable)
+            .field("recording_clock", &self.recording_clock.is_some())
+            .finish()
+    }
 }
 
 impl Default for SqliteOptions {
@@ -50,7 +73,15 @@ impl SqliteOptions {
     /// database's write lock (and a reader for a lock held in exclusive mode); every commit
     /// durable (`synchronous = FULL`).
     pub fn new() -> SqliteOptions {
-        SqliteOptions { max_size: 8, busy_timeout: Duration::from_secs(30), durable: true }
+        SqliteOptions { max_size: 8, busy_timeout: Duration::from_secs(30), durable: true, recording_clock: None }
+    }
+
+    /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,
+    /// `recorded = max(signed tx, clock())`. Without one a version is recorded at its signed tx.
+    /// Since 0.6.5.
+    pub fn recording_clock(mut self, clock: crate::RecordingClock) -> SqliteOptions {
+        self.recording_clock = Some(clock);
+        self
     }
 
     /// The most idle connections kept open for reuse (at least 1). More may be open at
@@ -343,7 +374,7 @@ impl SqliteStore {
         self.run(op, |c| {
             c.prepare_cached(q.sql())
                 .db()?
-                .query_row(rusqlite::params![cell_id, asof], |r| Ok((version_row(r, cell_id)?, r.get(4)?)))
+                .query_row(rusqlite::params![cell_id, asof], |r| Ok((version_row(r, cell_id)?, r.get(5)?)))
                 .optional()
                 .db()
         })
@@ -438,7 +469,8 @@ pub(crate) fn result_code_name(code: std::os::raw::c_int) -> String {
     name.to_string()
 }
 
-/// A version from a row of (tx, receipt_hash, asof, withdrawn, ...) (0.6.0: withdrawn is 0 or 1).
+/// A version from a row of (tx, receipt_hash, asof, withdrawn, recorded, ...) (0.6.0: withdrawn is
+/// 0 or 1; 0.6.5: recorded is the version's recorded time).
 fn version_row(r: &rusqlite::Row<'_>, cell_id: &str) -> rusqlite::Result<Version> {
     Ok(Version {
         cell_id: cell_id.to_string(),
@@ -446,6 +478,7 @@ fn version_row(r: &rusqlite::Row<'_>, cell_id: &str) -> rusqlite::Result<Version
         receipt_hash: r.get(1)?,
         asof: r.get(2)?,
         withdrawn: r.get(3)?,
+        recorded: r.get(4)?,
     })
 }
 
@@ -809,6 +842,77 @@ impl SqliteStore {
 }
 
 impl Store for SqliteStore {
+    fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
+        let members = i64::try_from(set.members).unwrap_or(i64::MAX);
+        self.write("put_member_set", |c| {
+            let n = c
+                .prepare_cached(L::MemberSetPut.sql())
+                .db()?
+                .execute(rusqlite::params![
+                    set.entry,
+                    set.slice_id,
+                    set.members_hash,
+                    set.fn_hash,
+                    set.slice,
+                    members,
+                    set.tx,
+                    set.asof
+                ])
+                .db()?;
+            Ok(n == 1)
+        })
+    }
+
+    fn member_set_checked(&self, entry: &str) -> Result<Option<MemberSet>> {
+        self.run("member_set", |c| {
+            let row = c
+                .prepare_cached(L::MemberSetGet.sql())
+                .db()?
+                .query_row([entry], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Vec<u8>>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                })
+                .optional()
+                .db()?;
+            Ok(row.map(|(slice_id, members_hash, fn_hash, slice, members, tx, asof)| MemberSet {
+                entry: entry.to_string(),
+                slice_id,
+                members_hash,
+                fn_hash,
+                slice,
+                members: u64::try_from(members).unwrap_or(0),
+                tx,
+                asof,
+            }))
+        })
+    }
+
+    fn put_slice_definition_checked(&self, slice: &Slice) -> Result<bool> {
+        let (id, fn_hash, bytes) = (slice.id().to_string(), slice.fn_hash().to_string(), slice.canonical());
+        self.write("put_slice_definition", |c| {
+            let n = c
+                .prepare_cached(L::SliceDefinitionPut.sql())
+                .db()?
+                .execute(rusqlite::params![id, fn_hash, bytes])
+                .db()?;
+            Ok(n == 1)
+        })
+    }
+
+    fn slice_definition_checked(&self, slice_id: &str) -> Result<Option<Slice>> {
+        let bytes: Option<Vec<u8>> = self.run("slice_definition", |c| {
+            c.prepare_cached(L::SliceDefinitionGet.sql()).db()?.query_row([slice_id], |r| r.get(0)).optional().db()
+        })?;
+        bytes.map(|b| Slice::from_json(&b).map_err(Error::Invalid)).transpose()
+    }
+
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String> {
         let d = FunctionDescriptor::from_json(bytes)?;
         let hash = d.hash();
@@ -956,6 +1060,10 @@ impl Store for SqliteStore {
         check_instant(tx, "tx")?;
         check_hex(receipt_hash, 64, "receipt_hash")?;
         self.write("put_version", |c| {
+            // A store on a schema older than migration 17 writes by tx, as 0.6.4 did (decision B).
+            let has = c.prepare_cached(L::HasRecorded.sql()).db()?.query_row([], |r| r.get::<_, i64>(0)).db()? == 1;
+            let recorded =
+                if has { crate::recorded_at(self.options.recording_clock.as_ref(), tx) } else { tx.to_string() };
             let meta: Option<(String, String)> = c
                 .prepare_cached(L::ReceiptMeta.sql())
                 .db()?
@@ -978,17 +1086,23 @@ impl Store for SqliteStore {
             if r_tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: r_tx });
             }
-            if let Some(l) = get_strings(c, L::VersionLatestTx, cell_id)?.pop() {
-                if tx <= l.as_str() {
+            if let Some(l) =
+                get_strings(c, if has { L::VersionLatestTx } else { L::VersionLatestTxLegacy }, cell_id)?.pop()
+            {
+                if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell_id.to_string(),
-                        given: tx.to_string(),
+                        given: recorded.clone(),
                         latest: l,
                     });
                 }
             }
-            exec(c, L::VersionPut, rusqlite::params![cell_id, tx, receipt_hash])?;
+            if has {
+                exec(c, L::VersionPut, rusqlite::params![cell_id, tx, receipt_hash, recorded])?;
+            } else {
+                exec(c, L::VersionPutLegacy, rusqlite::params![cell_id, tx, receipt_hash])?;
+            }
             Ok(())
         })?;
         tracing::debug!(target: "datumesh_store", cell_id, tx, receipt_hash, "put_version");
@@ -1450,7 +1564,7 @@ impl Store for SqliteStore {
         let p = Pattern::of(&v)?;
         self.run("slice_members", |c| {
             let rows = rows(&p, c, asof, [L::SliceMembersAll, L::SliceMembersDrive], |r| {
-                let cell_id: String = r.get(4)?;
+                let cell_id: String = r.get(5)?;
                 Ok((
                     SliceMember {
                         // A slice's members leave the withdrawn versions out (the query does).
@@ -1460,10 +1574,11 @@ impl Store for SqliteStore {
                             receipt_hash: r.get(1)?,
                             asof: r.get(2)?,
                             withdrawn: false,
+                            recorded: r.get(3)?,
                         },
-                        receipt: r.get(3)?,
+                        receipt: r.get(4)?,
                     },
-                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })?;
             in_key_order(&p, rows, |m| &m.version.cell_id)
@@ -1479,7 +1594,7 @@ impl Store for SqliteStore {
             let mut st = c.prepare_cached(L::VersionsBetween.sql()).db()?;
             let rows = st
                 .query_map(rusqlite::params![cell_id, from, to, asof], |r| {
-                    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.get(4)? })
+                    Ok(SliceMember { version: version_row(r, cell_id)?, receipt: r.get(5)? })
                 })
                 .db()?;
             rows.collect::<rusqlite::Result<Vec<SliceMember>>>().db()
@@ -2287,7 +2402,7 @@ impl Store for SqliteStore {
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,
 /// arguments, ns, fn, fn_hash, sort_key).
-type ValueColumns = (String, String, String, String, String, String, String, String, String, String, Vec<u8>);
+type ValueColumns = (String, String, String, String, String, String, String, String, String, String, String, Vec<u8>);
 
 fn value_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueColumns> {
     Ok((
@@ -2302,19 +2417,20 @@ fn value_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueColumns> {
         r.get(8)?,
         r.get(9)?,
         r.get(10)?,
+        r.get(11)?,
     ))
 }
 
 /// A member's value and cell, rebuilt from the typed-argument index (with its arguments).
 fn value_of(c: ValueColumns) -> Result<(SliceValue, Args)> {
-    let (tx, receipt_hash, asof, ty, value, cell_id, args, ns, fn_name, fn_hash, sort_key) = c;
+    let (tx, receipt_hash, asof, recorded, ty, value, cell_id, args, ns, fn_name, fn_hash, sort_key) = c;
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
     let args = args_of(&args)?;
     let cell = Cell { args: args.clone(), fn_hash, fn_name, ns };
     Ok((
         SliceValue {
             // A slice's values leave the withdrawn versions out (the query does).
-            version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false },
+            version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false, recorded },
             value: Scalar::from_lexical(ty, &value)?,
             cell,
             sort_key,

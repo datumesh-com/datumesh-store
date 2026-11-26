@@ -88,9 +88,9 @@ macro_rules! slice_members {
             $where,
             " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
                AND v.rowid = (SELECT v2.rowid FROM versions v2 CROSS JOIN receipts r2
-                               WHERE v2.cell_id = c.cell_id AND v2.tx <= :asof
+                               WHERE v2.cell_id = c.cell_id AND coalesce(v2.recorded, v2.tx) <= :asof
                                  AND r2.hash = v2.receipt_hash AND r2.asof <= :asof
-                               ORDER BY v2.tx DESC LIMIT 1)
+                               ORDER BY coalesce(v2.recorded, v2.tx) DESC LIMIT 1)
                AND r.hash = v.receipt_hash AND r.value_type <> '' AND ",
             slice_match!()
         )
@@ -110,9 +110,9 @@ macro_rules! slice_withdrawn {
             $where,
             " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
                AND v.rowid = (SELECT v2.rowid FROM versions v2 CROSS JOIN receipts r2
-                               WHERE v2.cell_id = c.cell_id AND v2.tx <= :asof
+                               WHERE v2.cell_id = c.cell_id AND coalesce(v2.recorded, v2.tx) <= :asof
                                  AND r2.hash = v2.receipt_hash AND r2.asof <= :asof
-                               ORDER BY v2.tx DESC LIMIT 1)
+                               ORDER BY coalesce(v2.recorded, v2.tx) DESC LIMIT 1)
                AND r.hash = v.receipt_hash AND r.value_type = '' AND ",
             slice_match!(),
             " ORDER BY v.tx DESC, r.asof DESC LIMIT 1"
@@ -123,7 +123,7 @@ macro_rules! slice_withdrawn {
 /// A member's columns: (tx, receipt_hash, asof, bytes, cell_id, arguments).
 macro_rules! member_cols {
     () => {
-        "v.tx, v.receipt_hash, r.asof, r.bytes, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
+        "v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.bytes, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                                                 FROM cell_args a WHERE a.cell_id = c.cell_id)"
     };
 }
@@ -132,7 +132,7 @@ macro_rules! member_cols {
 /// arguments, ns, fn, fn_hash, sort_key).
 macro_rules! value_cols {
     () => {
-        "v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
+        "v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.value_type, r.value, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                                                              FROM cell_args a WHERE a.cell_id = c.cell_id),
          c.ns, c.fn, c.fn_hash, c.sort_key"
     };
@@ -147,8 +147,8 @@ macro_rules! changed_cand {
             " WHERE ",
             $where,
             " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
-               AND EXISTS (SELECT 1 FROM receipts r WHERE r.cell_id = c.cell_id AND r.asof > :asof
-                              AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash))
+               AND EXISTS (SELECT 1 FROM versions v CROSS JOIN receipts r ON r.hash = v.receipt_hash
+                            WHERE v.cell_id = c.cell_id AND (coalesce(v.recorded, v.tx) > :asof OR r.asof > :asof))
                AND ",
             slice_match!(),
             " LIMIT 1"
@@ -254,7 +254,7 @@ statements! {
     // The stored test cells whose function_hash argument is ?1 and whose latest version is false.
     FalseTestCells = "SELECT c.cell_id, r.bytes FROM cell_args a JOIN cells c ON c.cell_id = a.cell_id
                         JOIN (SELECT v.receipt_hash, v.cell_id FROM versions v
-                               WHERE v.tx = (SELECT max(w.tx) FROM versions w WHERE w.cell_id = v.cell_id)) m
+                               WHERE coalesce(v.recorded, v.tx) = (SELECT max(coalesce(w.recorded, w.tx)) FROM versions w WHERE w.cell_id = v.cell_id)) m
                           ON m.cell_id = c.cell_id
                         JOIN receipts r ON r.hash = m.receipt_hash
                        WHERE a.name = 'function_hash' AND a.type = 'string' AND a.value = ?1 AND c.fn = 'test_case'
@@ -278,13 +278,13 @@ statements! {
                             AND EXISTS (SELECT 1 FROM versions v WHERE v.cell_id = c.cell_id)
                           ORDER BY c.cell_id LIMIT ?4) k
                         JOIN receipts r ON r.hash = (SELECT v.receipt_hash FROM versions v WHERE v.cell_id = k.cell_id
-                                                      ORDER BY v.tx DESC LIMIT 1)
+                                                      ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1)
                           AND r.value_type <> ''
                         ORDER BY k.cell_id";
     // The cells of a function name, from the counter (0.5.3; the primary key).
     StoredCellCount = "SELECT COALESCE((SELECT n FROM cell_counts WHERE fn_hash = ?1 AND ns = ?2 AND fn = ?3), 0)";
     // A version slice's versions, at most ?5 (SQL LIMIT, in tx order).
-    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
                          FROM versions v WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 ORDER BY v.tx LIMIT ?4";
     // Dictionaries (0.5.2): exact lookups on the unique (owner, key, value).
     DictionaryHas = "SELECT EXISTS (SELECT 1 FROM key_values WHERE owner = ?1 AND key = ?2 AND value = ?3)";
@@ -320,32 +320,40 @@ statements! {
                 WHERE NOT EXISTS (SELECT 1 FROM blobs WHERE sha256 = ?1)";
 
     // Versions come with their receipt's asof (Version::asof).
-    VersionLatestTx = "SELECT tx FROM versions WHERE cell_id = ?1 ORDER BY tx DESC LIMIT 1";
-    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
-                     FROM versions v WHERE v.cell_id = ?1 ORDER BY v.tx DESC LIMIT 1";
-    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
-                   FROM versions v WHERE v.cell_id = ?1 AND v.tx <= ?2 ORDER BY v.tx DESC LIMIT 1";
-    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash)
+    VersionLatestTx = "SELECT recorded FROM versions WHERE cell_id = ?1 ORDER BY recorded DESC LIMIT 1";
+    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+                     FROM versions v WHERE v.cell_id = ?1 ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
+    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+                   FROM versions v WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
+    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
                     FROM versions v WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 ORDER BY v.tx";
     // A stored version answers as of A when its tx <= A and its receipt's asof <= A.
-    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '' FROM versions v CROSS JOIN receipts r
-                  WHERE v.cell_id = ?1 AND v.tx <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
-                  ORDER BY v.tx DESC LIMIT 1";
-    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', r.bytes FROM versions v CROSS JOIN receipts r
-                         WHERE v.cell_id = ?1 AND v.tx <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
-                         ORDER BY v.tx DESC LIMIT 1";
-    VersionPut = "INSERT INTO versions (cell_id, tx, receipt_hash) VALUES (?1, ?2, ?3)";
+    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx) FROM versions v CROSS JOIN receipts r
+                  WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
+                  ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
+    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes FROM versions v CROSS JOIN receipts r
+                         WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
+                         ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
+    VersionPut = "INSERT INTO versions (cell_id, tx, receipt_hash, recorded) VALUES (?1, ?2, ?3, ?4)";
+    // The member-set rows (0.6.5, G2) and the slice definitions (G10): inserted or nothing (the
+    // insert selects no row when the key is held, so the append-only trigger never fires).
+    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof)
+                    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE NOT EXISTS (SELECT 1 FROM member_sets WHERE entry = ?1)";
+    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof FROM member_sets WHERE entry = ?1";
+    SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) SELECT ?1, ?2, ?3
+                          WHERE NOT EXISTS (SELECT 1 FROM slice_definitions WHERE slice_id = ?1)";
+    SliceDefinitionGet = "SELECT slice FROM slice_definitions WHERE slice_id = ?1";
     // The Resolver's evaluate of a stored function: the receipt of stored_asof's version.
     ValueAsof = "SELECT r.bytes FROM versions v CROSS JOIN receipts r
-                 WHERE v.cell_id = ?1 AND v.tx <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
-                 ORDER BY v.tx DESC LIMIT 1";
+                 WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
+                 ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
 
     ComputedPut = "INSERT INTO computed_versions (cell_id, tx, asof, receipt_hash) VALUES (?1, ?2, ?3, ?4)";
     ComputedGet = "SELECT receipt_hash FROM computed_versions WHERE cell_id = ?1 AND tx = ?2 AND asof = ?3";
     // The greatest asof <= A, ties the greatest tx.
-    ComputedAsof = "SELECT tx, receipt_hash, asof, 0 FROM computed_versions
+    ComputedAsof = "SELECT tx, receipt_hash, asof, 0, tx FROM computed_versions
                     WHERE cell_id = ?1 AND asof <= ?2 ORDER BY asof DESC, tx DESC LIMIT 1";
-    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, 0, r.bytes FROM
+    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, 0, c.tx, r.bytes FROM
                                (SELECT tx, receipt_hash, asof FROM computed_versions
                                  WHERE cell_id = ?1 AND asof <= ?2 ORDER BY asof DESC, tx DESC LIMIT 1) c
                            CROSS JOIN receipts r WHERE r.hash = c.receipt_hash";
@@ -417,21 +425,21 @@ statements! {
     SliceDependents = "SELECT receipt_hash FROM slice_edges WHERE entry = ?1 ORDER BY receipt_hash";
 
     // A version slice: the stored versions with from <= tx <= to answering as of A.
-    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', r.bytes FROM versions v CROSS JOIN receipts r
-                       WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND v.tx <= ?4
+    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes FROM versions v CROSS JOIN receipts r
+                       WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND coalesce(v.recorded, v.tx) <= ?4
                          AND r.hash = v.receipt_hash AND r.asof <= ?4 ORDER BY v.tx";
-    // Its values: (tx, receipt_hash, asof, value_type, value, cell_id, arguments, ns, fn, fn_hash,
-    // sort_key).
-    VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type, r.value, c.cell_id,
+    // Its values: (tx, receipt_hash, asof, recorded, value_type, value, cell_id, arguments, ns, fn,
+    // fn_hash, sort_key).
+    VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.value_type, r.value, c.cell_id,
                                     (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                        FROM cell_args a WHERE a.cell_id = c.cell_id),
                                     c.ns, c.fn, c.fn_hash, c.sort_key
                                FROM versions v CROSS JOIN receipts r CROSS JOIN cells c
-                              WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND v.tx <= ?4
+                              WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND coalesce(v.recorded, v.tx) <= ?4
                                 AND r.hash = v.receipt_hash AND r.asof <= ?4
                                 AND r.value_type <> '' AND c.cell_id = v.cell_id ORDER BY v.tx";
     VersionsChangedAfter = "SELECT EXISTS (SELECT 1 FROM versions v CROSS JOIN receipts r
-                             WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND r.hash = v.receipt_hash AND r.asof > ?4)";
+                             WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND r.hash = v.receipt_hash AND (coalesce(v.recorded, v.tx) > ?4 OR r.asof > ?4))";
 
     // The members of a slice of cells, and their values: from every cell of the function,
     // or from a range of one argument of the typed-argument index.
@@ -451,14 +459,25 @@ statements! {
                    WHERE fn_hash = ?1 AND name = ?2 AND type = ?3 AND sort_key BETWEEN ?4 AND ?5 LIMIT 10001)";
     // Whether a matching cell has a stored version whose receipt's asof is after A: from
     // the function's receipts with an asof after A, then each one's cell against the slice,
+    // Two branches, each stopping at its first match: a version recorded after A of a matching cell
+    // (versions_recorded_all), or a receipt of the function with an asof after A and its version
+    // (receipts_fn_hash_asof), of a matching cell.
     ChangedRecent = concat!(
-        "SELECT 1 FROM receipts r INDEXED BY receipts_fn_hash_asof CROSS JOIN cells c
-          WHERE r.fn_hash = :fn_hash AND r.asof > :asof AND c.cell_id = r.cell_id
-            AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs
-            AND EXISTS (SELECT 1 FROM versions v WHERE v.receipt_hash = r.hash) AND ",
+        "SELECT x FROM (SELECT 1 AS x FROM versions v INDEXED BY versions_recorded_all JOIN cells c ON c.cell_id = v.cell_id
+           WHERE coalesce(v.recorded, v.tx) > :asof AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs AND ",
         slice_match!(),
-        " LIMIT 1"
+        " LIMIT 1)
+          UNION ALL
+         SELECT x FROM (SELECT 1 AS x FROM receipts r INDEXED BY receipts_fn_hash_asof JOIN versions v ON v.receipt_hash = r.hash
+                      JOIN cells c ON c.cell_id = v.cell_id
+                     WHERE r.fn_hash = :fn_hash AND r.asof > :asof AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs AND ",
+        slice_match!(),
+        " LIMIT 1)"
     );
+    // The 0.6.4 statements, for a store whose schema is older than migration 17 (decision B).
+    HasRecorded = "SELECT count(*) FROM pragma_table_info('versions') WHERE name = 'recorded'";
+    VersionLatestTxLegacy = "SELECT tx FROM versions WHERE cell_id = ?1 ORDER BY tx DESC LIMIT 1";
+    VersionPutLegacy = "INSERT INTO versions (cell_id, tx, receipt_hash) VALUES (?1, ?2, ?3)";
     // or from the slice's candidate cells, then each one's receipts by cell and asof.
     ChangedCandAll = changed_cand!(from_all!(), where_all!());
     ChangedCandDrive = changed_cand!(from_drive!(), where_drive!());

@@ -103,6 +103,7 @@
 
 use std::borrow::Cow;
 
+use datumesh_core::lexical::{check_hex, check_instant};
 pub use datumesh_core::Resolver;
 use datumesh_core::{Cell, Scalar, Slice};
 
@@ -120,6 +121,37 @@ mod sqlite;
 #[cfg(feature = "sqlite")]
 mod sqlite_sql;
 mod tls;
+
+/// The clock a store records its versions at (CONTRACT-guard-patch G9): an instant, read at each
+/// insert. The store sets `recorded = max(signed tx, clock())`; with no clock it is the signed tx.
+/// Set once, when the store is opened ([`PoolOptions::recording_clock`], [`SqliteOptions::recording_clock`]).
+/// Since 0.6.5.
+pub type RecordingClock = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
+
+/// Whether two recording clocks are the same clock (the same `Arc`), for the options' equality.
+pub(crate) fn same_clock(a: &Option<RecordingClock>, b: &Option<RecordingClock>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
+/// The recorded time of a version signed at `tx`: the greater of `tx` and the store's clock, or
+/// `tx` with no clock (SPEC-free: a store detail, see [`Version::recorded`]).
+pub(crate) fn recorded_at(clock: Option<&RecordingClock>, tx: &str) -> String {
+    match clock {
+        Some(now) => {
+            let now = now();
+            if now.as_str() > tx {
+                now
+            } else {
+                tx.to_string()
+            }
+        }
+        None => tx.to_string(),
+    }
+}
 
 pub use catalogue::{
     CatalogEntry, CatalogEntryExt, CatalogKind, CatalogSource, Dictionary, DictionaryValue, EmbedRef, Embedding,
@@ -142,6 +174,100 @@ pub fn sort_key(args: &[(&str, &str, &str)]) -> Vec<u8> {
     sorted.iter().flat_map(|(_, ty, value)| slices::sort_item(ty, value)).collect()
 }
 
+/// A member-set row (CONTRACT-guard-patch G2, since 0.6.5): what a slice read saw, without its
+/// members. The entry is `slice:<slice_id>:<members_hash>`, as a manifest's; `slice` is the slice
+/// object's canonical bytes, `members` the count, `tx` the latest member or withdrawal tx the read
+/// saw (`None`: none, an empty slice) and `asof` the read's as-of. Written once per entry
+/// ([`Store::put_member_set`]).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberSet {
+    /// `slice:<slice_id>:<members_hash>`.
+    pub entry: String,
+    /// The slice's id.
+    pub slice_id: String,
+    /// The members hash (SPEC 15.13): the entry's second part.
+    pub members_hash: String,
+    /// The slice's function hash (of the version slice's cell for a version slice).
+    pub fn_hash: String,
+    /// The slice object's canonical bytes (the members are rebuilt from them).
+    pub slice: Vec<u8>,
+    /// How many members.
+    pub members: u64,
+    /// The latest member or withdrawal tx the read saw; `None` when there is none.
+    pub tx: Option<String>,
+    /// The read's as-of.
+    pub asof: String,
+}
+
+impl MemberSet {
+    /// The row of `manifest`, read at `asof`, whose latest member or withdrawal tx is `tx`.
+    pub fn from_manifest(manifest: &datumesh_core::Manifest, tx: Option<&str>, asof: &str) -> MemberSet {
+        let slice = manifest.slice();
+        MemberSet {
+            entry: manifest.entry(),
+            slice_id: slice.id().to_string(),
+            members_hash: manifest.members_hash().to_string(),
+            fn_hash: slice.fn_hash().to_string(),
+            slice: slice.canonical(),
+            members: manifest.members().len() as u64,
+            tx: tx.map(str::to_string),
+            asof: asof.to_string(),
+        }
+    }
+}
+
+/// Checks a member set's entry (`slice:<64 hex>:<64 hex>`): its two ids, and the entry's form.
+pub(crate) fn check_member_entry(entry: &str) -> Result<(&str, &str)> {
+    let bad = || Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "a member-set entry"));
+    let rest = entry.strip_prefix("slice:").ok_or_else(bad)?;
+    let (id, members_hash) = rest.split_once(':').ok_or_else(bad)?;
+    check_hex(id, 64, "slice_id")?;
+    check_hex(members_hash, 64, "members_hash")?;
+    Ok((id, members_hash))
+}
+
+/// Checks a member-set row as the store accepts it (G2): its entry, the ids and function hash,
+/// the slice bytes (a canonical slice object of the slice id and function hash) and the instants.
+pub(crate) fn check_member_set(set: &MemberSet) -> Result<()> {
+    let (id, members_hash) = check_member_entry(&set.entry)?;
+    if set.members_hash != members_hash {
+        return Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "members_hash is not the entry's",
+        )));
+    }
+    if set.slice_id != id {
+        return Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "slice_id is not the entry's",
+        )));
+    }
+    check_hex(&set.fn_hash, 64, "fn_hash")?;
+    let slice = Slice::from_json(&set.slice).map_err(Error::Invalid)?;
+    if slice.id() != set.slice_id || slice.fn_hash() != set.fn_hash || slice.canonical() != set.slice {
+        return Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "the slice bytes are not the canonical slice of the id and function hash",
+        )));
+    }
+    check_instant(&set.asof, "asof")?;
+    if let Some(tx) = &set.tx {
+        check_instant(tx, "tx")?;
+    }
+    if set.members > 1_048_576 {
+        return Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "members is over the limit",
+        )));
+    }
+    Ok(())
+}
+
 /// A version of a cell: from transaction time `tx` on, the cell's value is that of the
 /// receipt `receipt_hash`, which states it as of `asof`.
 ///
@@ -160,6 +286,10 @@ pub struct Version {
     /// Whether the receipt is a withdrawal (8.1): the cell has no value from `asof` on. Since
     /// 0.6.0; always `false` for a computed version.
     pub withdrawn: bool,
+    /// The instant the store recorded the version at (CONTRACT-guard-patch G9): the greater of
+    /// `tx` and the store's recording clock, or `tx` when the store has none. Every as-of
+    /// answer is by this time; a computed version's is its `tx`. Since 0.6.5.
+    pub recorded: String,
 }
 
 /// One cell write of [`Store::put_cells`]: a receipt and, optionally, the version it
@@ -446,6 +576,65 @@ pub(crate) fn apply_check(ns: &mut Namespace, at: &str, threshold: Option<u32>) 
 /// }
 /// ```
 pub trait Store: Resolver + sealed::Sealed {
+    /// Writes the member-set row (G2, since 0.6.5): inserted when no row with its entry is held
+    /// (`Ok(true)`), otherwise nothing (`Ok(false)`, the held row kept). A row that is not
+    /// consistent (its entry, slice bytes, function hash or instants) is [`Error::Invalid`].
+    fn put_member_set(&self, set: &MemberSet) -> Result<bool> {
+        check_member_set(set)?;
+        self.put_member_set_checked(set)
+    }
+
+    /// The member-set row of `entry`, or `None` (G2, since 0.6.5).
+    fn member_set(&self, entry: &str) -> Result<Option<MemberSet>> {
+        check_member_entry(entry)?;
+        self.member_set_checked(entry)
+    }
+
+    /// Writes a slice's definition (G10, since 0.6.5), kept once per slice id (not per date):
+    /// `Ok(true)` when inserted, `Ok(false)` when held already.
+    fn put_slice_definition(&self, slice: &Slice) -> Result<bool> {
+        self.put_slice_definition_checked(slice)
+    }
+
+    /// The definition of the slice `slice_id`, or `None` (G10, since 0.6.5).
+    fn slice_definition(&self, slice_id: &str) -> Result<Option<Slice>> {
+        check_hex(slice_id, 64, "slice_id")?;
+        self.slice_definition_checked(slice_id)
+    }
+
+    /// The row of `put_member_set`, checked by the caller. Not part of the API: the store's own
+    /// implementations override it (a sealed trait, so no other implementation exists).
+    #[doc(hidden)]
+    fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
+        let _ = set;
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no member sets here")))
+    }
+    /// The row of `member_set`, checked by the caller. Not part of the API.
+    #[doc(hidden)]
+    fn member_set_checked(&self, entry: &str) -> Result<Option<MemberSet>> {
+        let _ = entry;
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no member sets here")))
+    }
+    /// The write of `put_slice_definition`. Not part of the API.
+    #[doc(hidden)]
+    fn put_slice_definition_checked(&self, slice: &Slice) -> Result<bool> {
+        let _ = slice;
+        Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "no slice definitions here",
+        )))
+    }
+    /// The read of `slice_definition`. Not part of the API.
+    #[doc(hidden)]
+    fn slice_definition_checked(&self, slice_id: &str) -> Result<Option<Slice>> {
+        let _ = slice_id;
+        Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "no slice definitions here",
+        )))
+    }
     /// Stores a descriptor (checked and canonicalised by the core); returns its function
     /// hash. Idempotent.
     fn put_descriptor(&self, bytes: &[u8]) -> Result<String>;

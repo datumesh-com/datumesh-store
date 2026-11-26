@@ -21,13 +21,26 @@ pub(crate) type Connector = Box<dyn Fn() -> core::result::Result<Client, postgre
 /// How the pool behaves, and the roots TLS connections are verified against.
 ///
 /// Builder style: `PoolOptions::new().max_size(4).tls_root_certificates_pem(&pem)?`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct PoolOptions {
     max_size: usize,
     checkout_timeout: Duration,
     pub(crate) webpki_roots: bool,
     pub(crate) tls_roots: Vec<CertificateDer<'static>>,
+    pub(crate) recording_clock: Option<crate::RecordingClock>,
 }
+
+impl PartialEq for PoolOptions {
+    fn eq(&self, other: &PoolOptions) -> bool {
+        self.max_size == other.max_size
+            && self.checkout_timeout == other.checkout_timeout
+            && self.webpki_roots == other.webpki_roots
+            && self.tls_roots == other.tls_roots
+            && crate::same_clock(&self.recording_clock, &other.recording_clock)
+    }
+}
+
+impl Eq for PoolOptions {}
 
 impl std::fmt::Debug for PoolOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,6 +49,7 @@ impl std::fmt::Debug for PoolOptions {
             .field("checkout_timeout", &self.checkout_timeout)
             .field("webpki_roots", &self.webpki_roots)
             .field("tls_root_certificates", &self.tls_roots.len())
+            .field("recording_clock", &self.recording_clock.is_some())
             .finish()
     }
 }
@@ -55,7 +69,16 @@ impl PoolOptions {
             checkout_timeout: Duration::from_secs(30),
             webpki_roots: true,
             tls_roots: Vec::new(),
+            recording_clock: None,
         }
+    }
+
+    /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,
+    /// `recorded = max(signed tx, clock())`. Without one a version is recorded at its signed tx.
+    /// Since 0.6.5.
+    pub fn recording_clock(mut self, clock: crate::RecordingClock) -> PoolOptions {
+        self.recording_clock = Some(clock);
+        self
     }
 
     /// The most connections open at once (at least 1).

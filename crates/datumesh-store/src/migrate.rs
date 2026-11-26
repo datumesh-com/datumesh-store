@@ -84,6 +84,8 @@ pub const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../migrations/0014_withdrawals_and_closed_names.sql"),
     },
     Migration { version: 15, name: "0015_sort_key.sql", sql: include_str!("../migrations/0015_sort_key.sql") },
+    Migration { version: 16, name: "0016_member_sets.sql", sql: include_str!("../migrations/0016_member_sets.sql") },
+    Migration { version: 17, name: "0017_recorded.sql", sql: include_str!("../migrations/0017_recorded.sql") },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -304,6 +306,16 @@ pub mod sqlite {
             version: 11,
             name: "0011_sort_key.sql",
             sql: include_str!("../migrations/sqlite/0011_sort_key.sql"),
+        },
+        Migration {
+            version: 12,
+            name: "0012_member_sets.sql",
+            sql: include_str!("../migrations/sqlite/0012_member_sets.sql"),
+        },
+        Migration {
+            version: 13,
+            name: "0013_recorded.sql",
+            sql: include_str!("../migrations/sqlite/0013_recorded.sql"),
         },
     ];
 
