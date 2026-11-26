@@ -149,4 +149,28 @@ fn pg_the_barrier_honours_its_timeout() {
     s.barrier().unwrap();
 }
 
+// ---- B6: the rebuild listing under a statement timeout -----------------------------------------
+
+#[test]
+fn pg_slice_member_hashes_within_errors_when_its_timeout_passes() {
+    let db = TestDb::migrated(Backend::Pg);
+    let s = slice_store(&db);
+    let h = function(&s);
+    for chunk in (0..20_000u32).collect::<Vec<_>>().chunks(500) {
+        let built: Vec<(String, Vec<u8>)> =
+            chunk.iter().map(|&k| (kcell(&h, k).id(), slice_receipt(&kcell(&h, k), "1", T1, T1))).collect();
+        let items: Vec<CellWrite> = built.iter().map(|(id, r)| CellWrite::new(r, Some((id.as_str(), T1)))).collect();
+        s.put_cells(&items).unwrap();
+    }
+    let sl = slice(&format!(r#"{{"args":{{"k":"*"}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#));
+    let ok = s.slice_member_hashes_within(&sl, T2, 30_000, Duration::from_secs(60)).unwrap();
+    assert_eq!(ok.len(), 20_000);
+    let r = s.slice_member_hashes_within(&sl, T2, 30_000, Duration::from_millis(1));
+    assert!(
+        r.is_err(),
+        "a 1 ms statement timeout over 20,000 members: refused, {} hashes",
+        r.map(|v| v.len()).unwrap_or(0)
+    );
+}
+
 backends!(later_bound_is_the_least_start_of_the_versions_recorded_later);
