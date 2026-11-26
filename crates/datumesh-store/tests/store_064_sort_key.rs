@@ -461,7 +461,11 @@ fn the_migration_fills_sort_keys_on_existing_rows(b: Backend) {
     assert_eq!(db.count("cells"), 10);
     drop(s);
 
-    assert_eq!(apply_rest(&db, b), [last], "only the sort-key migration is applied");
+    assert_eq!(
+        apply_rest(&db, b),
+        [last, last + 1, last + 2],
+        "the sort keys, then the member sets and the recorded time"
+    );
     assert_eq!(db.int("SELECT count(*) FROM cells WHERE sort_key IS NULL"), 0, "every existing row is filled");
     assert_eq!(db.count("cells"), 10);
 
