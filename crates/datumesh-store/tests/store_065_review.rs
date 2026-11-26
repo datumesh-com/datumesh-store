@@ -196,8 +196,47 @@ fn concurrent_writers_to_one_cell_get_no_spurious_not_later(b: Backend) {
     assert_eq!(db.int("SELECT count(*) FROM versions"), 200);
 }
 
+// ---- Item 3: re-runs are no-ops ----------------------------------------------------------------
+
+fn an_existing_version_again_is_a_no_op_and_another_receipt_a_clean_refusal(b: Backend) {
+    for clocked in [false, true] {
+        let db = TestDb::migrated(b);
+        let clock = Clock::at(T3);
+        let s = if clocked { rec_store_with(&db, clock.f()) } else { slice_store(&db) };
+        let h = function(&s);
+        let c = kcell(&h, 1);
+        let first = put_member(&s, &c, "1", T1, T1);
+        let before = (db.count("versions"), s.latest(&c.id()).unwrap().unwrap());
+        // The same (cell, tx) and receipt again: nothing, no error; through put_cells too.
+        clock.set(T4);
+        s.put_version(&c.id(), T1, &first).unwrap_or_else(|e| panic!("clocked {clocked}: the same version again: {e}"));
+        let r1 = slice_receipt(&c, "1", T1, T1);
+        let id = c.id();
+        s.put_cells(&[CellWrite::new(&r1, Some((id.as_str(), T1)))])
+            .unwrap_or_else(|e| panic!("clocked {clocked}: put_cells of the same version again: {e}"));
+        assert_eq!(
+            (db.count("versions"), s.latest(&c.id()).unwrap().unwrap()),
+            before,
+            "clocked {clocked}: nothing written"
+        );
+        // Another receipt at the same (cell, tx): a clean refusal, not a database key error.
+        let other = s.put_receipt(&slice_receipt(&c, "2", T1, T1)).unwrap();
+        match s.put_version(&c.id(), T1, &other) {
+            Err(Error::NotLater { .. }) | Err(Error::Conflict { .. }) => {}
+            other => panic!("clocked {clocked}: another receipt at the same tx: {other:?}"),
+        }
+        let r2 = slice_receipt(&c, "2", T1, T1);
+        match s.put_cells(&[CellWrite::new(&r2, Some((id.as_str(), T1)))]) {
+            Err(Error::NotLater { .. }) | Err(Error::Conflict { .. }) => {}
+            other => panic!("clocked {clocked}: put_cells, another receipt at the same tx: {other:?}"),
+        }
+        assert_eq!(db.count("versions"), before.0);
+    }
+}
+
 backends!(
     a_writer_that_waited_records_the_time_it_holds_the_lock_at,
     barrier_returns_at_once_with_no_writer_and_waits_for_one_in_flight,
     concurrent_writers_to_one_cell_get_no_spurious_not_later,
+    an_existing_version_again_is_a_no_op_and_another_receipt_a_clean_refusal,
 );
