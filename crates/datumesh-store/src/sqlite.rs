@@ -918,6 +918,10 @@ impl Store for SqliteStore {
         })
     }
 
+    fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
+        self.run("fn_seq", |c| c.prepare_cached(L::FnSeq.sql()).db()?.query_row([fn_hash], |r| r.get(0)).db())
+    }
+
     fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
         let v = slice.to_value();
         if let Some((cell_id, _, _)) = version_slice(slice, &v)? {

@@ -737,6 +737,13 @@ impl Store for PgStore {
         })
     }
 
+    fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
+        self.run("fn_seq", |c| {
+            let st = c.stmt(Q::FnSeq)?;
+            c.client.query_one(&st, &[&fn_hash]).db()?.try_get(0).db()
+        })
+    }
+
     fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
         let v = slice.to_value();
         if let Some((cell_id, _, _)) = version_slice(slice, &v)? {

@@ -625,6 +625,8 @@ statements! {
     SliceSeqNum = slice_seq!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // A version slice's cell: the highest seq of its versions, 0 when none.
     VersionSeqMax = "SELECT COALESCE(max(seq), 0) FROM versions WHERE cell_id = $1" => [TEXT];
+    // fn_seq (G3, 0.6.5): one probe of the function's row (primary key), 0 when none.
+    FnSeq = "SELECT COALESCE((SELECT seq FROM function_seqs WHERE fn_hash = $1), 0)" => [TEXT];
     ChangedCandAll = changed_cand!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandText = changed_cand!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandNum = changed_cand!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];

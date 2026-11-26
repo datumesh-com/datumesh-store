@@ -362,6 +362,8 @@ statements! {
     SliceSeqDrive = slice_seq!(from_drive!(), where_drive!());
     // A version slice's cell: the highest seq of its versions, 0 when none.
     VersionSeqMax = "SELECT coalesce(max(seq), 0) FROM versions WHERE cell_id = ?1";
+    // fn_seq (G3, 0.6.5): one probe of the function's row (primary key), 0 when none.
+    FnSeq = "SELECT coalesce((SELECT seq FROM function_seqs WHERE fn_hash = ?1), 0)";
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) SELECT ?1, ?2, ?3
                           WHERE NOT EXISTS (SELECT 1 FROM slice_definitions WHERE slice_id = ?1)";
     SliceDefinitionGet = "SELECT slice FROM slice_definitions WHERE slice_id = ?1";

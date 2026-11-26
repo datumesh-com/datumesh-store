@@ -29,6 +29,23 @@ CREATE TRIGGER versions_no_update BEFORE UPDATE ON versions
     BEGIN SELECT RAISE(ABORT, 'datumesh: UPDATE on versions refused: the table is append-only'); END;
 CREATE INDEX versions_cell_seq ON versions (cell_id, seq);
 CREATE INDEX versions_seq ON versions (seq);
+
+-- fn_seq (decided 26 Nov, G3): the highest seq among the versions of each function, one row per function,
+-- kept by the trigger below (a derived table, upserted). Existing rows are summarised here.
+CREATE TABLE function_seqs (
+    fn_hash TEXT PRIMARY KEY CHECK (length(fn_hash) = 64 AND fn_hash NOT GLOB '*[^0-9a-f]*'),
+    seq INTEGER NOT NULL
+) STRICT;
+INSERT INTO function_seqs (fn_hash, seq)
+    SELECT c.fn_hash, max(v.seq) FROM versions v JOIN cells c ON c.cell_id = v.cell_id
+     WHERE v.seq IS NOT NULL GROUP BY c.fn_hash;
+CREATE TRIGGER versions_function_seq AFTER INSERT ON versions
+    WHEN NEW.seq IS NOT NULL
+    BEGIN
+        INSERT INTO function_seqs (fn_hash, seq)
+            SELECT c.fn_hash, NEW.seq FROM cells c WHERE c.cell_id = NEW.cell_id
+        ON CONFLICT (fn_hash) DO UPDATE SET seq = max(function_seqs.seq, excluded.seq);
+    END;
 -- The versions recorded after an instant, of any cell (the slices' change check).
 CREATE INDEX versions_recorded_all ON versions (coalesce(recorded, tx));
 

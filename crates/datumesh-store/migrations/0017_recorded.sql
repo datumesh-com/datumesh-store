@@ -12,14 +12,53 @@ ALTER TABLE versions DISABLE TRIGGER versions_append_only;
 UPDATE versions SET recorded = tx;
 ALTER TABLE versions ENABLE TRIGGER versions_append_only;
 ALTER TABLE versions ALTER COLUMN recorded SET NOT NULL;
--- The insertion sequence (decided 26 Nov, G3, "inserted since"): from a sequence, so every version
--- (a raw insert too) gets the next value; ADD COLUMN with a volatile default numbers the existing rows in
--- physical (insertion) order. Only increases, never updated. Not commit-ordered: see the store notes.
+-- The insertion sequence (decided 26 Nov, G3, "inserted since"). Every version, a raw insert too, gets
+-- its seq in a BEFORE INSERT trigger, which first takes the mesh's version-sequence lock and only then
+-- calls nextval: the lock is held to the end of the transaction, so seq follows commit order (a column
+-- default would run before the lock, and so would not). Existing rows are numbered in physical
+-- (insertion) order. Only increases; never updated.
 CREATE SEQUENCE versions_seq AS bigint;
-ALTER TABLE versions ADD COLUMN seq bigint NOT NULL DEFAULT nextval('versions_seq');
-ALTER SEQUENCE versions_seq OWNED BY versions.seq;
+ALTER TABLE versions ADD COLUMN seq bigint;
+ALTER TABLE versions DISABLE TRIGGER versions_append_only;
+UPDATE versions v SET seq = x.n
+  FROM (SELECT ctid AS id, row_number() OVER (ORDER BY ctid) AS n FROM versions) x
+ WHERE v.ctid = x.id;
+ALTER TABLE versions ENABLE TRIGGER versions_append_only;
+SELECT setval('versions_seq', COALESCE((SELECT max(seq) FROM versions), 0) + 1, false);
+ALTER TABLE versions ALTER COLUMN seq SET NOT NULL;
 -- slice_seq: the versions of one cell, highest seq first (one probe per candidate cell).
 CREATE INDEX versions_cell_seq ON versions (cell_id, seq);
+
+-- fn_seq (decided 26 Nov, G3): the highest seq among the versions of each function, one row per
+-- function, kept by the same trigger under the same lock. Existing rows are summarised here. A
+-- derived table (upserted), not append-only.
+CREATE TABLE function_seqs (
+    fn_hash text COLLATE "C" PRIMARY KEY CHECK (fn_hash ~ '^[0-9a-f]{64}$'),
+    seq bigint NOT NULL
+);
+INSERT INTO function_seqs (fn_hash, seq)
+    SELECT c.fn_hash, max(v.seq) FROM versions v JOIN cells c ON c.cell_id = v.cell_id GROUP BY c.fn_hash;
+
+-- The lock key of the version sequence: a fixed bigint, shared by every writer of versions (only the
+-- trigger below takes it). Writes of versions on one mesh are serialised by it; that is accepted.
+CREATE FUNCTION datumesh_versions_assign_seq() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    f text;
+BEGIN
+    PERFORM pg_advisory_xact_lock(7412030007);
+    NEW.seq := nextval('versions_seq');
+    SELECT c.fn_hash INTO f FROM cells c WHERE c.cell_id = NEW.cell_id;
+    IF f IS NOT NULL THEN
+        INSERT INTO function_seqs (fn_hash, seq) VALUES (f, NEW.seq)
+            ON CONFLICT (fn_hash) DO UPDATE SET seq = EXCLUDED.seq;
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER versions_assign_seq BEFORE INSERT ON versions
+    FOR EACH ROW EXECUTE FUNCTION datumesh_versions_assign_seq();
 
 CREATE INDEX versions_recorded ON versions (cell_id, recorded);
 -- The versions recorded after an instant, of any cell (the slices' change check).

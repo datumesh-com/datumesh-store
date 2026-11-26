@@ -640,6 +640,22 @@ pub trait Store: Resolver + sealed::Sealed {
         self.slice_seq_checked(slice)
     }
 
+    /// The highest insertion seq among the versions (withdrawals included) of the functions `fn_hash`,
+    /// 0 when there are none: an upper bound of `slice_seq` for every slice of that function, in one
+    /// probe of the function's row (decided 26 Nov, G3: a slice whose `fn_seq` is at or below its row's
+    /// `seen_seq` is unchanged, with no candidate walk). Since 0.6.5.
+    fn fn_seq(&self, fn_hash: &str) -> Result<i64> {
+        check_hex(fn_hash, 64, "fn_hash")?;
+        self.fn_seq_checked(fn_hash)
+    }
+
+    /// The read of `fn_seq`, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
+        let _ = fn_hash;
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no fn seq here")))
+    }
+
     /// The read of `slice_seq`, not part of the API: the store's own implementations override it.
     #[doc(hidden)]
     fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
