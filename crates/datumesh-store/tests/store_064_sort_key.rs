@@ -492,7 +492,7 @@ fn migration_15_and_11_are_the_last_and_make_the_indexes(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.len(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.len(),
     };
-    assert_eq!(n, if b == Backend::Pg { 15 } else { 11 }, "0.6.4 adds one migration: PostgreSQL 15, SQLite 11");
+    assert_eq!(n, if b == Backend::Pg { 16 } else { 12 }, "0.6.5 adds the member sets: PostgreSQL 16, SQLite 12");
     let db = TestDb::migrated(b);
     let squash = |s: String| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
     // S1: the index (fn_hash, ns, fn, sort_key) on cells.

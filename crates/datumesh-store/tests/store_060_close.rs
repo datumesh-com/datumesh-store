@@ -202,7 +202,7 @@ fn the_latest_migrations_are_14_and_10(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.last().unwrap().version,
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
     };
-    assert_eq!(last, if b == Backend::Pg { 15 } else { 11 });
+    assert_eq!(last, if b == Backend::Pg { 16 } else { 12 });
 }
 
 backends!(

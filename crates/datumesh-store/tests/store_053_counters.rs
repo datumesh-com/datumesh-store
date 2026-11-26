@@ -211,8 +211,8 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
     };
     assert_eq!(last as usize, n_all);
-    assert_eq!(n_all, if b == Backend::Pg { 15 } else { 11 }, "migrations 1..=15 (SQLite 1..=11)");
-    // The counters are migration 12 (SQLite 8); the facets migration 13 (9) and the withdrawals 14 (10) and the sort keys 15 (11) follow them.
+    assert_eq!(n_all, if b == Backend::Pg { 16 } else { 12 }, "migrations 1..=16 (SQLite 1..=12)");
+    // The counters are migration 12 (SQLite 8); the facets migration 13 (9), the withdrawals 14 (10), the sort keys 15 (11) and the member sets 16 (12) follow them.
     let n_all = n_all - 3;
     migrate_to(&db, b, n_all - 1);
     assert!(text_of(&db, db.pick(
@@ -319,7 +319,7 @@ fn a_fresh_store_has_the_counter_tables_empty(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.last().unwrap(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
     };
-    assert_eq!(last.version, if b == Backend::Pg { 15 } else { 11 });
+    assert_eq!(last.version, if b == Backend::Pg { 16 } else { 12 });
     assert_eq!(db.count("datumesh_schema_migrations"), last.version as i64);
 }
 
