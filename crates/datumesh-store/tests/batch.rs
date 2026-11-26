@@ -251,26 +251,21 @@ fn put_cells_empty_call_and_repeat_are_no_ops(b: Backend) {
     let first = s.put_cells(&writes(&items)).unwrap();
     let counts: Vec<i64> = TABLES.iter().map(|t| db.count(t)).collect();
     let before = s.latest(&cell_of(&h, 1, "s1").id()).unwrap();
-    // Repeating the receipts of the whole call (no versions: `put_version` of a tx already
-    // there is `NotLater`, so a version cannot repeat) changes nothing, same hashes.
+    // Repeating the receipts of the whole call changes nothing, same hashes.
     let receipts_only: Vec<Item> = items.iter().map(|(r, _)| (r.clone(), None)).collect();
     assert_eq!(s.put_cells(&writes(&receipts_only)).unwrap(), first);
     assert_eq!(TABLES.iter().map(|t| db.count(t)).collect::<Vec<_>>(), counts);
     assert_eq!(s.latest(&cell_of(&h, 1, "s1").id()).unwrap(), before);
-    // Repeating it with its versions fails as the loop does, at the first item with one;
-    // on PostgreSQL nothing changes.
-    let want = {
-        let db2 = TestDb::migrated(b);
-        let (s2, _) = setup(&db2);
-        loop_put(&s2, &items).unwrap();
-        show(loop_put(&s2, &items))
-    };
-    let got = s.put_cells(&writes(&items)).unwrap_err();
-    assert!(matches!(got, Error::NotLater { what: "version", .. }), "{got:?}");
-    assert_eq!(format!("{got:?}"), want);
-    if b == Backend::Pg {
-        assert_eq!(TABLES.iter().map(|t| db.count(t)).collect::<Vec<_>>(), counts);
-    }
+    // Repeating it with its versions (the same cell, tx and receipt each) is a no-op too (review
+    // decision 3 of the guard patch: a re-run writes nothing and succeeds), as the loop is.
+    assert_eq!(s.put_cells(&writes(&items)).unwrap(), first);
+    assert_eq!(TABLES.iter().map(|t| db.count(t)).collect::<Vec<_>>(), counts);
+    assert_eq!(s.latest(&cell_of(&h, 1, "s1").id()).unwrap(), before);
+    let db2 = TestDb::migrated(b);
+    let (s2, _) = setup(&db2);
+    let once = loop_put(&s2, &items).unwrap();
+    assert_eq!(loop_put(&s2, &items).unwrap(), once, "the loop's repeat succeeds too");
+    assert_eq!(once, first);
 }
 
 fn put_cells_same_cell_twice_with_increasing_tx_stores_both(b: Backend) {
