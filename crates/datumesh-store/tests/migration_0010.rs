@@ -23,8 +23,8 @@ fn the_inputs_of_descriptors_stored_before_0_5_1_are_indexed(b: Backend) {
     };
     assert_eq!(
         all,
-        old.len() + 6,
-        "six migrations more than 0.5.0 on each backend (0.5.1, 0.5.2, 0.5.3, facets, withdrawals, sort keys)"
+        old.len() + 8,
+        "eight migrations more than 0.5.0 on each backend (0.5.1, 0.5.2, 0.5.3, facets, withdrawals, sort keys, member sets, recorded)"
     );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
@@ -62,8 +62,8 @@ fn the_inputs_of_descriptors_stored_before_0_5_1_are_indexed(b: Backend) {
     };
     assert_eq!(
         applied,
-        [all as u32 - 5, all as u32 - 4, all as u32 - 3, all as u32 - 2, all as u32 - 1, all as u32],
-        "only the 0.5.1, 0.5.2, 0.5.3, facets, withdrawals and sort-key migrations are applied"
+        ((all as u32 - 7)..=all as u32).collect::<Vec<u32>>(),
+        "only the 0.5.1, 0.5.2, 0.5.3, facets, withdrawals, sort-key, member-set and recorded migrations are applied"
     );
 
     let s = db.bare_store();
