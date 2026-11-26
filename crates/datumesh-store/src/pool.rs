@@ -28,11 +28,14 @@ pub struct PoolOptions {
     pub(crate) webpki_roots: bool,
     pub(crate) tls_roots: Vec<CertificateDer<'static>>,
     pub(crate) recording_clock: Option<crate::RecordingClock>,
+    /// How long the barrier waits for a version writer in flight (decided 27 Nov, B2/B3).
+    pub(crate) barrier_timeout: Duration,
 }
 
 impl PartialEq for PoolOptions {
     fn eq(&self, other: &PoolOptions) -> bool {
         self.max_size == other.max_size
+            && self.barrier_timeout == other.barrier_timeout
             && self.checkout_timeout == other.checkout_timeout
             && self.webpki_roots == other.webpki_roots
             && self.tls_roots == other.tls_roots
@@ -50,6 +53,7 @@ impl std::fmt::Debug for PoolOptions {
             .field("webpki_roots", &self.webpki_roots)
             .field("tls_root_certificates", &self.tls_roots.len())
             .field("recording_clock", &self.recording_clock.is_some())
+            .field("barrier_timeout", &self.barrier_timeout)
             .finish()
     }
 }
@@ -70,7 +74,16 @@ impl PoolOptions {
             webpki_roots: true,
             tls_roots: Vec::new(),
             recording_clock: None,
+            barrier_timeout: Duration::from_secs(5),
         }
+    }
+
+    /// How long a barrier ([`Store::barrier`](crate::Store::barrier)) waits for a version writer in flight
+    /// before it fails with [`Error::Timeout`](crate::Error::Timeout) (the http layer answers 503). Default
+    /// 5 s. On PostgreSQL the barrier is one statement under `lock_timeout` of this value. Since 0.6.5.
+    pub fn barrier_timeout(mut self, d: Duration) -> PoolOptions {
+        self.barrier_timeout = d;
+        self
     }
 
     /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,

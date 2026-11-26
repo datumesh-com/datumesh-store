@@ -87,6 +87,11 @@ pub enum Error {
     /// (`vector_find`, `put_embeddings`) where [`Store::vector_available`](crate::Store::vector_available)
     /// is false (SQLite, or PostgreSQL without the `vector` extension). Since 0.5.0.
     Unsupported(String),
+    /// An operation waited past its time bound (decided 27 Nov, the second review): the barrier's wait
+    /// for a version writer (`PoolOptions::barrier_timeout`, or the SQLite options' barrier timeout), or a
+    /// read under its statement timeout (`slice_member_hashes_within`). The text names the operation. The
+    /// http layer answers 503. Since 0.6.5.
+    Timeout(String),
     /// A connection option is unusable: a root certificate bundle
     /// ([`PoolOptions::tls_root_certificates_pem`](crate::PoolOptions::tls_root_certificates_pem))
     /// with no certificate, or one that does not parse.
@@ -108,6 +113,11 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
+    /// The SQLSTATE the server gave (PostgreSQL), when it gave one.
+    pub(crate) fn sqlstate(&self) -> Option<&str> {
+        self.code.as_deref()
+    }
+
     pub(crate) fn new(e: postgres::Error) -> DatabaseError {
         let (message, code) = match e.as_db_error() {
             Some(d) => (d.message().to_string(), Some(d.code().code().to_string())),
@@ -219,6 +229,7 @@ impl fmt::Display for Error {
             }
             Error::Database(e) => write!(f, "database: {e}"),
             Error::PoolTimeout => f.write_str("no database connection became free in time"),
+            Error::Timeout(m) => write!(f, "timed out: {m}"),
             Error::Migration(m) => write!(f, "migration: {m}"),
             Error::Config(m) => write!(f, "configuration: {m}"),
             Error::Unsupported(m) => write!(f, "not supported here: {m}"),
@@ -264,3 +275,12 @@ impl From<datumesh_core::Error> for Error {
 
 /// `Result` with the store's [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;
+
+/// `e`, as [`Error::Timeout`] (naming `what`) when the server cancelled the statement for its timeout
+/// (SQLSTATE 57014) or the lock wait timed out (55P03); unchanged otherwise.
+pub(crate) fn timed_out(e: Error, what: &str) -> Error {
+    match &e {
+        Error::Database(d) if matches!(d.sqlstate(), Some("55P03") | Some("57014")) => Error::Timeout(what.to_string()),
+        _ => e,
+    }
+}

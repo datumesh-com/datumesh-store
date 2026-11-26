@@ -1,6 +1,6 @@
 [package]
 name = "datumesh-store-cli"
-version = "0.6.4"
+version = "0.6.5"
 description = "Command-line tool for datumesh-store (PostgreSQL or SQLite): migrate, import, export, bench."
 edition.workspace = true
 rust-version.workspace = true

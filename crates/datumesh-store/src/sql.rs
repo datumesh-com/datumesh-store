@@ -136,6 +136,28 @@ macro_rules! slice_seq {
 
 /// Whether a candidate cell of a slice (from `$with` and `$from`) has a stored version whose
 /// receipt's asof is after A.
+/// The receipt hashes of the members of a slice of cells, as of $5, at most $16 (decided 27 Nov, B6): the
+/// candidates from `$with` and `$from` and the member rules of slice_members, with the hash the only column
+/// the outer query selects. `$11` is referenced (it is the key arguments' array of the other statements);
+/// the statement's parameters are those of computed_cells.
+macro_rules! member_hashes {
+    ($with:expr, $from:expr) => {
+        concat!(
+            $with,
+            "SELECT m.hash ",
+            $from,
+            "
+              CROSS JOIN LATERAL (SELECT r.hash, r.value_type = '' AS withdrawn
+                                    FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                                   WHERE v.cell_id = c.cell_id AND v.recorded <= $5 AND r.asof <= $5
+                                   ORDER BY v.recorded DESC LIMIT 1) m
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND $11::text[] IS NOT NULL AND ",
+            slice_match!(),
+            " AND NOT m.withdrawn LIMIT $16"
+        )
+    };
+}
+
 macro_rules! changed_cand {
     ($with:expr, $from:expr) => {
         concat!(
@@ -572,14 +594,13 @@ statements! {
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     SliceValuesNum = slice_members!(drive_num!(), from_drive!(), "r.value_type, r.value", "m.value_type, m.value, c.ns, c.fn, c.fn_hash,
                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key") => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
-    // The receipt hashes of the members as of $5, at most $16, in no particular order (slice_member_hashes):
-    // the members of slice_members with the hash as the only column read, the same member rules, and the
-    // LIMIT in SQL (one row per member, no receipt bytes or values, no sort).
-    MemberHashesAll = concat!(slice_members!(no_with!(), from_all!(), "r.hash", "m.hash"), " LIMIT $16")
+    // The receipt hashes of the members as of $5, at most $16, in no particular order (slice_member_hashes,
+    // slice_member_hashes_within): member_hashes!, so the outer query selects the hash only.
+    MemberHashesAll = member_hashes!(no_with!(), from_all!())
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    MemberHashesText = concat!(slice_members!(drive_text!(), from_drive!(), "r.hash", "m.hash"), " LIMIT $16")
+    MemberHashesText = member_hashes!(drive_text!(), from_drive!())
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
-    MemberHashesNum = concat!(slice_members!(drive_num!(), from_drive!(), "r.hash", "m.hash"), " LIMIT $16")
+    MemberHashesNum = member_hashes!(drive_num!(), from_drive!())
         => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT, INT8];
     // How many cells (up to 10,001) an argument's range holds, to choose the range scanned.
     SliceProbeText = "SELECT count(*) FROM (SELECT 1 FROM cell_args a
@@ -639,8 +660,17 @@ statements! {
     // The version-sequence lock (review item 2): taken by a writer at the start of its transaction, held to
     // commit; the barrier takes it shared and releases it at once.
     VersionSeqLock = "SELECT pg_advisory_xact_lock($1)" => [INT8];
-    BarrierShared = "SELECT pg_advisory_lock_shared($1)" => [INT8];
-    BarrierUnshared = "SELECT pg_advisory_unlock_shared($1)" => [INT8];
+    // The barrier (decided 27 Nov, B2/B3): one autocommit statement, its lock timeout set for the statement
+    // alone (is_local), the shared lock released when the statement ends, so nothing is left behind.
+    BarrierShared = "SELECT set_config('lock_timeout', $2, true), pg_advisory_xact_lock_shared($1)" => [INT8, TEXT];
+    // The least start of max(receipt asof, recorded) over the cell's versions recorded after $2 (A1): one
+    // aggregate row, one range of the (cell_id, recorded) index.
+    LaterBound = "SELECT min(CASE WHEN r.asof > v.recorded THEN r.asof ELSE v.recorded END)
+                  FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+                  WHERE v.cell_id = $1 AND v.recorded > $2" => [TEXT, TEXT];
+    // The existing versions of a batch's (cell_id, tx) pairs, in one statement (B4): the primary key.
+    VersionsAtMany = "SELECT k.cell_id, v.tx, v.receipt_hash FROM unnest($1::text[], $2::text[]) AS k(cell_id, tx)
+                      JOIN versions v ON v.cell_id = k.cell_id AND v.tx = k.tx" => [TEXT_ARRAY, TEXT_ARRAY];
     // The receipt a cell's version at a signed tx holds (review item 3: the same one again is a no-op).
     VersionAt = "SELECT receipt_hash FROM versions WHERE cell_id = $1 AND tx = $2" => [TEXT, TEXT];
     // The first version of a cell recorded after an instant (review: the memo bound reads one row).

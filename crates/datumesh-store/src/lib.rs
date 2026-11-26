@@ -137,6 +137,64 @@ pub(crate) fn same_clock(a: &Option<RecordingClock>, b: &Option<RecordingClock>)
     }
 }
 
+/// The instant one microsecond after `s` (a `YYYY-MM-DDTHH:MM:SS.ffffffZ` instant, carried through the
+/// calendar; `s` unchanged when it is not one). The store's per-cell rule of recorded times (decided 27
+/// Nov, B5) uses it: a version is recorded after the cell's latest.
+pub(crate) fn instant_after(s: &str) -> String {
+    if s.len() != 27 || !s.is_ascii() || s.as_bytes()[19] != b'.' || s.as_bytes()[26] != b'Z' {
+        return s.to_string();
+    }
+    let num = |r: std::ops::Range<usize>| s[r].parse::<u64>().ok();
+    let (Some(mut y), Some(mut mo), Some(mut d), Some(mut h), Some(mut mi), Some(mut se), Some(mut us)) =
+        (num(0..4), num(5..7), num(8..10), num(11..13), num(14..16), num(17..19), num(20..26))
+    else {
+        return s.to_string();
+    };
+    us += 1;
+    if us == 1_000_000 {
+        us = 0;
+        se += 1;
+    }
+    if se == 60 {
+        se = 0;
+        mi += 1;
+    }
+    if mi == 60 {
+        mi = 0;
+        h += 1;
+    }
+    if h == 24 {
+        h = 0;
+        d += 1;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = match mo {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return s.to_string(),
+    };
+    if d > dim {
+        d = 1;
+        mo += 1;
+    }
+    if mo == 13 {
+        mo = 1;
+        y += 1;
+    }
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}.{us:06}Z")
+}
+
+/// The later of two instants of the same fixed-width form (their text order).
+pub(crate) fn later_of(a: &str, b: &str) -> String {
+    if a >= b {
+        a.to_string()
+    } else {
+        b.to_string()
+    }
+}
+
 /// The recorded time of a version signed at `tx`: the greater of `tx` and the store's clock, or
 /// `tx` with no clock (SPEC-free: a store detail, see [`Version::recorded`]).
 pub(crate) fn recorded_at(clock: Option<&RecordingClock>, tx: &str) -> String {
@@ -236,11 +294,11 @@ pub(crate) fn check_member_entry(entry: &str) -> Result<(&str, &str)> {
     Ok((id, members_hash))
 }
 
-/// Checks a member-set row as the store accepts it (G2): its entry, the ids and function hash,
-/// the slice bytes (a canonical slice object of the slice id and function hash) and the instants.
-/// The receipt hashes of `members`, at most `limit`, in no particular order: the result of
-/// `slice_member_hashes` for a version slice (and of the default).
-pub(crate) fn hashes_limited(mut members: Vec<SliceMember>, limit: usize) -> Vec<String> {
+/// The receipt hashes of `members` that are not withdrawn, at most `limit`, in no particular order: the
+/// result of `slice_member_hashes` for a version slice (and of the default). Withdrawals are left out, as
+/// `slice_values` leaves them out (decided 27 Nov, A2).
+pub(crate) fn hashes_limited(members: Vec<SliceMember>, limit: usize) -> Vec<String> {
+    let mut members: Vec<SliceMember> = members.into_iter().filter(|m| !m.version.withdrawn).collect();
     members.truncate(limit);
     members.into_iter().map(|m| m.version.receipt_hash).collect()
 }
@@ -279,6 +337,8 @@ pub(crate) fn licences_of(text: &str) -> Result<Vec<String>> {
     }
 }
 
+/// Checks a member-set row as the store accepts it (G2): its entry, the ids and function hash,
+/// the slice bytes (a canonical slice object of the slice id and function hash) and the instants.
 pub(crate) fn check_member_set(set: &MemberSet) -> Result<()> {
     let (id, members_hash) = check_member_entry(&set.entry)?;
     if set.members_hash != members_hash {
@@ -650,6 +710,10 @@ pub trait Store: Resolver + sealed::Sealed {
     /// The time a version signed at `signed_tx` is recorded at by the next put (G9): the greater of
     /// `signed_tx` and this store's recording clock, or `signed_tx` with no clock. Exactly the rule the
     /// puts apply, so publish-stored can compare against it. Since 0.6.5.
+    ///
+    /// Decided 27 Nov (B5): the puts also record a version after its cell's latest recorded time, a
+    /// microsecond later, so the time a put of a cell that already has versions records is later still.
+    /// This method gives the signed-tx-and-clock part only; a per-cell check must use the cell's latest.
     fn recording_time(&self, signed_tx: &str) -> String {
         crate::recorded_at(self.recording_clock_of().as_ref(), signed_tx)
     }
@@ -679,6 +743,50 @@ pub trait Store: Resolver + sealed::Sealed {
     /// Since 0.6.5.
     fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
         Ok(hashes_limited(self.slice_members(slice, asof)?, limit))
+    }
+
+    /// The least start, over the versions of `cell_id` recorded after `recorded`, of `max(receipt asof,
+    /// recorded)`; `None` when none is recorded after (decided 27 Nov, A1: the memo bound, one aggregate
+    /// row). Since 0.6.5.
+    fn later_bound(&self, cell_id: &str, recorded: &str) -> Result<Option<String>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(recorded, "recorded")?;
+        self.later_bound_checked(cell_id, recorded)
+    }
+
+    /// The read of `later_bound`, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn later_bound_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<String>> {
+        let _ = (cell_id, recorded);
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no versions here")))
+    }
+
+    /// The receipt hashes of the members of a slice as of `asof`, at most `limit`, within `timeout`
+    /// (decided 27 Nov, B6: the rebuild listing under the budget's remaining time). On PostgreSQL the
+    /// statement runs under `statement_timeout`; on SQLite a progress deadline stops it. Past the timeout
+    /// the call fails with [`Error::Timeout`]. Since 0.6.5.
+    fn slice_member_hashes_within(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        self.slice_member_hashes_within_checked(slice, asof, limit, timeout)
+    }
+
+    /// The read of `slice_member_hashes_within`, not part of the API. The default (no time bound) is the
+    /// listing of `slice_member_hashes`.
+    #[doc(hidden)]
+    fn slice_member_hashes_within_checked(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        let _ = timeout;
+        self.slice_member_hashes(slice, asof, limit)
     }
 
     /// The first version of `cell_id` recorded after `recorded` (one row, the memo bound), or `None`.

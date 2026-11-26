@@ -38,12 +38,15 @@ pub struct SqliteOptions {
     busy_timeout: Duration,
     durable: bool,
     pub(crate) recording_clock: Option<crate::RecordingClock>,
+    /// How long the barrier waits for a write transaction in flight (decided 27 Nov, B2/B3).
+    pub(crate) barrier_timeout: Duration,
 }
 
 impl PartialEq for SqliteOptions {
     fn eq(&self, other: &SqliteOptions) -> bool {
         self.max_size == other.max_size
             && self.busy_timeout == other.busy_timeout
+            && self.barrier_timeout == other.barrier_timeout
             && self.durable == other.durable
             && crate::same_clock(&self.recording_clock, &other.recording_clock)
     }
@@ -56,6 +59,7 @@ impl std::fmt::Debug for SqliteOptions {
         f.debug_struct("SqliteOptions")
             .field("max_size", &self.max_size)
             .field("busy_timeout", &self.busy_timeout)
+            .field("barrier_timeout", &self.barrier_timeout)
             .field("durable", &self.durable)
             .field("recording_clock", &self.recording_clock.is_some())
             .finish()
@@ -73,7 +77,20 @@ impl SqliteOptions {
     /// database's write lock (and a reader for a lock held in exclusive mode); every commit
     /// durable (`synchronous = FULL`).
     pub fn new() -> SqliteOptions {
-        SqliteOptions { max_size: 8, busy_timeout: Duration::from_secs(30), durable: true, recording_clock: None }
+        SqliteOptions {
+            max_size: 8,
+            busy_timeout: Duration::from_secs(30),
+            durable: true,
+            recording_clock: None,
+            barrier_timeout: Duration::from_secs(5),
+        }
+    }
+
+    /// How long the barrier waits for a write transaction in flight, in this process or another, before it
+    /// fails with [`Error::Timeout`](crate::Error::Timeout). Default 5 s. Since 0.6.5.
+    pub fn barrier_timeout(mut self, d: Duration) -> SqliteOptions {
+        self.barrier_timeout = d;
+        self
     }
 
     /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,
@@ -396,6 +413,69 @@ pub(crate) fn write<T>(c: &Connection, f: impl FnOnce(&Connection) -> Result<T>)
         let _ = c.execute_batch("ROLLBACK");
     }
     result
+}
+
+impl SqliteStore {
+    /// The receipt hashes of the members of `slice` as of `asof`, at most `limit`, in no particular order
+    /// (decided 27 Nov, B6): one statement; with a `deadline`, a progress handler stops it past the deadline
+    /// (the call then fails with [`Error::Timeout`]).
+    fn member_hashes_by(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        limit: usize,
+        deadline: Option<Instant>,
+        op: &'static str,
+    ) -> Result<Vec<String>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Ok(crate::hashes_limited(self.slice_members(slice, asof)?, limit));
+        }
+        let p = Pattern::of(&v)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run(op, |c| {
+            // The deadline interrupts the statement from a timer thread (rusqlite's interrupt handle: the
+            // crate forbids unsafe code, so no progress handler).
+            let timer = deadline.map(|at| {
+                let handle = c.get_interrupt_handle();
+                let (stop, stopped) = std::sync::mpsc::channel::<()>();
+                let timer = std::thread::spawn(move || {
+                    if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                        stopped.recv_timeout(at.saturating_duration_since(Instant::now()))
+                    {
+                        handle.interrupt();
+                    }
+                });
+                (stop, timer)
+            });
+            let out: Result<Vec<String>> = (|| {
+                let (d, _) = drive(&p, c, false)?;
+                let q = if d.is_some() { L::MemberHashesDrive } else { L::MemberHashesAll };
+                let mut binds = params(&p, asof, d);
+                binds.push((":limit", SqlValue::Integer(limit)));
+                let mut st = c.prepare_cached(q.sql()).db()?;
+                bind(&mut st, &binds)?;
+                let mut rows = st.raw_query();
+                let mut out = Vec::new();
+                while let Some(r) = rows.next().db()? {
+                    out.push(r.get::<_, String>(0).db()?);
+                }
+                Ok(out)
+            })();
+            if let Some((stop, timer)) = timer {
+                let _ = stop.send(());
+                let _ = timer.join();
+            }
+            match out {
+                Err(e) if deadline.is_some_and(|at| Instant::now() >= at) => {
+                    let _ = e;
+                    Err(Error::Timeout(op.to_string()))
+                }
+                other => other,
+            }
+        })
+    }
 }
 
 fn is_busy(e: &rusqlite::Error) -> bool {
@@ -927,33 +1007,45 @@ impl Store for SqliteStore {
     }
 
     fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
-        check_instant(asof, "asof")?;
-        let v = slice.to_value();
-        if version_slice(slice, &v)?.is_some() {
-            return Ok(crate::hashes_limited(self.slice_members(slice, asof)?, limit));
-        }
-        let p = Pattern::of(&v)?;
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        self.run("slice_member_hashes", |c| {
-            let (d, _) = drive(&p, c, false)?;
-            let q = if d.is_some() { L::MemberHashesDrive } else { L::MemberHashesAll };
-            let mut binds = params(&p, asof, d);
-            binds.push((":limit", SqlValue::Integer(limit)));
-            let mut st = c.prepare_cached(q.sql()).db()?;
-            bind(&mut st, &binds)?;
-            let mut rows = st.raw_query();
-            let mut out = Vec::new();
-            while let Some(r) = rows.next().db()? {
-                out.push(r.get::<_, String>(0).db()?);
-            }
-            Ok(out)
-        })
+        self.member_hashes_by(slice, asof, limit, None, "slice_member_hashes")
+    }
+
+    fn slice_member_hashes_within_checked(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<String>> {
+        self.member_hashes_by(slice, asof, limit, Some(Instant::now() + timeout), "slice_member_hashes_within")
     }
 
     fn barrier_checked(&self) -> Result<()> {
-        // A write transaction in flight (in this process or another) holds the write lock; an empty one
-        // waits for it, and returns at once when there is none (review item 2).
-        self.write("barrier", |_c| Ok(()))
+        // A write transaction in flight (in this process or another) holds the write lock. The wait is the
+        // barrier's own timeout, not the connections' busy timeout; the in-process queue is short (writes are).
+        self.run("barrier", |c| {
+            let _queue = self.writer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            c.busy_timeout(self.options.barrier_timeout).db()?;
+            let begun = c.execute_batch("BEGIN IMMEDIATE");
+            c.busy_timeout(self.options.busy_timeout).db()?;
+            if let Err(e) = &begun {
+                if is_busy(e) {
+                    return Err(Error::Timeout("barrier".to_string()));
+                }
+            }
+            begun.db()?;
+            c.execute_batch("COMMIT").db()?;
+            Ok(())
+        })
+    }
+
+    fn later_bound_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<String>> {
+        self.run("later_bound", |c| {
+            c.prepare_cached(L::LaterBound.sql())
+                .db()?
+                .query_row(rusqlite::params![cell_id, recorded], |r| r.get::<_, Option<String>>(0))
+                .db()
+        })
     }
 
     fn next_version_after_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
@@ -1149,8 +1241,18 @@ impl Store for SqliteStore {
                 }
                 has
             };
-            let recorded =
-                if has { crate::recorded_at(self.options.recording_clock.as_ref(), tx) } else { tx.to_string() };
+            // Recorded after the cell's latest (decided 27 Nov, B5); this connection holds the write lock.
+            let latest_now =
+                get_strings(c, if has { L::VersionLatestTx } else { L::VersionLatestTxLegacy }, cell_id)?.pop();
+            let recorded = if has {
+                let base = crate::recorded_at(self.options.recording_clock.as_ref(), tx);
+                match &latest_now {
+                    Some(l) => crate::later_of(&base, &crate::instant_after(l)),
+                    None => base,
+                }
+            } else {
+                tx.to_string()
+            };
             let meta: Option<(String, String)> = c
                 .prepare_cached(L::ReceiptMeta.sql())
                 .db()?
@@ -1192,15 +1294,13 @@ impl Store for SqliteStore {
                     latest: tx.to_string(),
                 });
             }
-            if let Some(l) =
-                get_strings(c, if has { L::VersionLatestTx } else { L::VersionLatestTxLegacy }, cell_id)?.pop()
-            {
+            if let Some(l) = &latest_now {
                 if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell_id.to_string(),
                         given: recorded.clone(),
-                        latest: l,
+                        latest: l.clone(),
                     });
                 }
             }

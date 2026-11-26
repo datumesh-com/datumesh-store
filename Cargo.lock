@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "datumesh-store-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "datumesh-core",
  "datumesh-store",

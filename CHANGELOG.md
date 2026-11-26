@@ -14,6 +14,7 @@ Additive, with migrations 16 and 17 (PostgreSQL) and 12 and 13 (SQLite). A store
 - **Re-runs.** A version again at the same (cell, tx) with the same receipt is a no-op; another receipt at that (cell, tx) is refused with `NotLater`.
 - **Store-side migration rules.** On PostgreSQL, one `UPDATE` of `versions` sets `recorded` and `seq` for existing rows (in physical order); on SQLite, a raw insert with no `seq` gets one from a trigger, which updates `function_seqs`.
 - Trait additions are defaulted (the trait is sealed).
+- **Second review (27 Nov).** `Store::later_bound(cell_id, recorded)`, the least start of `max(receipt asof, recorded)` over the versions recorded later (one aggregate row). `Store::slice_member_hashes` and `slice_member_hashes_within(slice, asof, limit, timeout)` list the members' receipt hashes in no particular order, without withdrawals, under a statement timeout (PostgreSQL) or an interrupt timer (SQLite). The barrier is one statement on PostgreSQL under `PoolOptions::barrier_timeout` (default 5 s; `SqliteOptions::barrier_timeout` bounds its wait on SQLite); a barrier, a timed listing or a lock wait that runs out returns `Error::Timeout`. A version's recorded time is also a microsecond after its cell's latest, so versions of one cell, even in one batch, never share one. `put_cells` looks up its existing versions in one statement.
 
 ## 0.6.4
 

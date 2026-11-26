@@ -41,6 +41,8 @@ pub struct PgStore {
     clock: Option<crate::RecordingClock>,
     /// Set once the versions table is found to have the recorded column (migration 17).
     recorded_schema: std::sync::atomic::AtomicBool,
+    /// How long the barrier waits (PoolOptions::barrier_timeout).
+    barrier_timeout: std::time::Duration,
 }
 
 impl std::fmt::Debug for PgStore {
@@ -73,15 +75,22 @@ impl PgStore {
         let config = url.parse::<postgres::Config>().db()?;
         let connector = Connector::new(config, &options)?;
         let clock = options.recording_clock.clone();
+        let barrier_timeout = options.barrier_timeout;
         let mut store = PgStore::from_pool(Pool::new(Box::new(move || connector.connect()), options))?;
         store.clock = clock;
+        store.barrier_timeout = barrier_timeout;
         Ok(store)
     }
 
     /// A store on `pool`, after opening one connection.
     pub(crate) fn from_pool(pool: Pool) -> Result<PgStore> {
-        let mut store =
-            PgStore { pool, vectors: false, clock: None, recorded_schema: std::sync::atomic::AtomicBool::new(false) };
+        let mut store = PgStore {
+            pool,
+            vectors: false,
+            clock: None,
+            recorded_schema: std::sync::atomic::AtomicBool::new(false),
+            barrier_timeout: std::time::Duration::from_secs(5),
+        };
         let vectors: bool = {
             let mut c = store.pool.get()?;
             c.client.query_one("SELECT to_regclass('embeddings') IS NOT NULL", &[]).db()?.try_get(0).db()?
@@ -466,7 +475,7 @@ fn put_cells_in(
     };
     let st_lock = c.stmt(Q::VersionLocksMany)?;
     let st_vlock = c.stmt(Q::VersionSeqLock)?;
-    let st_at = c.stmt(Q::VersionAt)?;
+    let st_many = c.stmt(Q::VersionsAtMany)?;
     let st_get = c.stmt(Q::ReceiptsGetMany)?;
     let st_ns = c.stmt(Q::NamespacesGetMany)?;
     let st_latest = c.stmt(if has { Q::VersionsLatestTxMany } else { Q::VersionsLatestTxManyLegacy })?;
@@ -485,9 +494,10 @@ fn put_cells_in(
     }
     if !locked.is_empty() {
         t.execute(&st_lock, &[&locked]).db()?;
+        // The version lock, after the cell locks (the order put_version takes them in), before the reads;
+        // taken only when the batch has versions (decided 27 Nov, B4).
+        t.execute(&st_vlock, &[&VERSION_SEQ_LOCK]).db()?;
     }
-    // The version lock, after the cell locks (the order put_version takes them in), before the reads.
-    t.execute(&st_vlock, &[&VERSION_SEQ_LOCK]).db()?;
 
     // What the store holds for the call: the receipts (by hash), the namespaces of the signer
     // hosts and the latest tx of the version cells, all read after the locks.
@@ -522,6 +532,19 @@ fn put_cells_in(
     if !cells.is_empty() {
         for row in t.query(&st_latest, &[&cells]).db()? {
             latest.insert(row.try_get(0).db()?, row.try_get(1).db()?);
+        }
+    }
+    // The batch's existing versions, in one statement (decided 27 Nov, B4): a (cell_id, tx) the store holds
+    // with the same receipt is a no-op, with another a refusal. `pending` is the same for the batch's own
+    // versions decided so far.
+    let mut existing: HashMap<(String, String), String> = HashMap::new();
+    let mut pending: HashMap<(String, String), String> = HashMap::new();
+    if !locked.is_empty() {
+        let pairs: Vec<(&str, &str)> = version_cells().collect();
+        let cs: Vec<&str> = pairs.iter().map(|p| p.0).collect();
+        let txs: Vec<&str> = pairs.iter().map(|p| p.1).collect();
+        for row in t.query(&st_many, &[&cs, &txs]).db()? {
+            existing.insert((row.try_get(0).db()?, row.try_get(1).db()?), row.try_get(2).db()?);
         }
     }
 
@@ -587,8 +610,8 @@ fn put_cells_in(
             }
             // The cell already has a version at this tx: the same receipt writes nothing; another is refused
             // (review item 3).
-            let held: Option<String> =
-                t.query_opt(&st_at, &[&cell, &tx]).db()?.map(|r| r.try_get(0)).transpose().db()?;
+            let key = (cell.to_string(), tx.to_string());
+            let held: Option<String> = existing.get(&key).or_else(|| pending.get(&key)).cloned();
             match held {
                 Some(h) if h == p.hash => {}
                 Some(_) => {
@@ -600,8 +623,12 @@ fn put_cells_in(
                     })
                 }
                 None => {
-                    // Recorded under the lock (review item 2).
-                    let recorded = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
+                    // Recorded under the lock (review item 2), and after the cell's latest (decided 27 Nov, B5).
+                    let base = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
+                    let recorded = match latest.get(cell) {
+                        Some(l) if has => crate::later_of(&base, &crate::instant_after(l)),
+                        _ => base,
+                    };
                     if let Some(l) = latest.get(cell) {
                         if recorded.as_str() <= l.as_str() {
                             return Err(Error::NotLater {
@@ -614,6 +641,7 @@ fn put_cells_in(
                     }
                     latest.insert(cell.to_string(), recorded.clone());
                     versions.push((cell, tx, p.hash.clone(), recorded));
+                    pending.insert(key, p.hash.clone());
                 }
             }
         }
@@ -798,14 +826,60 @@ impl Store for PgStore {
     }
 
     fn barrier_checked(&self) -> Result<()> {
+        // One autocommit statement (decided 27 Nov, B2/B3): the lock timeout for the statement, the shared
+        // lock (it waits for the writers in flight) released when the statement ends.
+        let timeout = format!("{}ms", self.barrier_timeout.as_millis().max(1));
         self.run("barrier", |c| {
-            // Shared: waits for the exclusive holders (writers in flight); released at once.
             let s = c.stmt(Q::BarrierShared)?;
-            c.client.query_one(&s, &[&VERSION_SEQ_LOCK]).db()?;
-            let u = c.stmt(Q::BarrierUnshared)?;
-            c.client.query_one(&u, &[&VERSION_SEQ_LOCK]).db()?;
+            c.client.query_one(&s, &[&VERSION_SEQ_LOCK, &timeout]).db()?;
             Ok(())
         })
+        .map_err(|e| crate::error::timed_out(e, "barrier"))
+    }
+
+    fn later_bound_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<String>> {
+        self.run("later_bound", |c| {
+            let st = c.stmt(Q::LaterBound)?;
+            let row = c.client.query_one(&st, &[&cell_id, &recorded]).db()?;
+            row.try_get(0).db()
+        })
+    }
+
+    fn slice_member_hashes_within_checked(
+        &self,
+        slice: &Slice,
+        asof: &str,
+        limit: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<String>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Ok(crate::hashes_limited(self.slice_members(slice, asof)?, limit));
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let pattern = Pattern::of(&v)?;
+        let ms = timeout.as_millis().max(1);
+        self.run("slice_member_hashes_within", |c| {
+            // One transaction, its statement timeout set for it alone (SET LOCAL), then the listing.
+            c.client.batch_execute("BEGIN").db()?;
+            let r = c
+                .client
+                .batch_execute(&format!("SET LOCAL statement_timeout = {ms}"))
+                .db()
+                .and_then(|()| pattern.member_hashes(c, asof, limit));
+            match r {
+                Ok(hashes) => {
+                    c.client.batch_execute("COMMIT").db()?;
+                    Ok(hashes)
+                }
+                Err(e) => {
+                    let _ = c.client.batch_execute("ROLLBACK");
+                    Err(e)
+                }
+            }
+        })
+        .map_err(|e| crate::error::timed_out(e, "slice_member_hashes_within"))
     }
 
     fn next_version_after_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
@@ -968,7 +1042,18 @@ impl Store for PgStore {
             t.execute(&lock, &[&"versions", &cell_id]).db()?;
             // The version lock, then the recording time, both under it (review item 2).
             t.execute(&vlock, &[&VERSION_SEQ_LOCK]).db()?;
-            let recorded = if has { crate::recorded_at(self.clock.as_ref(), tx) } else { tx.to_string() };
+            // Recorded under the lock, and after the cell's latest (decided 27 Nov, B5).
+            let latest_now: Option<String> =
+                t.query_opt(&latest, &[&cell_id]).db()?.map(|r| r.try_get(0)).transpose().db()?;
+            let recorded = if has {
+                let base = crate::recorded_at(self.clock.as_ref(), tx);
+                match &latest_now {
+                    Some(l) => crate::later_of(&base, &crate::instant_after(l)),
+                    None => base,
+                }
+            } else {
+                tx.to_string()
+            };
             let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
@@ -1002,14 +1087,13 @@ impl Store for PgStore {
                     latest: tx.to_string(),
                 });
             }
-            if let Some(row) = t.query_opt(&latest, &[&cell_id]).db()? {
-                let l: String = row.try_get(0).db()?;
+            if let Some(l) = &latest_now {
                 if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell_id.to_string(),
                         given: recorded.clone(),
-                        latest: l,
+                        latest: l.clone(),
                     });
                 }
             }
@@ -2856,7 +2940,7 @@ impl Pattern {
                 ],
             )
             .db()?;
-        rows.iter().map(|r| r.try_get::<_, String>(1).db()).collect()
+        rows.iter().map(|r| r.try_get::<_, String>(0).db()).collect()
     }
 
     /// The constraint columns of the member and change queries ($6-$10).
