@@ -234,6 +234,29 @@ fn an_existing_version_again_is_a_no_op_and_another_receipt_a_clean_refusal(b: B
     }
 }
 
+// ---- Item 7: SQLite, a raw insert with no seq -------------------------------------------------
+
+#[test]
+fn sqlite_a_raw_insert_with_no_seq_gets_one_and_updates_function_seqs() {
+    let db = TestDb::migrated(Backend::Sqlite);
+    let s = slice_store(&db);
+    let h = function(&s);
+    put_member(&s, &kcell(&h, 1), "1", T1, T1);
+    let before = s.fn_seq(&h).unwrap();
+    assert!(before > 0);
+    let c = kcell(&h, 2);
+    let hash = s.put_receipt(&slice_receipt(&c, "2", T2, T2)).unwrap();
+    db.exec(&format!(
+        "INSERT INTO versions (cell_id, tx, receipt_hash, recorded) VALUES ('{}', '{T2}', '{hash}', '{T2}')",
+        c.id()
+    ))
+    .unwrap();
+    let seq = db.int(&format!("SELECT seq FROM versions WHERE cell_id = '{}'", c.id()));
+    assert!(seq > before, "a seq from the trigger: {seq} after {before}");
+    assert_eq!(db.int(&format!("SELECT seq FROM function_seqs WHERE fn_hash = '{h}'")), seq, "function_seqs updated");
+    assert_eq!(s.fn_seq(&h).unwrap(), seq);
+}
+
 backends!(
     a_writer_that_waited_records_the_time_it_holds_the_lock_at,
     barrier_returns_at_once_with_no_writer_and_waits_for_one_in_flight,
