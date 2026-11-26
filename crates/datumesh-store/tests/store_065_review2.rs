@@ -94,4 +94,59 @@ fn later_bound_is_the_least_start_of_the_versions_recorded_later(b: Backend) {
     assert!(matches!(s.later_bound("nope", T1), Err(datumesh_store::Error::Invalid(_))));
 }
 
+// ---- B2/B3: the barrier, one statement with a timeout (PostgreSQL) -------------------------------
+
+/// Holds the version lock from a raw session until the returned sender is used or dropped.
+fn hold(db: &TestDb) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let mut c = db.pg().client();
+    let h = std::thread::spawn(move || {
+        let mut t = c.transaction().unwrap();
+        t.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_KEY]).unwrap();
+        held_tx.send(()).unwrap();
+        let _ = release_rx.recv();
+        t.commit().unwrap();
+    });
+    held_rx.recv().unwrap();
+    (release_tx, h)
+}
+
+#[test]
+fn pg_the_barrier_leaks_no_session_lock() {
+    let db = TestDb::migrated(Backend::Pg);
+    let s = slice_store(&db);
+    for _ in 0..3 {
+        s.barrier().unwrap();
+    }
+    // No advisory lock on the key is left behind by the store's sessions.
+    let held =
+        db.int(&format!("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = {}", LOCK_KEY as u32));
+    assert_eq!(held, 0, "the barrier is released at the end of its statement");
+    // A writer on another connection takes the lock at once.
+    let mut c = db.pg().client();
+    let mut t = c.transaction().unwrap();
+    t.execute("SET LOCAL lock_timeout = '1s'", &[]).unwrap();
+    t.execute("SELECT pg_advisory_xact_lock($1)", &[&LOCK_KEY]).expect("not blocked by a leaked barrier");
+    t.commit().unwrap();
+}
+
+#[test]
+fn pg_the_barrier_honours_its_timeout() {
+    let db = TestDb::migrated(Backend::Pg);
+    let s = TStore(Arc::new(
+        db.pg().bare_store_with(PoolOptions::new().max_size(4).barrier_timeout(Duration::from_millis(200))),
+    ));
+    let (release, holder) = hold(&db);
+    let t0 = Instant::now();
+    let r = s.barrier();
+    let took = t0.elapsed();
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    assert!(r.is_err(), "a writer held past the timeout: the barrier fails, {r:?}");
+    assert!(took < Duration::from_secs(3), "it gave up near its timeout: {took:?}");
+    // With the writer gone the barrier passes.
+    s.barrier().unwrap();
+}
+
 backends!(later_bound_is_the_least_start_of_the_versions_recorded_later);
