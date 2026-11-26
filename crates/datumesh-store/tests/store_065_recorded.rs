@@ -237,6 +237,31 @@ fn the_backdating_rule_is_enforced_on_recorded(b: Backend) {
     assert_eq!(s.versions(&c.id(), T1, END).unwrap().len(), 3);
 }
 
+fn two_versions_in_one_batch_on_a_frozen_clock_are_recorded_one_microsecond_apart(b: Backend) {
+    // B5 follow-up (decided 27 Nov): recorded = max(signed tx, clock, the cell's latest recorded +
+    // 1 µs). Two versions of one cell in one put_cells batch, the clock frozen at T3: both stored, at
+    // T3 and 1 µs after.
+    let db = TestDb::migrated(b);
+    let clock = Clock::at(T3);
+    let s = rec_store(&db, &clock);
+    let h = function(&s);
+    let c = kcell(&h, 1);
+    let (r1, r2) = (slice_receipt(&c, "1", T1, T1), slice_receipt(&c, "2", T2, T2));
+    let id = c.id();
+    s.put_cells(&[CellWrite::new(&r1, Some((id.as_str(), T1))), CellWrite::new(&r2, Some((id.as_str(), T2)))])
+        .expect("both versions stored");
+    let vs = s.versions(&id, T1, T5).unwrap();
+    assert_eq!(vs.len(), 2);
+    let mut recorded: Vec<String> = vs.iter().map(|v| v.recorded.clone()).collect();
+    recorded.sort();
+    assert_eq!(
+        recorded,
+        [T3.to_string(), "2024-01-03T00:00:00.000001Z".to_string()],
+        "strictly increasing, 1 µs apart"
+    );
+    assert_eq!(s.latest(&id).unwrap().unwrap().tx, T2, "the second of the batch is the latest");
+}
+
 fn migration_17_gives_existing_rows_recorded_equal_to_tx(b: Backend) {
     let (old, new) = if b == Backend::Pg { (16, 17) } else { (12, 13) };
     let db = TestDb::empty(b);
@@ -334,6 +359,7 @@ backends!(
     recording_time_is_what_the_next_put_records,
     as_of_reads_select_by_recorded,
     the_backdating_rule_is_enforced_on_recorded,
+    two_versions_in_one_batch_on_a_frozen_clock_are_recorded_one_microsecond_apart,
     migration_17_gives_existing_rows_recorded_equal_to_tx,
     a_slice_definition_is_kept_once_per_slice,
 );
