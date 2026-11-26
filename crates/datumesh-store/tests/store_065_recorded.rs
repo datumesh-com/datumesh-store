@@ -14,6 +14,8 @@
 //! pub type RecordingClock = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
 //! impl PoolOptions   { pub fn recording_clock(self, clock: RecordingClock) -> Self; }
 //! impl SqliteOptions { pub fn recording_clock(self, clock: RecordingClock) -> Self; }
+//! fn recording_time(&self, signed_tx: &str) -> String;  // what the next put records for that tx
+//!                                                       // (decided 26 Nov, for publish-stored's check)
 //! pub struct Version { ..., pub recorded: String }   // the version's recorded time
 //!
 //! // G10: a slice's definition, kept once per distinct slice (not per date).
@@ -148,6 +150,31 @@ fn the_store_records_at_its_clock_and_keeps_the_signed_tx(b: Backend) {
     // The column is the database's: every row has one, and it cannot be updated.
     assert_eq!(db.int("SELECT count(*) FROM versions WHERE recorded IS NULL"), 0);
     db.refused(&format!("UPDATE versions SET recorded = '{T5}'"));
+}
+
+fn recording_time_is_what_the_next_put_records(b: Backend) {
+    // Store::recording_time(signed_tx) (decided 26 Nov, from the http implementation): the time the
+    // store will record a version signed at `signed_tx` at, for publish-stored's own check.
+    let db = TestDb::migrated(b);
+    let plain = slice_store(&db);
+    assert_eq!(plain.recording_time(T2), T2, "no clock: the signed tx");
+    let clock = Clock::at(T3);
+    let s = rec_store(&db, &clock);
+    assert_eq!(s.recording_time(T1), T3, "max(signed tx, clock)");
+    assert_eq!(s.recording_time(T4), T4, "a clock behind the signed tx: the signed tx");
+    assert_eq!(s.recording_time(T3), T3);
+    // It equals what the next put records for that tx.
+    let h = function(&s);
+    for (k, tx, at) in [(1, T1, T3), (2, T4, T3), (3, T2, T5)] {
+        clock.set(at);
+        let want = s.recording_time(tx);
+        put_member(&s, &kcell(&h, k), "1", tx, tx);
+        assert_eq!(s.latest(&kcell(&h, k).id()).unwrap().unwrap().recorded, want, "k {k}");
+    }
+    let c = kcell(&h, 9);
+    let want = plain.recording_time(T1);
+    put_member(&plain, &c, "1", T1, T1);
+    assert_eq!(plain.latest(&c.id()).unwrap().unwrap().recorded, want);
 }
 
 fn as_of_reads_select_by_recorded(b: Backend) {
@@ -304,6 +331,7 @@ backends!(
     migration_17_and_13_are_the_last_and_named,
     without_a_clock_recorded_is_the_signed_tx,
     the_store_records_at_its_clock_and_keeps_the_signed_tx,
+    recording_time_is_what_the_next_put_records,
     as_of_reads_select_by_recorded,
     the_backdating_rule_is_enforced_on_recorded,
     migration_17_gives_existing_rows_recorded_equal_to_tx,
