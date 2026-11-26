@@ -640,6 +640,19 @@ pub trait Store: Resolver + sealed::Sealed {
         self.slice_seq_checked(slice)
     }
 
+    /// The time a version signed at `signed_tx` is recorded at by the next put (G9): the greater of
+    /// `signed_tx` and this store's recording clock, or `signed_tx` with no clock. Exactly the rule the
+    /// puts apply, so publish-stored can compare against it. Since 0.6.5.
+    fn recording_time(&self, signed_tx: &str) -> String {
+        crate::recorded_at(self.recording_clock_of().as_ref(), signed_tx)
+    }
+
+    /// The store's recording clock, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn recording_clock_of(&self) -> Option<RecordingClock> {
+        None
+    }
+
     /// The highest insertion seq among the versions (withdrawals included) of the functions `fn_hash`,
     /// 0 when there are none: an upper bound of `slice_seq` for every slice of that function, in one
     /// probe of the function's row (decided 26 Nov, G3: a slice whose `fn_seq` is at or below its row's

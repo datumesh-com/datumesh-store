@@ -737,6 +737,10 @@ impl Store for PgStore {
         })
     }
 
+    fn recording_clock_of(&self) -> Option<crate::RecordingClock> {
+        self.clock.clone()
+    }
+
     fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
         self.run("fn_seq", |c| {
             let st = c.stmt(Q::FnSeq)?;
