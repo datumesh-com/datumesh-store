@@ -18,6 +18,7 @@
 //!     pub members: u64,          // how many members
 //!     pub tx: Option<String>,    // the latest member or withdrawal tx the read saw (SliceRead.tx); None: none
 //!     pub asof: String,          // the read's as-of
+//!     pub licences: Vec<String>, // the members' distinct licences, sorted (decided 26 Nov, G3)
 //! }
 //! impl MemberSet {
 //!     /// The row of `manifest` (entry, ids, fn_hash, slice bytes and count from it).
@@ -34,7 +35,11 @@
 //!
 //! The `tx` column is nullable: an empty slice with no withdrawal has no member tx (SliceRead.tx is
 //! None). The table is read with raw SQL through the columns the contract names: `entry`,
-//! `slice_id`, `members_hash`, `fn_hash`, `slice`, `members`, `tx`, `asof`.
+//! `slice_id`, `members_hash`, `fn_hash`, `slice`, `members`, `tx`, `asof`, and `licences` (the
+//! members' distinct licence URLs, sorted, as JCS text: "the member-set row carries its members'
+//! licences", decided 26 Nov, in 0016 / 0012). `from_manifest` leaves `licences` empty (a manifest
+//! has no licences); the caller sets the field. The store keeps the licences distinct and sorted
+//! whatever order it is given them in.
 //!
 //! The migration tests apply 1..=15 (SQLite 1..=11), write as store 0.6.4 does (a manifest, its
 //! members, a receipt citing it), then apply the rest: only 16 (12) is applied, and the manifest
@@ -94,7 +99,7 @@ fn dump(db: &TestDb, sql_pg: &str, sql_lite: &str) -> Vec<Vec<String>> {
 fn the_table_has_the_columns_the_contract_names(b: Backend) {
     let db = TestDb::migrated(b);
     let c = columns(&db, "member_sets");
-    for want in ["asof", "entry", "fn_hash", "members", "members_hash", "slice", "slice_id", "tx"] {
+    for want in ["asof", "entry", "fn_hash", "licences", "members", "members_hash", "slice", "slice_id", "tx"] {
         assert!(c.contains(&want.to_string()), "member_sets has {want}: {c:?}");
     }
     assert_eq!(db.count("member_sets"), 0, "a fresh store holds no row");
@@ -138,6 +143,35 @@ fn put_member_set_writes_one_row_and_member_set_reads_it(b: Backend) {
     assert_eq!(db.count("manifests"), 0);
     assert_eq!(db.count("manifest_members"), 0);
     assert_eq!(s.manifest(&m.entry()), None, "no manifest is served from a member-set row by the store");
+}
+
+fn the_row_carries_its_members_licences_distinct_and_sorted(b: Backend) {
+    // Decided 26 Nov (G3): the reuse check takes the licences from the row and reads no member.
+    let db = TestDb::migrated(b);
+    let s = slice_store(&db);
+    let h = function(&s);
+    let restricted = "https://rates.example.org/licences/restricted";
+    let m = manifest(&h, &[h_of('a'), h_of('b'), h_of('c')]);
+    let mut set = MemberSet::from_manifest(&m, Some(T1), T2);
+    assert!(set.licences.is_empty(), "a manifest has no licences: the caller sets them");
+    set.licences = vec![restricted.to_string(), "MIT".to_string(), restricted.to_string(), "CC0-1.0".to_string()];
+    assert!(s.put_member_set(&set).unwrap());
+    let back = s.member_set(&m.entry()).unwrap().expect("the row");
+    assert_eq!(back.licences, ["CC0-1.0", "MIT", restricted], "distinct, sorted");
+    // The column: the JCS text of the sorted list.
+    let raw = db.texts("SELECT licences FROM member_sets");
+    assert_eq!(raw[0][0], format!(r#"["CC0-1.0","MIT","{restricted}"]"#));
+    // An empty slice: no licences, an empty list.
+    let empty = manifest(&h, &[]);
+    assert!(s.put_member_set(&MemberSet::from_manifest(&empty, None, T2)).unwrap());
+    assert_eq!(s.member_set(&empty.entry()).unwrap().unwrap().licences, Vec::<String>::new());
+    assert_eq!(db.texts(&format!("SELECT licences FROM member_sets WHERE entry = '{}'", empty.entry()))[0][0], "[]");
+    // A licence that is not a string of the right shape is refused by the store (empty text).
+    let other = manifest(&h, &[h_of('d')]);
+    let mut bad = MemberSet::from_manifest(&other, Some(T1), T2);
+    bad.licences = vec![String::new()];
+    assert!(matches!(s.put_member_set(&bad), Err(datumesh_store::Error::Invalid(_))), "an empty licence");
+    assert_eq!(db.count("member_sets"), 2);
 }
 
 fn put_member_set_is_insert_or_nothing(b: Backend) {
@@ -244,8 +278,8 @@ fn the_database_checks_the_entry(b: Backend) {
     let blob = if db.is_pg() { format!("'\\x{hex}'::bytea") } else { format!("X'{hex}'") };
     let insert = |entry: &str| {
         format!(
-            "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof) \
-             VALUES ('{entry}', '{id}', '{mh}', '{h}', {blob}, 2, '{T1}', '{T2}')"
+            "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences) \
+             VALUES ('{entry}', '{id}', '{mh}', '{h}', {blob}, 2, '{T1}', '{T2}', '[\"CC0-1.0\"]')"
         )
     };
     let other = h_of('f');
@@ -260,8 +294,12 @@ fn the_database_checks_the_entry(b: Backend) {
     assert!(db.exec(&insert(&m.entry())).is_err());
     assert_eq!(
         s.member_set(&m.entry()).unwrap(),
-        Some(MemberSet::from_manifest(&m, Some(T1), T2)),
-        "read by the store"
+        Some({
+            let mut want = MemberSet::from_manifest(&m, Some(T1), T2);
+            want.licences = vec!["CC0-1.0".to_string()];
+            want
+        }),
+        "read by the store, its licences from the JCS text"
     );
 }
 
@@ -279,8 +317,8 @@ fn the_table_is_append_only(b: Backend) {
     } else {
         // SQLite: a replacing insert would delete the row without a DELETE trigger.
         let e = db.exec(&format!(
-            "INSERT OR REPLACE INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof) \
-             SELECT entry, slice_id, members_hash, fn_hash, slice, members, tx, '{T3}' FROM member_sets"
+            "INSERT OR REPLACE INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences) \
+             SELECT entry, slice_id, members_hash, fn_hash, slice, members, tx, '{T3}', licences FROM member_sets"
         ));
         assert!(e.is_err(), "INSERT OR REPLACE refused");
     }
@@ -410,6 +448,7 @@ fn a_0_6_4_store_with_a_manifest_migrates_untouched(b: Backend) {
 backends!(
     the_table_has_the_columns_the_contract_names,
     put_member_set_writes_one_row_and_member_set_reads_it,
+    the_row_carries_its_members_licences_distinct_and_sorted,
     put_member_set_is_insert_or_nothing,
     an_empty_slice_has_no_tx,
     a_member_set_and_a_manifest_of_one_entry_coexist,
