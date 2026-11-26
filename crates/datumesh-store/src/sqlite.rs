@@ -926,6 +926,30 @@ impl Store for SqliteStore {
         self.options.recording_clock.clone()
     }
 
+    fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Ok(crate::hashes_by_recorded(self.slice_members(slice, asof)?, limit));
+        }
+        let p = Pattern::of(&v)?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.run("slice_member_hashes", |c| {
+            let (d, _) = drive(&p, c, false)?;
+            let q = if d.is_some() { L::MemberHashesDrive } else { L::MemberHashesAll };
+            let mut binds = params(&p, asof, d);
+            binds.push((":limit", SqlValue::Integer(limit)));
+            let mut st = c.prepare_cached(q.sql()).db()?;
+            bind(&mut st, &binds)?;
+            let mut rows = st.raw_query();
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().db()? {
+                out.push(r.get::<_, String>(0).db()?);
+            }
+            Ok(out)
+        })
+    }
+
     fn barrier_checked(&self) -> Result<()> {
         // A write transaction in flight (in this process or another) holds the write lock; an empty one
         // waits for it, and returns at once when there is none (review item 2).

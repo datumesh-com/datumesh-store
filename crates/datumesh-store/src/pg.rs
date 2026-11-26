@@ -786,6 +786,17 @@ impl Store for PgStore {
         self.clock.clone()
     }
 
+    fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
+        check_instant(asof, "asof")?;
+        let v = slice.to_value();
+        if version_slice(slice, &v)?.is_some() {
+            return Ok(crate::hashes_by_recorded(self.slice_members(slice, asof)?, limit));
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_member_hashes", |c| pattern.member_hashes(c, asof, limit))
+    }
+
     fn barrier_checked(&self) -> Result<()> {
         self.run("barrier", |c| {
             // Shared: waits for the exclusive holders (writers in flight); released at once.
@@ -2804,6 +2815,48 @@ impl Pattern {
             )
             .db()?;
         rows.iter().map(cell_row).collect()
+    }
+
+    /// The members' receipt hashes as of `asof`, by recorded time, at most `limit` (one statement; see
+    /// MemberHashesAll). The statement's parameters are those of computed_cells.
+    fn member_hashes(&self, c: &mut Conn, asof: &str, limit: i64) -> Result<Vec<String>> {
+        let (drive, _) = self.drive(c, false)?;
+        let [names, kinds, types, los, his] = self.columns();
+        let keys: Vec<String> = self.args.iter().filter(|a| a.kind != Kind::Value).map(|a| a.name.clone()).collect();
+        let nargs = i32::try_from(self.args.len()).unwrap_or(i32::MAX);
+        let (q, d_name, d_ty, d_lo, d_hi) = match drive {
+            None => (Q::MemberHashesAll, "", "", "", ""),
+            Some(a) => {
+                let q = if a.ty == "number" { Q::MemberHashesNum } else { Q::MemberHashesText };
+                (q, a.name.as_str(), a.ty.as_str(), a.lo.as_str(), a.hi.as_str())
+            }
+        };
+        let st = c.stmt(q)?;
+        let rows = c
+            .client
+            .query(
+                &st,
+                &[
+                    &self.fn_hash,
+                    &self.ns,
+                    &self.fn_name,
+                    &nargs,
+                    &asof,
+                    &names,
+                    &kinds,
+                    &types,
+                    &los,
+                    &his,
+                    &keys,
+                    &d_name,
+                    &d_ty,
+                    &d_lo,
+                    &d_hi,
+                    &limit,
+                ],
+            )
+            .db()?;
+        rows.iter().map(|r| r.try_get::<_, String>(1).db()).collect()
     }
 
     /// The constraint columns of the member and change queries ($6-$10).
