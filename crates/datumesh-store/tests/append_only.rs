@@ -92,14 +92,23 @@ fn raw_inserts_out_of_order_fail_in_the_database(b: Backend) {
 fn put_version_not_later_is_a_typed_error(b: Backend) {
     let db = TestDb::migrated(b);
     let (s, cell, h1, h2) = seeded(&db);
-    // Equal to the latest, and earlier than it.
+    // A version that is already there (the same cell, tx and receipt) again: a no-op (review decision
+    // 3 of the guard patch: re-running a file or a bundle writes nothing and succeeds).
+    let versions = db.count("versions");
     for (tx, h) in [(TX2, &h2), (TX1, &h1)] {
-        match s.put_version(&cell, tx, h) {
+        s.put_version(&cell, tx, h).unwrap_or_else(|e| panic!("{tx}: the same version again: {e}"));
+    }
+    assert_eq!(db.count("versions"), versions, "nothing written");
+    // Another receipt at the latest tx, and at an earlier one: a typed NotLater.
+    for (tx, value) in [(TX2, "1.0899"), (TX1, "1.0898")] {
+        let other = s.put_receipt(&stored_number_at(value, tx)).unwrap();
+        match s.put_version(&cell, tx, &other) {
             Err(Error::NotLater { given, latest, .. }) => {
                 assert_eq!(given, tx);
-                assert_eq!(latest, TX2);
+                // The version it is not later than: the one at that tx, or the latest.
+                assert!(latest == tx || latest == TX2, "{tx}: latest {latest}");
             }
-            other => panic!("{other:?}"),
+            other => panic!("{tx}: another receipt: {other:?}"),
         }
     }
     // An earlier, never-seen tx with its own receipt: still refused.
