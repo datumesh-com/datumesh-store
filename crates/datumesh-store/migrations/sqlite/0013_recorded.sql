@@ -19,6 +19,16 @@ CREATE TRIGGER versions_in_order BEFORE INSERT ON versions
                  AND coalesce(v.recorded, v.tx) >= coalesce(NEW.recorded, NEW.tx))
     BEGIN SELECT RAISE(ABORT, 'datumesh: version recorded time is not later than the latest of its cell'); END;
 CREATE INDEX versions_recorded ON versions (cell_id, coalesce(recorded, tx));
+-- The insertion sequence (decided 26 Nov, G3): existing rows numbered by rowid (insertion order); each
+-- later insert takes max + 1 in its write transaction (the single writer), so it only increases.
+-- A raw insert naming none leaves NULL (the store always names one).
+ALTER TABLE versions ADD COLUMN seq INTEGER;
+DROP TRIGGER versions_no_update;
+UPDATE versions SET seq = rowid;
+CREATE TRIGGER versions_no_update BEFORE UPDATE ON versions
+    BEGIN SELECT RAISE(ABORT, 'datumesh: UPDATE on versions refused: the table is append-only'); END;
+CREATE INDEX versions_cell_seq ON versions (cell_id, seq);
+CREATE INDEX versions_seq ON versions (seq);
 -- The versions recorded after an instant, of any cell (the slices' change check).
 CREATE INDEX versions_recorded_all ON versions (coalesce(recorded, tx));
 

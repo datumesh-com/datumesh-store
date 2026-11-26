@@ -124,7 +124,7 @@ macro_rules! slice_withdrawn {
 macro_rules! member_cols {
     () => {
         "v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.bytes, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
-                                                                FROM cell_args a WHERE a.cell_id = c.cell_id)"
+                                                                FROM cell_args a WHERE a.cell_id = c.cell_id), v.seq"
     };
 }
 
@@ -134,11 +134,27 @@ macro_rules! value_cols {
     () => {
         "v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.value_type, r.value, c.cell_id, (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                                                              FROM cell_args a WHERE a.cell_id = c.cell_id),
-         c.ns, c.fn, c.fn_hash, c.sort_key"
+         c.ns, c.fn, c.fn_hash, c.sort_key, v.seq"
     };
 }
 
 /// Whether a candidate of a slice has a stored version whose receipt's asof is after A.
+/// The highest insertion seq among the versions of the candidate cells of a slice (G3): one
+/// correlated probe of (cell_id, seq) per candidate; 0 when none.
+macro_rules! slice_seq {
+    ($from:expr, $where:expr) => {
+        concat!(
+            "SELECT coalesce(max(q.s), 0) FROM (SELECT (SELECT max(v.seq) FROM versions v WHERE v.cell_id = c.cell_id) AS s FROM ",
+            $from,
+            " WHERE ",
+            $where,
+            " AND c.fn_hash = :fn_hash AND c.ns = :ns AND c.fn = :fn AND c.nargs = :nargs AND :asof IS NOT NULL AND ",
+            slice_match!(),
+            ") q"
+        )
+    };
+}
+
 macro_rules! changed_cand {
     ($from:expr, $where:expr) => {
         concat!(
@@ -284,7 +300,7 @@ statements! {
     // The cells of a function name, from the counter (0.5.3; the primary key).
     StoredCellCount = "SELECT COALESCE((SELECT n FROM cell_counts WHERE fn_hash = ?1 AND ns = ?2 AND fn = ?3), 0)";
     // A version slice's versions, at most ?5 (SQL LIMIT, in tx order).
-    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx), v.seq
                          FROM versions v WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 ORDER BY v.tx LIMIT ?4";
     // Dictionaries (0.5.2): exact lookups on the unique (owner, key, value).
     DictionaryHas = "SELECT EXISTS (SELECT 1 FROM key_values WHERE owner = ?1 AND key = ?2 AND value = ?3)";
@@ -321,25 +337,31 @@ statements! {
 
     // Versions come with their receipt's asof (Version::asof).
     VersionLatestTx = "SELECT recorded FROM versions WHERE cell_id = ?1 ORDER BY recorded DESC LIMIT 1";
-    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx), v.seq
                      FROM versions v WHERE v.cell_id = ?1 ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
-    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx), v.seq
                    FROM versions v WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
-    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx)
+    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), coalesce(v.recorded, v.tx), v.seq
                     FROM versions v WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 ORDER BY v.tx";
     // A stored version answers as of A when its tx <= A and its receipt's asof <= A.
-    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx) FROM versions v CROSS JOIN receipts r
+    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), v.seq FROM versions v CROSS JOIN receipts r
                   WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
                   ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
-    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes FROM versions v CROSS JOIN receipts r
+    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes, v.seq FROM versions v CROSS JOIN receipts r
                          WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) <= ?2 AND r.hash = v.receipt_hash AND r.asof <= ?2
                          ORDER BY coalesce(v.recorded, v.tx) DESC LIMIT 1";
-    VersionPut = "INSERT INTO versions (cell_id, tx, receipt_hash, recorded) VALUES (?1, ?2, ?3, ?4)";
+    VersionPut = "INSERT INTO versions (cell_id, tx, receipt_hash, recorded, seq)
+                  VALUES (?1, ?2, ?3, ?4, (SELECT coalesce(max(seq), 0) + 1 FROM versions))";
     // The member-set rows (0.6.5, G2) and the slice definitions (G10): inserted or nothing (the
     // insert selects no row when the key is held, so the append-only trigger never fires).
-    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)
-                    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE NOT EXISTS (SELECT 1 FROM member_sets WHERE entry = ?1)";
-    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences FROM member_sets WHERE entry = ?1";
+    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences, seen_seq)
+                    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10 WHERE NOT EXISTS (SELECT 1 FROM member_sets WHERE entry = ?1)";
+    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences, seen_seq FROM member_sets WHERE entry = ?1";
+    // slice_seq (G3, 0.6.5): the highest insertion seq among the versions of the candidate cells.
+    SliceSeqAll = slice_seq!(from_all!(), where_all!());
+    SliceSeqDrive = slice_seq!(from_drive!(), where_drive!());
+    // A version slice's cell: the highest seq of its versions, 0 when none.
+    VersionSeqMax = "SELECT coalesce(max(seq), 0) FROM versions WHERE cell_id = ?1";
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) SELECT ?1, ?2, ?3
                           WHERE NOT EXISTS (SELECT 1 FROM slice_definitions WHERE slice_id = ?1)";
     SliceDefinitionGet = "SELECT slice FROM slice_definitions WHERE slice_id = ?1";
@@ -351,9 +373,9 @@ statements! {
     ComputedPut = "INSERT INTO computed_versions (cell_id, tx, asof, receipt_hash) VALUES (?1, ?2, ?3, ?4)";
     ComputedGet = "SELECT receipt_hash FROM computed_versions WHERE cell_id = ?1 AND tx = ?2 AND asof = ?3";
     // The greatest asof <= A, ties the greatest tx.
-    ComputedAsof = "SELECT tx, receipt_hash, asof, 0, tx FROM computed_versions
+    ComputedAsof = "SELECT tx, receipt_hash, asof, 0, tx, 0 AS seq FROM computed_versions
                     WHERE cell_id = ?1 AND asof <= ?2 ORDER BY asof DESC, tx DESC LIMIT 1";
-    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, 0, c.tx, r.bytes FROM
+    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, 0, c.tx, r.bytes, 0 AS seq FROM
                                (SELECT tx, receipt_hash, asof FROM computed_versions
                                  WHERE cell_id = ?1 AND asof <= ?2 ORDER BY asof DESC, tx DESC LIMIT 1) c
                            CROSS JOIN receipts r WHERE r.hash = c.receipt_hash";
@@ -425,7 +447,7 @@ statements! {
     SliceDependents = "SELECT receipt_hash FROM slice_edges WHERE entry = ?1 ORDER BY receipt_hash";
 
     // A version slice: the stored versions with from <= tx <= to answering as of A.
-    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes FROM versions v CROSS JOIN receipts r
+    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', coalesce(v.recorded, v.tx), r.bytes, v.seq FROM versions v CROSS JOIN receipts r
                        WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND coalesce(v.recorded, v.tx) <= ?4
                          AND r.hash = v.receipt_hash AND r.asof <= ?4 ORDER BY v.tx";
     // Its values: (tx, receipt_hash, asof, recorded, value_type, value, cell_id, arguments, ns, fn,
@@ -433,7 +455,7 @@ statements! {
     VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, coalesce(v.recorded, v.tx), r.value_type, r.value, c.cell_id,
                                     (SELECT json_group_array(json_array(a.name, a.type, a.value))
                                        FROM cell_args a WHERE a.cell_id = c.cell_id),
-                                    c.ns, c.fn, c.fn_hash, c.sort_key
+                                    c.ns, c.fn, c.fn_hash, c.sort_key, v.seq
                                FROM versions v CROSS JOIN receipts r CROSS JOIN cells c
                               WHERE v.cell_id = ?1 AND v.tx >= ?2 AND v.tx <= ?3 AND coalesce(v.recorded, v.tx) <= ?4
                                 AND r.hash = v.receipt_hash AND r.asof <= ?4

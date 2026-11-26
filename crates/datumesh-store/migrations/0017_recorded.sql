@@ -12,6 +12,15 @@ ALTER TABLE versions DISABLE TRIGGER versions_append_only;
 UPDATE versions SET recorded = tx;
 ALTER TABLE versions ENABLE TRIGGER versions_append_only;
 ALTER TABLE versions ALTER COLUMN recorded SET NOT NULL;
+-- The insertion sequence (decided 26 Nov, G3, "inserted since"): from a sequence, so every version
+-- (a raw insert too) gets the next value; ADD COLUMN with a volatile default numbers the existing rows in
+-- physical (insertion) order. Only increases, never updated. Not commit-ordered: see the store notes.
+CREATE SEQUENCE versions_seq AS bigint;
+ALTER TABLE versions ADD COLUMN seq bigint NOT NULL DEFAULT nextval('versions_seq');
+ALTER SEQUENCE versions_seq OWNED BY versions.seq;
+-- slice_seq: the versions of one cell, highest seq first (one probe per candidate cell).
+CREATE INDEX versions_cell_seq ON versions (cell_id, seq);
+
 CREATE INDEX versions_recorded ON versions (cell_id, recorded);
 -- The versions recorded after an instant, of any cell (the slices' change check).
 CREATE INDEX versions_recorded_all ON versions (recorded);

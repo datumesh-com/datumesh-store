@@ -479,6 +479,7 @@ fn version_row(r: &rusqlite::Row<'_>, cell_id: &str) -> rusqlite::Result<Version
         asof: r.get(2)?,
         withdrawn: r.get(3)?,
         recorded: r.get(4)?,
+        seq: r.get::<_, Option<i64>>("seq")?.unwrap_or(0),
     })
 }
 
@@ -845,6 +846,7 @@ impl Store for SqliteStore {
     fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
         let members = i64::try_from(set.members).unwrap_or(i64::MAX);
         let licences = crate::licences_text(&set.licences);
+        let seen_seq = set.seen_seq;
         self.write("put_member_set", |c| {
             let n = c
                 .prepare_cached(L::MemberSetPut.sql())
@@ -858,7 +860,8 @@ impl Store for SqliteStore {
                     members,
                     set.tx,
                     set.asof,
-                    licences
+                    licences,
+                    seen_seq
                 ])
                 .db()?;
             Ok(n == 1)
@@ -880,11 +883,12 @@ impl Store for SqliteStore {
                         r.get::<_, Option<String>>(5)?,
                         r.get::<_, String>(6)?,
                         r.get::<_, String>(7)?,
+                        r.get::<_, i64>(8)?,
                     ))
                 })
                 .optional()
                 .db()?;
-            let Some((slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)) = row else {
+            let Some((slice_id, members_hash, fn_hash, slice, members, tx, asof, licences, seen_seq)) = row else {
                 return Ok(None);
             };
             Ok(Some(MemberSet {
@@ -897,6 +901,7 @@ impl Store for SqliteStore {
                 tx,
                 asof,
                 licences: crate::licences_of(&licences)?,
+                seen_seq,
             }))
         })
     }
@@ -910,6 +915,21 @@ impl Store for SqliteStore {
                 .execute(rusqlite::params![id, fn_hash, bytes])
                 .db()?;
             Ok(n == 1)
+        })
+    }
+
+    fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
+        let v = slice.to_value();
+        if let Some((cell_id, _, _)) = version_slice(slice, &v)? {
+            check_hex(&cell_id, 64, "cell_id")?;
+            return self.run("slice_seq", |c| {
+                c.prepare_cached(L::VersionSeqMax.sql()).db()?.query_row([cell_id.as_str()], |r| r.get(0)).db()
+            });
+        }
+        let p = Pattern::of(&v)?;
+        self.run("slice_seq", |c| {
+            let seqs = rows(&p, c, "", [L::SliceSeqAll, L::SliceSeqDrive], |r| r.get::<_, i64>(0))?;
+            Ok(seqs.into_iter().max().unwrap_or(0))
         })
     }
 
@@ -1582,6 +1602,7 @@ impl Store for SqliteStore {
                             asof: r.get(2)?,
                             withdrawn: false,
                             recorded: r.get(3)?,
+                            seq: r.get::<_, Option<i64>>("seq")?.unwrap_or(0),
                         },
                         receipt: r.get(4)?,
                     },
@@ -2409,7 +2430,8 @@ impl Store for SqliteStore {
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,
 /// arguments, ns, fn, fn_hash, sort_key).
-type ValueColumns = (String, String, String, String, String, String, String, String, String, String, String, Vec<u8>);
+type ValueColumns =
+    (String, String, String, String, String, String, String, String, String, String, String, Vec<u8>, i64);
 
 fn value_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueColumns> {
     Ok((
@@ -2425,19 +2447,20 @@ fn value_columns(r: &rusqlite::Row<'_>) -> rusqlite::Result<ValueColumns> {
         r.get(9)?,
         r.get(10)?,
         r.get(11)?,
+        r.get::<_, Option<i64>>("seq")?.unwrap_or(0),
     ))
 }
 
 /// A member's value and cell, rebuilt from the typed-argument index (with its arguments).
 fn value_of(c: ValueColumns) -> Result<(SliceValue, Args)> {
-    let (tx, receipt_hash, asof, recorded, ty, value, cell_id, args, ns, fn_name, fn_hash, sort_key) = c;
+    let (tx, receipt_hash, asof, recorded, ty, value, cell_id, args, ns, fn_name, fn_hash, sort_key, seq) = c;
     let ty = Type::from_name(&ty).ok_or_else(|| bad("type"))?;
     let args = args_of(&args)?;
     let cell = Cell { args: args.clone(), fn_hash, fn_name, ns };
     Ok((
         SliceValue {
             // A slice's values leave the withdrawn versions out (the query does).
-            version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false, recorded },
+            version: Version { cell_id, tx, receipt_hash, asof, withdrawn: false, recorded, seq },
             value: Scalar::from_lexical(ty, &value)?,
             cell,
             sort_key,

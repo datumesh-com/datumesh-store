@@ -18,7 +18,9 @@ CREATE TABLE member_sets (
     tx text COLLATE "C" CHECK (tx IS NULL OR tx ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$'),
     asof text COLLATE "C" NOT NULL CHECK (asof ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$'),
     -- The members' distinct licence URLs, sorted, as JCS text (decided 26 Nov, G3).
-    licences text COLLATE "C" NOT NULL CHECK (licences ~ '^\[.*\]$')
+    licences text COLLATE "C" NOT NULL CHECK (licences ~ '^\[.*\]$'),
+    -- The slice's seq read before its members (decided 26 Nov, G3); 0 when not set.
+    seen_seq bigint NOT NULL DEFAULT 0 CHECK (seen_seq >= 0)
 );
 
 CREATE TRIGGER member_sets_insert_only BEFORE UPDATE OR DELETE ON member_sets

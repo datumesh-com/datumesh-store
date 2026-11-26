@@ -78,13 +78,13 @@ macro_rules! slice_members {
             $outer,
             ", c.cell_id,
                     ARRAY(SELECT a.type || ':' || a.value FROM cell_args a
-                           WHERE a.cell_id = c.cell_id AND a.name = ANY($11::text[]) ORDER BY a.name)
+                           WHERE a.cell_id = c.cell_id AND a.name = ANY($11::text[]) ORDER BY a.name), m.seq
                ",
             $from,
             "
               CROSS JOIN LATERAL (SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '' AS withdrawn, v.recorded, ",
             $inner,
-            "
+            ", v.seq
                                     FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                                    WHERE v.cell_id = c.cell_id AND v.recorded <= $5 AND r.asof <= $5
                                    ORDER BY v.recorded DESC LIMIT 1) m
@@ -112,6 +112,24 @@ macro_rules! slice_withdrawn {
               WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND m.withdrawn AND ",
             slice_match!(),
             " ORDER BY m.tx DESC, m.asof DESC LIMIT 1"
+        )
+    };
+}
+
+/// The highest insertion seq among the versions of the candidate cells of a slice (from `$with` and
+/// `$from`), 0 when none (G3, 0.6.5): one correlated probe of (cell_id, seq) per candidate. $5 is
+/// the (unused) as-of parameter, kept so that the candidates' parameters are numbered as for every
+/// slice statement.
+macro_rules! slice_seq {
+    ($with:expr, $from:expr) => {
+        concat!(
+            $with,
+            "SELECT COALESCE(max(q.s), 0) FROM (SELECT (SELECT max(v.seq) FROM versions v WHERE v.cell_id = c.cell_id) AS s ",
+            $from,
+            "
+              WHERE c.fn_hash = $1 AND c.ns = $2 AND c.fn = $3 AND c.nargs = $4 AND $5::text IS NOT NULL AND ",
+            slice_match!(),
+            ") q"
         )
     };
 }
@@ -338,7 +356,7 @@ statements! {
     StoredCellCount = "SELECT COALESCE((SELECT n FROM cell_counts WHERE fn_hash = $1 AND ns = $2 AND fn = $3), 0)"
         => [TEXT, TEXT, TEXT];
     // A version slice's versions, at most $4 (SQL LIMIT, in tx order).
-    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded
+    VersionRangeLimit = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded, v.seq
                          FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx LIMIT $4"
         => [TEXT, TEXT, TEXT, INT8];
     // Dictionaries (0.5.2): exact lookups on the primary key (owner, key, value).
@@ -363,10 +381,10 @@ statements! {
         => [TEXT];
 
     // The member-set rows (0.6.5, G2): inserted or nothing; read by entry.
-    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (entry) DO NOTHING"
-        => [TEXT, TEXT, TEXT, TEXT, BYTEA, INT4, TEXT, TEXT, TEXT];
-    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences FROM member_sets WHERE entry = $1"
+    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences, seen_seq)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (entry) DO NOTHING"
+        => [TEXT, TEXT, TEXT, TEXT, BYTEA, INT4, TEXT, TEXT, TEXT, INT8];
+    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences, seen_seq FROM member_sets WHERE entry = $1"
         => [TEXT];
     // The slice definitions (0.6.5, G10): inserted or nothing, once per slice id.
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) VALUES ($1, $2, $3)
@@ -395,20 +413,20 @@ statements! {
     // a join, so that the versions table is looked at first (a missing column of it is still
     // reported as such).
     VersionLatestTx = "SELECT recorded FROM versions WHERE cell_id = $1 ORDER BY recorded DESC LIMIT 1" => [TEXT];
-    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded
+    VersionLatest = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded, v.seq
                      FROM versions v WHERE v.cell_id = $1 ORDER BY v.recorded DESC LIMIT 1"
         => [TEXT];
-    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded
+    VersionAsof = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded, v.seq
                    FROM versions v WHERE v.cell_id = $1 AND v.recorded <= $2 ORDER BY v.recorded DESC LIMIT 1"
         => [TEXT, TEXT];
-    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded
+    VersionRange = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash), (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded, v.seq
                     FROM versions v WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT];
     // A stored version answers as of A when its tx <= A and its receipt's asof <= A.
-    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    StoredAsof = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded, v.seq FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                   WHERE v.cell_id = $1 AND v.recorded <= $2 AND r.asof <= $2 ORDER BY v.recorded DESC LIMIT 1"
         => [TEXT, TEXT];
-    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded, r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    StoredAsofReceipt = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded, r.bytes, v.seq FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                          WHERE v.cell_id = $1 AND v.recorded <= $2 AND r.asof <= $2 ORDER BY v.recorded DESC LIMIT 1"
         => [TEXT, TEXT];
     // The same for a store whose schema is older than migration 17 (no recorded column yet): the
@@ -438,10 +456,10 @@ statements! {
     ComputedGet = "SELECT receipt_hash FROM computed_versions WHERE cell_id = $1 AND tx = $2 AND asof = $3"
         => [TEXT, TEXT, TEXT];
     // The greatest asof <= A, ties the greatest tx.
-    ComputedAsof = "SELECT tx, receipt_hash, asof, false, tx FROM computed_versions
+    ComputedAsof = "SELECT tx, receipt_hash, asof, false, tx, 0::bigint AS seq FROM computed_versions
                     WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1"
         => [TEXT, TEXT];
-    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, false, c.tx, r.bytes FROM
+    ComputedAsofReceipt = "SELECT c.tx, c.receipt_hash, c.asof, false, c.tx, r.bytes, 0::bigint AS seq FROM
                                (SELECT tx, receipt_hash, asof FROM computed_versions
                                  WHERE cell_id = $1 AND asof <= $2 ORDER BY asof DESC, tx DESC LIMIT 1) c
                            JOIN receipts r ON r.hash = c.receipt_hash"
@@ -528,7 +546,7 @@ statements! {
     SliceDependents = "SELECT receipt_hash FROM slice_edges WHERE entry = $1 ORDER BY receipt_hash" => [TEXT];
 
     // A version slice: the stored versions with from <= tx <= to answering as of A.
-    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded, r.bytes FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
+    VersionsBetween = "SELECT v.tx, v.receipt_hash, r.asof, r.value_type = '', v.recorded, r.bytes, v.seq FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                        WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.recorded <= $4 AND r.asof <= $4 ORDER BY v.tx"
         => [TEXT, TEXT, TEXT, TEXT];
 
@@ -566,7 +584,7 @@ statements! {
     // 0.3.2: a version slice's values.
     VersionsBetweenValues = "SELECT v.tx, v.receipt_hash, r.asof, v.recorded, r.value_type, r.value, c.ns, c.fn, c.fn_hash,
                                     ARRAY(SELECT a.name || ':' || a.type || ':' || a.value FROM cell_args a
-                                           WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key
+                                           WHERE a.cell_id = c.cell_id ORDER BY a.name), c.sort_key, v.seq
                                FROM versions v JOIN receipts r ON r.hash = v.receipt_hash JOIN cells c ON c.cell_id = v.cell_id
                               WHERE v.cell_id = $1 AND v.tx >= $2 AND v.tx <= $3 AND v.recorded <= $4 AND r.asof <= $4
                                 AND r.value_type <> '' ORDER BY v.tx"
@@ -601,6 +619,12 @@ statements! {
         " LIMIT 1)))"
     ) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     // or from the slice's candidate cells, then each one's receipts by cell and asof.
+    // slice_seq (G3, 0.6.5): the highest insertion seq among the versions of the slice's cells.
+    SliceSeqAll = slice_seq!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceSeqText = slice_seq!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    SliceSeqNum = slice_seq!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
+    // A version slice's cell: the highest seq of its versions, 0 when none.
+    VersionSeqMax = "SELECT COALESCE(max(seq), 0) FROM versions WHERE cell_id = $1" => [TEXT];
     ChangedCandAll = changed_cand!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandText = changed_cand!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandNum = changed_cand!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
@@ -621,9 +645,9 @@ statements! {
     // Batched reads (0.4.3). One row per input, in input order (`ord`): latest_many's version
     // of each cell (its tx, receipt hash and the receipt's asof), receipts_many's bytes.
     VersionLatestMany = "SELECT l.tx, l.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = l.receipt_hash),
-                                    (SELECT r.value_type = '' FROM receipts r WHERE r.hash = l.receipt_hash), l.recorded
+                                    (SELECT r.value_type = '' FROM receipts r WHERE r.hash = l.receipt_hash), l.recorded, l.seq
                          FROM unnest($1::text[]) WITH ORDINALITY AS u(id, ord)
-                         LEFT JOIN LATERAL (SELECT v.tx, v.receipt_hash, v.recorded FROM versions v
+                         LEFT JOIN LATERAL (SELECT v.tx, v.receipt_hash, v.recorded, v.seq FROM versions v
                                              WHERE v.cell_id = u.id ORDER BY v.recorded DESC LIMIT 1) l ON true
                          ORDER BY u.ord"
         => [TEXT_ARRAY];

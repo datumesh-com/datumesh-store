@@ -170,6 +170,7 @@ fn version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
         asof: r.try_get(2).db()?,
         withdrawn: r.try_get(3).db()?,
         recorded: r.try_get(4).db()?,
+        seq: r.try_get::<_, i64>("seq").db()?,
     })
 }
 
@@ -183,6 +184,7 @@ fn valued_version_row(r: &postgres::Row, cell_id: &str) -> Result<Version> {
         asof: r.try_get(2).db()?,
         withdrawn: false,
         recorded: r.try_get(3).db()?,
+        seq: r.try_get::<_, i64>("seq").db()?,
     })
 }
 
@@ -641,6 +643,7 @@ fn latest_row(r: &postgres::Row, cell_id: &str) -> Result<Option<Version>> {
         asof: r.try_get(2).db()?,
         withdrawn: r.try_get(3).db()?,
         recorded: r.try_get(4).db()?,
+        seq: r.try_get::<_, i64>("seq").db()?,
     }))
 }
 
@@ -698,6 +701,7 @@ impl Store for PgStore {
                         &set.tx,
                         &set.asof,
                         &licences,
+                        &set.seen_seq,
                     ],
                 )
                 .db()?;
@@ -720,6 +724,7 @@ impl Store for PgStore {
                 tx: row.try_get(5).db()?,
                 asof: row.try_get(6).db()?,
                 licences: crate::licences_of(&row.try_get::<_, String>(7).db()?)?,
+                seen_seq: row.try_get(8).db()?,
             }))
         })
     }
@@ -730,6 +735,19 @@ impl Store for PgStore {
             let st = c.stmt(Q::SliceDefinitionPut)?;
             Ok(c.client.execute(&st, &[&id, &fn_hash, &bytes]).db()? == 1)
         })
+    }
+
+    fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
+        let v = slice.to_value();
+        if let Some((cell_id, _, _)) = version_slice(slice, &v)? {
+            check_hex(&cell_id, 64, "cell_id")?;
+            return self.run("slice_seq", |c| {
+                let st = c.stmt(Q::VersionSeqMax)?;
+                c.client.query_one(&st, &[&cell_id]).db()?.try_get(0).db()
+            });
+        }
+        let pattern = Pattern::of(&v)?;
+        self.run("slice_seq", |c| pattern.seq(c))
     }
 
     fn slice_definition_checked(&self, slice_id: &str) -> Result<Option<Slice>> {
@@ -2432,6 +2450,17 @@ impl PgStore {
 }
 
 impl Pattern {
+    /// The highest insertion seq among the versions of the slice's cells (0 when none), one
+    /// statement: the candidates' (cell_id, seq) probes (G3).
+    fn seq(&self, c: &mut Conn) -> Result<i64> {
+        let (drive, _) = self.drive(c, false)?;
+        let rows = self.query(c, "", [Q::SliceSeqAll, Q::SliceSeqText, Q::SliceSeqNum], drive)?;
+        match rows.first() {
+            Some(r) => r.try_get(0).db(),
+            None => Ok(0),
+        }
+    }
+
     /// The members as of `asof`, in key order.
     fn members(&self, c: &mut Conn, asof: &str) -> Result<Vec<SliceMember>> {
         let qs = [Q::SliceMembersAll, Q::SliceMembersText, Q::SliceMembersNum];

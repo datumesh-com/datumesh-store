@@ -12,7 +12,9 @@ CREATE TABLE member_sets (
     tx TEXT CHECK (tx IS NULL OR tx GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     asof TEXT NOT NULL CHECK (asof GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
     -- The members' distinct licence URLs, sorted, as JCS text (decided 26 Nov, G3).
-    licences TEXT NOT NULL CHECK (substr(licences, 1, 1) = '[')
+    licences TEXT NOT NULL CHECK (substr(licences, 1, 1) = '['),
+    -- The slice's seq read before its members (decided 26 Nov, G3); 0 when not set.
+    seen_seq INTEGER NOT NULL DEFAULT 0 CHECK (seen_seq >= 0)
 ) STRICT;
 
 CREATE TRIGGER member_sets_no_update BEFORE UPDATE ON member_sets

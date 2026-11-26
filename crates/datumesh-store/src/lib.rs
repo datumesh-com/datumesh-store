@@ -202,6 +202,9 @@ pub struct MemberSet {
     /// distinct and sorted, and refuses an empty one. `from_manifest` leaves them empty; the caller
     /// sets them (the reuse check reads them from the row, no member).
     pub licences: Vec<String>,
+    /// The slice's [`Store::slice_seq`] read before its members (decided 26 Nov, G3): the reuse check
+    /// stands only while the slice's seq is still this. `from_manifest` leaves it 0; the caller sets it.
+    pub seen_seq: i64,
 }
 
 impl MemberSet {
@@ -218,6 +221,7 @@ impl MemberSet {
             tx: tx.map(str::to_string),
             asof: asof.to_string(),
             licences: Vec::new(),
+            seen_seq: 0,
         }
     }
 }
@@ -329,6 +333,10 @@ pub struct Version {
     /// `tx` and the store's recording clock, or `tx` when the store has none. Every as-of
     /// answer is by this time; a computed version's is its `tx`. Since 0.6.5.
     pub recorded: String,
+    /// The insertion sequence of the version: assigned by the store at insert (through `put_version`
+    /// and `put_cells`), only increasing, never updated; withdrawals included. A computed version's
+    /// is 0. Since 0.6.5 (G3, "inserted since"; see [`Store::slice_seq`]).
+    pub seq: i64,
 }
 
 /// One cell write of [`Store::put_cells`]: a receipt and, optionally, the version it
@@ -623,6 +631,20 @@ pub trait Store: Resolver + sealed::Sealed {
         set.licences = normal_licences(&set.licences)?;
         check_member_set(&set)?;
         self.put_member_set_checked(&set)
+    }
+
+    /// The highest insertion seq among the versions (withdrawals included) of the cells a slice
+    /// matches, whatever their recorded time; 0 when there are none. For a version slice, its cell's
+    /// versions (decided 26 Nov, G3: "inserted since", index-backed). Since 0.6.5.
+    fn slice_seq(&self, slice: &Slice) -> Result<i64> {
+        self.slice_seq_checked(slice)
+    }
+
+    /// The read of `slice_seq`, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn slice_seq_checked(&self, slice: &Slice) -> Result<i64> {
+        let _ = slice;
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no slice seq here")))
     }
 
     /// The member-set row of `entry`, or `None` (G2, since 0.6.5).
