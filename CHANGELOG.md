@@ -2,6 +2,19 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.6.5
+
+Additive, with migrations 16 and 17 (PostgreSQL) and 12 and 13 (SQLite). A store on an older schema writes as 0.6.4 did, until migrated; a store at 0.6.5 requires migration 17 / 13 before reads.
+
+- **Member sets.** `member_sets`: one row per slice read (the slice's canonical bytes, the member count, the latest member tx, the as-of, the members' distinct licences as JCS text, and `seen_seq`). `Store::put_member_set` (insert or nothing), `Store::member_set`, and `MemberSet::from_manifest`.
+- **The recorded time.** `Version::recorded`, set by the store at insert: the greater of the signed tx and the store's recording clock (`PoolOptions::recording_clock`, `SqliteOptions::recording_clock`), the signed tx with no clock. Every as-of read selects by it. `Store::recording_time(signed_tx)` gives what the next put records. The recorded time is assigned under the version lock (PostgreSQL `pg_advisory_xact_lock(7412030007)`; SQLite `BEGIN IMMEDIATE`), so it follows commit order. `Store::barrier()` waits for writers in flight.
+- **Insertion sequence.** `Version::seq`, assigned at insert, only increasing, never updated (withdrawals included). `Store::slice_seq(slice)` is the highest seq among the versions of the slice's cells, 0 when none; `Store::fn_seq(fn_hash)` the highest for a function, in one probe.
+- **Slice definitions.** `slice_definitions`, kept once per slice: `Store::put_slice_definition`, `Store::slice_definition`.
+- **Reads for the engine.** `Store::slice_member_hashes(slice, asof, limit)` and `Store::next_version_after(cell_id, recorded)`.
+- **Re-runs.** A version again at the same (cell, tx) with the same receipt is a no-op; another receipt at that (cell, tx) is refused with `NotLater`.
+- **Store-side migration rules.** On PostgreSQL, one `UPDATE` of `versions` sets `recorded` and `seq` for existing rows (in physical order); on SQLite, a raw insert with no `seq` gets one from a trigger, which updates `function_seqs`.
+- Trait additions are defaulted (the trait is sealed).
+
 ## 0.6.4
 
 Additive (CONTRACT-0.5.1 S1 to S3; migrations 15 (PostgreSQL) and 11 (SQLite)). A page of a slice in key order, and the bindings of a class by its hash.

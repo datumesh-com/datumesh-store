@@ -139,6 +139,8 @@ pub struct SqliteStore {
     writer: Mutex<()>,
     /// Opened with `open_existing`: never creates the file, never changes its journal mode.
     existing: bool,
+    /// Set once the versions table is found to have the recorded column (migration 13): cached (review item 6).
+    recorded_schema: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for SqliteStore {
@@ -196,6 +198,7 @@ impl SqliteStore {
             idle: Mutex::new(Vec::new()),
             writer: Mutex::new(()),
             existing: false,
+            recorded_schema: std::sync::atomic::AtomicBool::new(false),
         };
         let c = store.open_connection()?;
         if let Ok(mut idle) = store.idle.lock() {
@@ -221,6 +224,7 @@ impl SqliteStore {
             idle: Mutex::new(Vec::new()),
             writer: Mutex::new(()),
             existing: true,
+            recorded_schema: std::sync::atomic::AtomicBool::new(false),
         };
         let c = store.open_connection()?;
         if let Ok(mut idle) = store.idle.lock() {
@@ -922,6 +926,22 @@ impl Store for SqliteStore {
         self.options.recording_clock.clone()
     }
 
+    fn barrier_checked(&self) -> Result<()> {
+        // A write transaction in flight (in this process or another) holds the write lock; an empty one
+        // waits for it, and returns at once when there is none (review item 2).
+        self.write("barrier", |_c| Ok(()))
+    }
+
+    fn next_version_after_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
+        self.run("next_version_after", |c| {
+            c.prepare_cached(L::VersionNextAfter.sql())
+                .db()?
+                .query_row(rusqlite::params![cell_id, recorded], |r| version_row(r, cell_id))
+                .optional()
+                .db()
+        })
+    }
+
     fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
         self.run("fn_seq", |c| c.prepare_cached(L::FnSeq.sql()).db()?.query_row([fn_hash], |r| r.get(0)).db())
     }
@@ -1096,7 +1116,15 @@ impl Store for SqliteStore {
         check_hex(receipt_hash, 64, "receipt_hash")?;
         self.write("put_version", |c| {
             // A store on a schema older than migration 17 writes by tx, as 0.6.4 did (decision B).
-            let has = c.prepare_cached(L::HasRecorded.sql()).db()?.query_row([], |r| r.get::<_, i64>(0)).db()? == 1;
+            let has = if self.recorded_schema.load(std::sync::atomic::Ordering::Acquire) {
+                true
+            } else {
+                let has = c.prepare_cached(L::HasRecorded.sql()).db()?.query_row([], |r| r.get::<_, i64>(0)).db()? == 1;
+                if has {
+                    self.recorded_schema.store(true, std::sync::atomic::Ordering::Release);
+                }
+                has
+            };
             let recorded =
                 if has { crate::recorded_at(self.options.recording_clock.as_ref(), tx) } else { tx.to_string() };
             let meta: Option<(String, String)> = c
@@ -1120,6 +1148,25 @@ impl Store for SqliteStore {
             }
             if r_tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: r_tx });
+            }
+            // The cell already has a version at this tx: the same receipt writes nothing; another is refused
+            // (review item 3).
+            if let Some(held) = c
+                .prepare_cached(L::VersionAt.sql())
+                .db()?
+                .query_row(rusqlite::params![cell_id, tx], |r| r.get::<_, String>(0))
+                .optional()
+                .db()?
+            {
+                if held == receipt_hash {
+                    return Ok(());
+                }
+                return Err(Error::NotLater {
+                    what: "version",
+                    key: cell_id.to_string(),
+                    given: tx.to_string(),
+                    latest: tx.to_string(),
+                });
             }
             if let Some(l) =
                 get_strings(c, if has { L::VersionLatestTx } else { L::VersionLatestTxLegacy }, cell_id)?.pop()

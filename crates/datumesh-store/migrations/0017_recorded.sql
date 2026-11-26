@@ -6,24 +6,19 @@
 -- (max of the receipt's signed tx and the store's recording clock; the signed tx when the store has
 -- no clock). Every as-of selection uses it; the range of a version slice stays on tx. Existing rows
 -- get recorded = tx (the update passes the append-only trigger, disabled for it alone).
+-- Both columns in ONE update of versions (review item 7; the rehearsal times it, then a VACUUM): recorded
+-- = tx, and seq numbered in physical (insertion) order. The append-only trigger is disabled for that
+-- statement alone.
+CREATE SEQUENCE versions_seq AS bigint;
 ALTER TABLE versions ADD COLUMN recorded text COLLATE "C"
     CHECK (recorded ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$' AND recorded >= tx);
-ALTER TABLE versions DISABLE TRIGGER versions_append_only;
-UPDATE versions SET recorded = tx;
-ALTER TABLE versions ENABLE TRIGGER versions_append_only;
-ALTER TABLE versions ALTER COLUMN recorded SET NOT NULL;
--- The insertion sequence (decided 26 Nov, G3, "inserted since"). Every version, a raw insert too, gets
--- its seq in a BEFORE INSERT trigger, which first takes the mesh's version-sequence lock and only then
--- calls nextval: the lock is held to the end of the transaction, so seq follows commit order (a column
--- default would run before the lock, and so would not). Existing rows are numbered in physical
--- (insertion) order. Only increases; never updated.
-CREATE SEQUENCE versions_seq AS bigint;
 ALTER TABLE versions ADD COLUMN seq bigint;
 ALTER TABLE versions DISABLE TRIGGER versions_append_only;
-UPDATE versions v SET seq = x.n
+UPDATE versions v SET recorded = v.tx, seq = x.n
   FROM (SELECT ctid AS id, row_number() OVER (ORDER BY ctid) AS n FROM versions) x
  WHERE v.ctid = x.id;
 ALTER TABLE versions ENABLE TRIGGER versions_append_only;
+ALTER TABLE versions ALTER COLUMN recorded SET NOT NULL;
 SELECT setval('versions_seq', COALESCE((SELECT max(seq) FROM versions), 0) + 1, false);
 ALTER TABLE versions ALTER COLUMN seq SET NOT NULL;
 -- slice_seq: the versions of one cell, highest seq first (one probe per candidate cell).

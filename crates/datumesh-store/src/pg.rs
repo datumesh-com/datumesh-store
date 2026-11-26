@@ -39,6 +39,8 @@ pub struct PgStore {
     vectors: bool,
     /// The recording clock (G9): the version's recorded time is the greater of its tx and this.
     clock: Option<crate::RecordingClock>,
+    /// Set once the versions table is found to have the recorded column (migration 17).
+    recorded_schema: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for PgStore {
@@ -78,7 +80,8 @@ impl PgStore {
 
     /// A store on `pool`, after opening one connection.
     pub(crate) fn from_pool(pool: Pool) -> Result<PgStore> {
-        let mut store = PgStore { pool, vectors: false, clock: None };
+        let mut store =
+            PgStore { pool, vectors: false, clock: None, recorded_schema: std::sync::atomic::AtomicBool::new(false) };
         let vectors: bool = {
             let mut c = store.pool.get()?;
             c.client.query_one("SELECT to_regclass('embeddings') IS NOT NULL", &[]).db()?.try_get(0).db()?
@@ -337,7 +340,27 @@ fn namespace_row(host: &str, row: &postgres::Row, at: usize) -> Result<Namespace
     })
 }
 
+/// The version-sequence lock (a fixed key). Every writer of versions takes it at the start of its
+/// transaction and holds it to commit, before it reads the recording time and takes the seq. So the seq
+/// and the recorded time follow commit order: a writer that waited records the time it holds the lock at,
+/// and `barrier` waits for the writers in flight. The trigger of migration 17 takes the same key (its
+/// literal is 7412030007).
+const VERSION_SEQ_LOCK: i64 = 7412030007;
+
 impl PgStore {
+    /// Whether the versions table has the recorded column, cached once it is found (a store never goes
+    /// back to an older schema; review item 6).
+    fn schema_has_recorded(&self, c: &mut Conn) -> Result<bool> {
+        if self.recorded_schema.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(true);
+        }
+        let has = has_recorded(c)?;
+        if has {
+            self.recorded_schema.store(true, std::sync::atomic::Ordering::Release);
+        }
+        Ok(has)
+    }
+
     /// A failed check (`threshold` is `Some`) or a successful one (`None`) at `checked_at`.
     fn record_check(
         &self,
@@ -442,6 +465,8 @@ fn put_cells_in(
             .filter(|(cell, tx)| check_hex(cell, 64, "cell_id").is_ok() && check_instant(tx, "tx").is_ok())
     };
     let st_lock = c.stmt(Q::VersionLocksMany)?;
+    let st_vlock = c.stmt(Q::VersionSeqLock)?;
+    let st_at = c.stmt(Q::VersionAt)?;
     let st_get = c.stmt(Q::ReceiptsGetMany)?;
     let st_ns = c.stmt(Q::NamespacesGetMany)?;
     let st_latest = c.stmt(if has { Q::VersionsLatestTxMany } else { Q::VersionsLatestTxManyLegacy })?;
@@ -461,6 +486,8 @@ fn put_cells_in(
     if !locked.is_empty() {
         t.execute(&st_lock, &[&locked]).db()?;
     }
+    // The version lock, after the cell locks (the order put_version takes them in), before the reads.
+    t.execute(&st_vlock, &[&VERSION_SEQ_LOCK]).db()?;
 
     // What the store holds for the call: the receipts (by hash), the namespaces of the signer
     // hosts and the latest tx of the version cells, all read after the locks.
@@ -558,19 +585,37 @@ fn put_cells_in(
             if p.tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: p.tx.clone() });
             }
-            let recorded = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
-            if let Some(l) = latest.get(cell) {
-                if recorded.as_str() <= l.as_str() {
+            // The cell already has a version at this tx: the same receipt writes nothing; another is refused
+            // (review item 3).
+            let held: Option<String> =
+                t.query_opt(&st_at, &[&cell, &tx]).db()?.map(|r| r.try_get(0)).transpose().db()?;
+            match held {
+                Some(h) if h == p.hash => {}
+                Some(_) => {
                     return Err(Error::NotLater {
                         what: "version",
                         key: cell.to_string(),
-                        given: recorded.clone(),
-                        latest: l.clone(),
-                    });
+                        given: tx.to_string(),
+                        latest: tx.to_string(),
+                    })
+                }
+                None => {
+                    // Recorded under the lock (review item 2).
+                    let recorded = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
+                    if let Some(l) = latest.get(cell) {
+                        if recorded.as_str() <= l.as_str() {
+                            return Err(Error::NotLater {
+                                what: "version",
+                                key: cell.to_string(),
+                                given: recorded.clone(),
+                                latest: l.clone(),
+                            });
+                        }
+                    }
+                    latest.insert(cell.to_string(), recorded.clone());
+                    versions.push((cell, tx, p.hash.clone(), recorded));
                 }
             }
-            latest.insert(cell.to_string(), recorded.clone());
-            versions.push((cell, tx, p.hash.clone(), recorded));
         }
         out.push(p.hash.clone());
         if !is_stored {
@@ -741,6 +786,27 @@ impl Store for PgStore {
         self.clock.clone()
     }
 
+    fn barrier_checked(&self) -> Result<()> {
+        self.run("barrier", |c| {
+            // Shared: waits for the exclusive holders (writers in flight); released at once.
+            let s = c.stmt(Q::BarrierShared)?;
+            c.client.query_one(&s, &[&VERSION_SEQ_LOCK]).db()?;
+            let u = c.stmt(Q::BarrierUnshared)?;
+            c.client.query_one(&u, &[&VERSION_SEQ_LOCK]).db()?;
+            Ok(())
+        })
+    }
+
+    fn next_version_after_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
+        self.run("next_version_after", |c| {
+            let st = c.stmt(Q::VersionNextAfter)?;
+            match c.client.query_opt(&st, &[&cell_id, &recorded]).db()? {
+                Some(r) => Ok(Some(version_row(&r, cell_id)?)),
+                None => Ok(None),
+            }
+        })
+    }
+
     fn fn_seq_checked(&self, fn_hash: &str) -> Result<i64> {
         self.run("fn_seq", |c| {
             let st = c.stmt(Q::FnSeq)?;
@@ -878,9 +944,10 @@ impl Store for PgStore {
         check_instant(tx, "tx")?;
         check_hex(receipt_hash, 64, "receipt_hash")?;
         self.run("put_version", |c| {
-            let has = has_recorded(c)?;
-            let recorded = if has { crate::recorded_at(self.clock.as_ref(), tx) } else { tx.to_string() };
+            let has = self.schema_has_recorded(c)?;
             let lock = c.stmt(Q::Lock)?;
+            let vlock = c.stmt(Q::VersionSeqLock)?;
+            let at = c.stmt(Q::VersionAt)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let ns = c.stmt(Q::NamespaceGet)?;
@@ -888,6 +955,9 @@ impl Store for PgStore {
             let put = c.stmt(if has { Q::VersionPut } else { Q::VersionPutLegacy })?;
             let mut t = c.client.transaction().db()?;
             t.execute(&lock, &[&"versions", &cell_id]).db()?;
+            // The version lock, then the recording time, both under it (review item 2).
+            t.execute(&vlock, &[&VERSION_SEQ_LOCK]).db()?;
+            let recorded = if has { crate::recorded_at(self.clock.as_ref(), tx) } else { tx.to_string() };
             let Some(row) = t.query_opt(&meta, &[&receipt_hash]).db()? else {
                 return Err(Error::NotFound { what: "receipt", key: receipt_hash.to_string() });
             };
@@ -905,6 +975,21 @@ impl Store for PgStore {
             }
             if r_tx != tx {
                 return Err(Error::Mismatch { what: "tx", expected: tx.to_string(), found: r_tx });
+            }
+            // The cell already has a version at this tx: the same receipt is a no-op; another is refused
+            // (review item 3).
+            if let Some(row) = t.query_opt(&at, &[&cell_id, &tx]).db()? {
+                let held: String = row.try_get(0).db()?;
+                if held == receipt_hash {
+                    t.commit().db()?;
+                    return Ok(());
+                }
+                return Err(Error::NotLater {
+                    what: "version",
+                    key: cell_id.to_string(),
+                    given: tx.to_string(),
+                    latest: tx.to_string(),
+                });
             }
             if let Some(row) = t.query_opt(&latest, &[&cell_id]).db()? {
                 let l: String = row.try_get(0).db()?;
@@ -999,7 +1084,7 @@ impl Store for PgStore {
         let prepared = parallel(items, |w| parse_receipt(w.receipt));
         let clock = self.clock.as_ref();
         let hashes = self.run("put_cells", |c| {
-            let has = has_recorded(c)?;
+            let has = self.schema_has_recorded(c)?;
             put_cells_in(c, items, prepared, clock, has)
         })?;
         tracing::debug!(target: "datumesh_store", items = items.len(), "put_cells");

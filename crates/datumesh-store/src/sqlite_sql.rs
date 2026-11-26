@@ -362,6 +362,14 @@ statements! {
     SliceSeqDrive = slice_seq!(from_drive!(), where_drive!());
     // A version slice's cell: the highest seq of its versions, 0 when none.
     VersionSeqMax = "SELECT coalesce(max(seq), 0) FROM versions WHERE cell_id = ?1";
+    // The receipt a cell's version at a signed tx holds (review item 3).
+    VersionAt = "SELECT receipt_hash FROM versions WHERE cell_id = ?1 AND tx = ?2";
+    // The first version of a cell recorded after an instant (review: the memo bound reads one row).
+    VersionNextAfter = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash),
+                               (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash),
+                               coalesce(v.recorded, v.tx), v.seq
+                        FROM versions v WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) > ?2
+                        ORDER BY coalesce(v.recorded, v.tx) LIMIT 1";
     // fn_seq (G3, 0.6.5): one probe of the function's row (primary key), 0 when none.
     FnSeq = "SELECT coalesce((SELECT seq FROM function_seqs WHERE fn_hash = ?1), 0)";
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) SELECT ?1, ?2, ?3

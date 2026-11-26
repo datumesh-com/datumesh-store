@@ -627,6 +627,17 @@ statements! {
     VersionSeqMax = "SELECT COALESCE(max(seq), 0) FROM versions WHERE cell_id = $1" => [TEXT];
     // fn_seq (G3, 0.6.5): one probe of the function's row (primary key), 0 when none.
     FnSeq = "SELECT COALESCE((SELECT seq FROM function_seqs WHERE fn_hash = $1), 0)" => [TEXT];
+    // The version-sequence lock (review item 2): taken by a writer at the start of its transaction, held to
+    // commit; the barrier takes it shared and releases it at once.
+    VersionSeqLock = "SELECT pg_advisory_xact_lock($1)" => [INT8];
+    BarrierShared = "SELECT pg_advisory_lock_shared($1)" => [INT8];
+    BarrierUnshared = "SELECT pg_advisory_unlock_shared($1)" => [INT8];
+    // The receipt a cell's version at a signed tx holds (review item 3: the same one again is a no-op).
+    VersionAt = "SELECT receipt_hash FROM versions WHERE cell_id = $1 AND tx = $2" => [TEXT, TEXT];
+    // The first version of a cell recorded after an instant (review: the memo bound reads one row).
+    VersionNextAfter = "SELECT v.tx, v.receipt_hash, (SELECT r.asof FROM receipts r WHERE r.hash = v.receipt_hash),
+                               (SELECT r.value_type = '' FROM receipts r WHERE r.hash = v.receipt_hash), v.recorded, v.seq
+                        FROM versions v WHERE v.cell_id = $1 AND v.recorded > $2 ORDER BY v.recorded LIMIT 1" => [TEXT, TEXT];
     ChangedCandAll = changed_cand!(no_with!(), from_all!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandText = changed_cand!(drive_text!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];
     ChangedCandNum = changed_cand!(drive_num!(), from_drive!()) => [TEXT, TEXT, TEXT, INT4, TEXT, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT_ARRAY, TEXT, TEXT, TEXT, TEXT];

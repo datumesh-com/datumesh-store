@@ -25,7 +25,11 @@ CREATE INDEX versions_recorded ON versions (cell_id, coalesce(recorded, tx));
 ALTER TABLE versions ADD COLUMN seq INTEGER;
 DROP TRIGGER versions_no_update;
 UPDATE versions SET seq = rowid;
+-- Append-only still, with one exception (review item 7): the seq of a row that has none may be set, and
+-- nothing else changes (the trigger below sets it for a raw insert).
 CREATE TRIGGER versions_no_update BEFORE UPDATE ON versions
+    WHEN NOT (OLD.seq IS NULL AND NEW.seq IS NOT NULL AND NEW.cell_id IS OLD.cell_id AND NEW.tx IS OLD.tx
+              AND NEW.receipt_hash IS OLD.receipt_hash AND NEW.recorded IS OLD.recorded)
     BEGIN SELECT RAISE(ABORT, 'datumesh: UPDATE on versions refused: the table is append-only'); END;
 CREATE INDEX versions_cell_seq ON versions (cell_id, seq);
 CREATE INDEX versions_seq ON versions (seq);
@@ -62,3 +66,14 @@ CREATE TRIGGER slice_definitions_no_delete BEFORE DELETE ON slice_definitions
 CREATE TRIGGER slice_definitions_no_replace BEFORE INSERT ON slice_definitions
     WHEN EXISTS (SELECT 1 FROM slice_definitions k WHERE k.slice_id = NEW.slice_id)
     BEGIN SELECT RAISE(ABORT, 'datumesh: INSERT on slice_definitions refused: the key exists and the table is append-only'); END;
+
+-- A raw insert that names no seq (review item 7): it gets the next one, and function_seqs follows, as a
+-- store insert's does. The store always names one (through versions_function_seq above).
+CREATE TRIGGER versions_raw_seq AFTER INSERT ON versions
+    WHEN NEW.seq IS NULL
+    BEGIN
+        UPDATE versions SET seq = (SELECT coalesce(max(seq), 0) + 1 FROM versions) WHERE rowid = NEW.rowid;
+        INSERT INTO function_seqs (fn_hash, seq)
+            SELECT c.fn_hash, (SELECT seq FROM versions WHERE rowid = NEW.rowid) FROM cells c WHERE c.cell_id = NEW.cell_id
+        ON CONFLICT (fn_hash) DO UPDATE SET seq = max(function_seqs.seq, excluded.seq);
+    END;

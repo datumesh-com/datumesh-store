@@ -653,6 +653,46 @@ pub trait Store: Resolver + sealed::Sealed {
         None
     }
 
+    /// Waits for the writers of versions in flight, and returns at once when there is none (review item
+    /// 2): once it has passed, any writer still to come records a time later than it. The engine calls it
+    /// once per request, before its first store read. Since 0.6.5.
+    fn barrier(&self) -> Result<()> {
+        self.barrier_checked()
+    }
+
+    /// The read of `barrier`, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn barrier_checked(&self) -> Result<()> {
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no barrier here")))
+    }
+
+    /// The receipt hashes of the members of a slice as of `asof`, ordered by their recorded time, at most
+    /// `limit` (the engine's member list, without the slice's values). Since 0.6.5.
+    fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
+        let mut members = self.slice_members(slice, asof)?;
+        members.sort_by(|a, b| {
+            (a.version.recorded.as_str(), a.version.receipt_hash.as_str())
+                .cmp(&(b.version.recorded.as_str(), b.version.receipt_hash.as_str()))
+        });
+        members.truncate(limit);
+        Ok(members.into_iter().map(|m| m.version.receipt_hash).collect())
+    }
+
+    /// The first version of `cell_id` recorded after `recorded` (one row, the memo bound), or `None`.
+    /// Since 0.6.5.
+    fn next_version_after(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
+        check_hex(cell_id, 64, "cell_id")?;
+        check_instant(recorded, "recorded")?;
+        self.next_version_after_checked(cell_id, recorded)
+    }
+
+    /// The read of `next_version_after`, not part of the API: the store's own implementations override it.
+    #[doc(hidden)]
+    fn next_version_after_checked(&self, cell_id: &str, recorded: &str) -> Result<Option<Version>> {
+        let _ = (cell_id, recorded);
+        Err(Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "no versions here")))
+    }
+
     /// The highest insertion seq among the versions (withdrawals included) of the functions `fn_hash`,
     /// 0 when there are none: an upper bound of `slice_seq` for every slice of that function, in one
     /// probe of the function's row (decided 26 Nov, G3: a slice whose `fn_seq` is at or below its row's
