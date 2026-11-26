@@ -11,6 +11,9 @@
 //!     // (its function, ns, fixed and ranged arguments, as slice_values matches them; for a version
 //!     // slice, its cell's versions), whatever their recorded time; 0 when none
 //! pub struct MemberSet { ..., pub seen_seq: i64 } // the slice's seq read before its members
+//! fn fn_seq(&self, fn_hash: &str) -> Result<i64>;
+//!     // the highest seq of any version of the function's cells, 0 when none; >= slice_seq of every
+//!     // slice of the function (decided 26 Nov: the engine's quick check before slice_seq)
 //! ```
 //!
 //! Migration 17 / 13 numbers the existing rows in insertion order (here: the order of the rows'
@@ -193,6 +196,48 @@ fn migration_17_numbers_existing_rows_in_insertion_order(b: Backend) {
     assert_eq!(s.slice_seq(&tenor1(&h)).unwrap(), seq_of(&s, &cell(&h, 9, 1)));
 }
 
+fn fn_seq_rises_on_any_version_of_the_function_and_bounds_its_slices(b: Backend) {
+    // Store::fn_seq(fn_hash): the highest seq of any version of the function, 0 with none; the
+    // engine's quick check before slice_seq.
+    let db = TestDb::migrated(b);
+    let s = slice_store(&db);
+    let h = function(&s, "f");
+    let g = function(&s, "g");
+    assert_eq!(s.fn_seq(&h).unwrap(), 0, "no version: 0");
+    let gcell =
+        |k: u32| slice_cell("f", &g, &[("k", sc(Type::Number, &k.to_string())), ("tenor", sc(Type::Number, "1"))]);
+    let check = |what: &str| {
+        let f = s.fn_seq(&h).unwrap();
+        for sl in [tenor1(&h), tenor2(&h)] {
+            assert!(f >= s.slice_seq(&sl).unwrap(), "{what}: fn_seq bounds every slice of the function");
+        }
+        f
+    };
+    put_member(&s, &cell(&h, 1, 1), "1", T2, T2);
+    let a = check("a member at tenor 1");
+    assert_eq!(a, seq_of(&s, &cell(&h, 1, 1)));
+    // Another tenor (outside tenor1's slice): fn_seq rises, tenor1's slice_seq does not.
+    put_member(&s, &cell(&h, 1, 2), "2", T2, T2);
+    let b2 = check("a member at tenor 2");
+    assert!(b2 > a);
+    assert_eq!(s.slice_seq(&tenor1(&h)).unwrap(), a);
+    // Another function: fn_seq does not move.
+    put_member(&s, &gcell(1), "3", T3, T3);
+    assert_eq!(s.fn_seq(&h).unwrap(), b2, "a version of another function");
+    assert_eq!(s.fn_seq(&g).unwrap(), seq_of(&s, &gcell(1)));
+    // A correction signed earlier than everything (no recording clock): it rises.
+    put_member(&s, &cell(&h, 1, 1), "1.5", T3, T3);
+    assert!(check("a correction") > b2);
+    assert!(matches!(s.fn_seq("not-a-hash"), Err(datumesh_store::Error::Invalid(_))));
+}
+
+/// f(k: *, tenor: 2).
+fn tenor2(h: &str) -> datumesh_core::Slice {
+    slice(&format!(
+        r#"{{"args":{{"k":"*","tenor":{{"type":"number","value":"2"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+    ))
+}
+
 fn migrate_to(db: &TestDb, b: Backend, up_to: usize) {
     let old: Vec<&migrate::Migration> = match b {
         Backend::Pg => migrate::MIGRATIONS[..up_to].iter().collect(),
@@ -228,4 +273,5 @@ backends!(
     slice_seq_rises_on_a_withdrawal,
     the_member_set_row_keeps_seen_seq,
     migration_17_numbers_existing_rows_in_insertion_order,
+    fn_seq_rises_on_any_version_of_the_function_and_bounds_its_slices,
 );
