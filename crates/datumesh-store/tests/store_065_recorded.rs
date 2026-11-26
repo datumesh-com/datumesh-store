@@ -256,10 +256,11 @@ fn a_slice_definition_is_kept_once_per_slice(b: Backend) {
     ))[0];
     assert_eq!((row[0].as_str(), row[1].as_str()), (sl.id(), h.as_str()));
     assert_eq!(row[2].as_bytes(), sl.canonical().as_slice(), "the canonical bytes");
-    // Another slice of the same function: a row of its own.
+    // Another slice of the same function (a range of k, not every k): a row of its own.
     let other = slice(&format!(
-        r#"{{"args":{{"k":{{"type":"number","value":"1"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
+        r#"{{"args":{{"k":{{"hi":"5","lo":"1","type":"number"}}}},"fn":"f","fn_hash":"{h}","ns":"{SLICE_HOST}"}}"#
     ));
+    assert_ne!(other.id(), sl.id());
     assert!(s.put_slice_definition(&other).unwrap());
     assert_eq!(db.count("slice_definitions"), 2);
     // Append-only.
