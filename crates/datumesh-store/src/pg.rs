@@ -674,6 +674,7 @@ fn own_method_bindings(
 
 impl Store for PgStore {
     fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
+        let licences = crate::licences_text(&set.licences);
         let members = i32::try_from(set.members).map_err(|_| {
             Error::Invalid(datumesh_core::Error::new(
                 datumesh_core::ErrorCode::Schema,
@@ -696,6 +697,7 @@ impl Store for PgStore {
                         &members,
                         &set.tx,
                         &set.asof,
+                        &licences,
                     ],
                 )
                 .db()?;
@@ -717,6 +719,7 @@ impl Store for PgStore {
                 members: u64::try_from(members).unwrap_or(0),
                 tx: row.try_get(5).db()?,
                 asof: row.try_get(6).db()?,
+                licences: crate::licences_of(&row.try_get::<_, String>(7).db()?)?,
             }))
         })
     }

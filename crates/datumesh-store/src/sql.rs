@@ -363,10 +363,10 @@ statements! {
         => [TEXT];
 
     // The member-set rows (0.6.5, G2): inserted or nothing; read by entry.
-    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (entry) DO NOTHING"
-        => [TEXT, TEXT, TEXT, TEXT, BYTEA, INT4, TEXT, TEXT];
-    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof FROM member_sets WHERE entry = $1"
+    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (entry) DO NOTHING"
+        => [TEXT, TEXT, TEXT, TEXT, BYTEA, INT4, TEXT, TEXT, TEXT];
+    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences FROM member_sets WHERE entry = $1"
         => [TEXT];
     // The slice definitions (0.6.5, G10): inserted or nothing, once per slice id.
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) VALUES ($1, $2, $3)

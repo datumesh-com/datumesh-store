@@ -844,6 +844,7 @@ impl SqliteStore {
 impl Store for SqliteStore {
     fn put_member_set_checked(&self, set: &MemberSet) -> Result<bool> {
         let members = i64::try_from(set.members).unwrap_or(i64::MAX);
+        let licences = crate::licences_text(&set.licences);
         self.write("put_member_set", |c| {
             let n = c
                 .prepare_cached(L::MemberSetPut.sql())
@@ -856,7 +857,8 @@ impl Store for SqliteStore {
                     set.slice,
                     members,
                     set.tx,
-                    set.asof
+                    set.asof,
+                    licences
                 ])
                 .db()?;
             Ok(n == 1)
@@ -877,11 +879,15 @@ impl Store for SqliteStore {
                         r.get::<_, i64>(4)?,
                         r.get::<_, Option<String>>(5)?,
                         r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
                     ))
                 })
                 .optional()
                 .db()?;
-            Ok(row.map(|(slice_id, members_hash, fn_hash, slice, members, tx, asof)| MemberSet {
+            let Some((slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)) = row else {
+                return Ok(None);
+            };
+            Ok(Some(MemberSet {
                 entry: entry.to_string(),
                 slice_id,
                 members_hash,
@@ -890,6 +896,7 @@ impl Store for SqliteStore {
                 members: u64::try_from(members).unwrap_or(0),
                 tx,
                 asof,
+                licences: crate::licences_of(&licences)?,
             }))
         })
     }

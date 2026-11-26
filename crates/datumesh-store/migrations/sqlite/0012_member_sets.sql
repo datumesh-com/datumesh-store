@@ -10,7 +10,9 @@ CREATE TABLE member_sets (
     slice BLOB NOT NULL,
     members INTEGER NOT NULL CHECK (members BETWEEN 0 AND 1048576),
     tx TEXT CHECK (tx IS NULL OR tx GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
-    asof TEXT NOT NULL CHECK (asof GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z')
+    asof TEXT NOT NULL CHECK (asof GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]Z'),
+    -- The members' distinct licence URLs, sorted, as JCS text (decided 26 Nov, G3).
+    licences TEXT NOT NULL CHECK (substr(licences, 1, 1) = '[')
 ) STRICT;
 
 CREATE TRIGGER member_sets_no_update BEFORE UPDATE ON member_sets

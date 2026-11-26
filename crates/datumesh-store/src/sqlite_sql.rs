@@ -337,9 +337,9 @@ statements! {
     VersionPut = "INSERT INTO versions (cell_id, tx, receipt_hash, recorded) VALUES (?1, ?2, ?3, ?4)";
     // The member-set rows (0.6.5, G2) and the slice definitions (G10): inserted or nothing (the
     // insert selects no row when the key is held, so the append-only trigger never fires).
-    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof)
-                    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE NOT EXISTS (SELECT 1 FROM member_sets WHERE entry = ?1)";
-    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof FROM member_sets WHERE entry = ?1";
+    MemberSetPut = "INSERT INTO member_sets (entry, slice_id, members_hash, fn_hash, slice, members, tx, asof, licences)
+                    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE NOT EXISTS (SELECT 1 FROM member_sets WHERE entry = ?1)";
+    MemberSetGet = "SELECT slice_id, members_hash, fn_hash, slice, members, tx, asof, licences FROM member_sets WHERE entry = ?1";
     SliceDefinitionPut = "INSERT INTO slice_definitions (slice_id, fn_hash, slice) SELECT ?1, ?2, ?3
                           WHERE NOT EXISTS (SELECT 1 FROM slice_definitions WHERE slice_id = ?1)";
     SliceDefinitionGet = "SELECT slice FROM slice_definitions WHERE slice_id = ?1";

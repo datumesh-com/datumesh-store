@@ -198,6 +198,10 @@ pub struct MemberSet {
     pub tx: Option<String>,
     /// The read's as-of.
     pub asof: String,
+    /// The members' distinct licence URLs, sorted (decided 26 Nov, G3): the store keeps them
+    /// distinct and sorted, and refuses an empty one. `from_manifest` leaves them empty; the caller
+    /// sets them (the reuse check reads them from the row, no member).
+    pub licences: Vec<String>,
 }
 
 impl MemberSet {
@@ -213,6 +217,7 @@ impl MemberSet {
             members: manifest.members().len() as u64,
             tx: tx.map(str::to_string),
             asof: asof.to_string(),
+            licences: Vec::new(),
         }
     }
 }
@@ -229,6 +234,40 @@ pub(crate) fn check_member_entry(entry: &str) -> Result<(&str, &str)> {
 
 /// Checks a member-set row as the store accepts it (G2): its entry, the ids and function hash,
 /// the slice bytes (a canonical slice object of the slice id and function hash) and the instants.
+/// The licences of a member set as the store keeps them: distinct and sorted; an empty one refused.
+pub(crate) fn normal_licences(list: &[String]) -> Result<Vec<String>> {
+    if list.iter().any(|l| l.is_empty()) {
+        return Err(Error::Invalid(datumesh_core::Error::new(
+            datumesh_core::ErrorCode::Schema,
+            "$",
+            "an empty licence",
+        )));
+    }
+    let mut out = list.to_vec();
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// The JCS text of a (normalised) licence list, as `member_sets.licences` holds it.
+pub(crate) fn licences_text(list: &[String]) -> String {
+    let arr =
+        datumesh_core::json::Value::Array(list.iter().map(|s| datumesh_core::json::Value::String(s.clone())).collect());
+    String::from_utf8(arr.to_jcs()).unwrap_or_default()
+}
+
+/// The licence list of `member_sets.licences`' JCS text.
+pub(crate) fn licences_of(text: &str) -> Result<Vec<String>> {
+    let bad =
+        || Error::Invalid(datumesh_core::Error::new(datumesh_core::ErrorCode::Schema, "$", "a stored licence list"));
+    match datumesh_core::json::parse(text.as_bytes()).map_err(Error::Invalid)? {
+        datumesh_core::json::Value::Array(items) => {
+            items.iter().map(|i| i.as_str().map(str::to_string).ok_or_else(bad)).collect()
+        }
+        _ => Err(bad()),
+    }
+}
+
 pub(crate) fn check_member_set(set: &MemberSet) -> Result<()> {
     let (id, members_hash) = check_member_entry(&set.entry)?;
     if set.members_hash != members_hash {
@@ -580,8 +619,10 @@ pub trait Store: Resolver + sealed::Sealed {
     /// (`Ok(true)`), otherwise nothing (`Ok(false)`, the held row kept). A row that is not
     /// consistent (its entry, slice bytes, function hash or instants) is [`Error::Invalid`].
     fn put_member_set(&self, set: &MemberSet) -> Result<bool> {
-        check_member_set(set)?;
-        self.put_member_set_checked(set)
+        let mut set = set.clone();
+        set.licences = normal_licences(&set.licences)?;
+        check_member_set(&set)?;
+        self.put_member_set_checked(&set)
     }
 
     /// The member-set row of `entry`, or `None` (G2, since 0.6.5).

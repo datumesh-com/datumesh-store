@@ -16,7 +16,9 @@ CREATE TABLE member_sets (
     slice bytea NOT NULL,
     members integer NOT NULL CHECK (members BETWEEN 0 AND 1048576),
     tx text COLLATE "C" CHECK (tx IS NULL OR tx ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$'),
-    asof text COLLATE "C" NOT NULL CHECK (asof ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$')
+    asof text COLLATE "C" NOT NULL CHECK (asof ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$'),
+    -- The members' distinct licence URLs, sorted, as JCS text (decided 26 Nov, G3).
+    licences text COLLATE "C" NOT NULL CHECK (licences ~ '^\[.*\]$')
 );
 
 CREATE TRIGGER member_sets_insert_only BEFORE UPDATE OR DELETE ON member_sets
