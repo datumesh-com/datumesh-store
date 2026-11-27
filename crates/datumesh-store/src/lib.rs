@@ -128,15 +128,6 @@ mod tls;
 /// Since 0.6.5.
 pub type RecordingClock = std::sync::Arc<dyn Fn() -> String + Send + Sync>;
 
-/// Whether two recording clocks are the same clock (the same `Arc`), for the options' equality.
-pub(crate) fn same_clock(a: &Option<RecordingClock>, b: &Option<RecordingClock>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(x), Some(y)) => std::sync::Arc::ptr_eq(x, y),
-        _ => false,
-    }
-}
-
 /// The instant one microsecond after `s` (a `YYYY-MM-DDTHH:MM:SS.ffffffZ` instant, carried through the
 /// calendar; `s` unchanged when it is not one). The store's per-cell rule of recorded times (decided 27
 /// Nov, B5) uses it: a version is recorded after the cell's latest.

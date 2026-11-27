@@ -32,27 +32,15 @@ use datumesh_core::{
 /// How a [`SqliteStore`] opens and uses its connections.
 ///
 /// Builder style: `SqliteOptions::new().busy_timeout(Duration::from_secs(5))`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SqliteOptions {
     max_size: usize,
     busy_timeout: Duration,
     durable: bool,
-    pub(crate) recording_clock: Option<crate::RecordingClock>,
+    pub(crate) recording_clock: Option<crate::pool::ClockRef>,
     /// How long the barrier waits for a write transaction in flight (decided 27 Nov, B2/B3).
     pub(crate) barrier_timeout: Duration,
 }
-
-impl PartialEq for SqliteOptions {
-    fn eq(&self, other: &SqliteOptions) -> bool {
-        self.max_size == other.max_size
-            && self.busy_timeout == other.busy_timeout
-            && self.barrier_timeout == other.barrier_timeout
-            && self.durable == other.durable
-            && crate::same_clock(&self.recording_clock, &other.recording_clock)
-    }
-}
-
-impl Eq for SqliteOptions {}
 
 impl std::fmt::Debug for SqliteOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,11 +81,11 @@ impl SqliteOptions {
         self
     }
 
-    /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,
+    /// The clock the store records its versions at (G9, [`RecordingClock`](crate::RecordingClock)): read at each insert,
     /// `recorded = max(signed tx, clock())`. Without one a version is recorded at its signed tx.
     /// Since 0.6.5.
     pub fn recording_clock(mut self, clock: crate::RecordingClock) -> SqliteOptions {
-        self.recording_clock = Some(clock);
+        self.recording_clock = Some(crate::pool::ClockRef(clock));
         self
     }
 
@@ -1003,7 +991,7 @@ impl Store for SqliteStore {
     }
 
     fn recording_clock_of(&self) -> Option<crate::RecordingClock> {
-        self.options.recording_clock.clone()
+        self.options.recording_clock.clone().map(|c| c.0)
     }
 
     fn slice_member_hashes(&self, slice: &Slice, asof: &str, limit: usize) -> Result<Vec<String>> {
@@ -1245,7 +1233,7 @@ impl Store for SqliteStore {
             let latest_now =
                 get_strings(c, if has { L::VersionLatestTx } else { L::VersionLatestTxLegacy }, cell_id)?.pop();
             let recorded = if has {
-                let base = crate::recorded_at(self.options.recording_clock.as_ref(), tx);
+                let base = crate::recorded_at(self.options.recording_clock.as_ref().map(|c| &c.0), tx);
                 match &latest_now {
                     Some(l) => crate::later_of(&base, &crate::instant_after(l)),
                     None => base,

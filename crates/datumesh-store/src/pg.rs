@@ -74,7 +74,7 @@ impl PgStore {
     pub fn connect_with(url: &str, options: PoolOptions) -> Result<PgStore> {
         let config = url.parse::<postgres::Config>().db()?;
         let connector = Connector::new(config, &options)?;
-        let clock = options.recording_clock.clone();
+        let clock = options.recording_clock.clone().map(|c| c.0);
         let barrier_timeout = options.barrier_timeout;
         let mut store = PgStore::from_pool(Pool::new(Box::new(move || connector.connect()), options))?;
         store.clock = clock;

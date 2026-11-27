@@ -18,32 +18,31 @@ use crate::sql::Q;
 /// Opens a new connection.
 pub(crate) type Connector = Box<dyn Fn() -> core::result::Result<Client, postgres::Error> + Send + Sync>;
 
+/// A recording clock, compared by identity (the options derive their equality; a clock has none of its own).
+#[derive(Clone)]
+pub(crate) struct ClockRef(pub(crate) crate::RecordingClock);
+
+impl PartialEq for ClockRef {
+    fn eq(&self, other: &ClockRef) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ClockRef {}
+
 /// How the pool behaves, and the roots TLS connections are verified against.
 ///
 /// Builder style: `PoolOptions::new().max_size(4).tls_root_certificates_pem(&pem)?`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PoolOptions {
     max_size: usize,
     checkout_timeout: Duration,
     pub(crate) webpki_roots: bool,
     pub(crate) tls_roots: Vec<CertificateDer<'static>>,
-    pub(crate) recording_clock: Option<crate::RecordingClock>,
+    pub(crate) recording_clock: Option<ClockRef>,
     /// How long the barrier waits for a version writer in flight (decided 27 Nov, B2/B3).
     pub(crate) barrier_timeout: Duration,
 }
-
-impl PartialEq for PoolOptions {
-    fn eq(&self, other: &PoolOptions) -> bool {
-        self.max_size == other.max_size
-            && self.barrier_timeout == other.barrier_timeout
-            && self.checkout_timeout == other.checkout_timeout
-            && self.webpki_roots == other.webpki_roots
-            && self.tls_roots == other.tls_roots
-            && crate::same_clock(&self.recording_clock, &other.recording_clock)
-    }
-}
-
-impl Eq for PoolOptions {}
 
 impl std::fmt::Debug for PoolOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,11 +85,11 @@ impl PoolOptions {
         self
     }
 
-    /// The clock the store records its versions at (G9, [`RecordingClock`]): read at each insert,
+    /// The clock the store records its versions at (G9, [`RecordingClock`](crate::RecordingClock)): read at each insert,
     /// `recorded = max(signed tx, clock())`. Without one a version is recorded at its signed tx.
     /// Since 0.6.5.
     pub fn recording_clock(mut self, clock: crate::RecordingClock) -> PoolOptions {
-        self.recording_clock = Some(clock);
+        self.recording_clock = Some(ClockRef(clock));
         self
     }
 
