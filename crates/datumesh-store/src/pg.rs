@@ -476,6 +476,7 @@ fn put_cells_in(
     let st_lock = c.stmt(Q::VersionLocksMany)?;
     let st_vlock = c.stmt(Q::VersionSeqLock)?;
     let st_many = c.stmt(Q::VersionsAtMany)?;
+    let st_signed_many = c.stmt(Q::VersionsLatestSignedMany)?;
     let st_get = c.stmt(Q::ReceiptsGetMany)?;
     let st_ns = c.stmt(Q::NamespacesGetMany)?;
     let st_latest = c.stmt(if has { Q::VersionsLatestTxMany } else { Q::VersionsLatestTxManyLegacy })?;
@@ -539,12 +540,18 @@ fn put_cells_in(
     // versions decided so far.
     let mut existing: HashMap<(String, String), String> = HashMap::new();
     let mut pending: HashMap<(String, String), String> = HashMap::new();
+    // The cells' latest signed tx, kept up to date as the batch's versions are decided (decided by the user,
+    // 27 Nov): a version not later than its cell's latest signed tx is refused.
+    let mut signed_latest: HashMap<String, String> = HashMap::new();
     if !locked.is_empty() {
         let pairs: Vec<(&str, &str)> = version_cells().collect();
         let cs: Vec<&str> = pairs.iter().map(|p| p.0).collect();
         let txs: Vec<&str> = pairs.iter().map(|p| p.1).collect();
         for row in t.query(&st_many, &[&cs, &txs]).db()? {
             existing.insert((row.try_get(0).db()?, row.try_get(1).db()?), row.try_get(2).db()?);
+        }
+        for row in t.query(&st_signed_many, &[&cells]).db()? {
+            signed_latest.insert(row.try_get(0).db()?, row.try_get(1).db()?);
         }
     }
 
@@ -623,6 +630,18 @@ fn put_cells_in(
                     })
                 }
                 None => {
+                    // The cell's latest signed tx: a version not later is refused (decided by the user, 27 Nov).
+                    if let Some(l) = signed_latest.get(cell) {
+                        if tx <= l.as_str() {
+                            return Err(Error::NotLater {
+                                what: "version",
+                                key: cell.to_string(),
+                                given: tx.to_string(),
+                                latest: l.clone(),
+                            });
+                        }
+                    }
+                    signed_latest.insert(cell.to_string(), tx.to_string());
                     // Recorded under the lock (review item 2), and after the cell's latest (decided 27 Nov, B5).
                     let base = if has { crate::recorded_at(clock, tx) } else { tx.to_string() };
                     let recorded = match latest.get(cell) {
@@ -1033,6 +1052,7 @@ impl Store for PgStore {
             let lock = c.stmt(Q::Lock)?;
             let vlock = c.stmt(Q::VersionSeqLock)?;
             let at = c.stmt(Q::VersionAt)?;
+            let signed = c.stmt(Q::VersionLatestSigned)?;
             let meta = c.stmt(Q::ReceiptMeta)?;
             let get = c.stmt(Q::ReceiptGet)?;
             let ns = c.stmt(Q::NamespaceGet)?;
@@ -1086,6 +1106,19 @@ impl Store for PgStore {
                     given: tx.to_string(),
                     latest: tx.to_string(),
                 });
+            }
+            // The cell's latest signed tx: a version not later is refused (decided by the user, 27 Nov).
+            let signed_now: Option<String> =
+                t.query_opt(&signed, &[&cell_id]).db()?.map(|r| r.try_get(0)).transpose().db()?;
+            if let Some(l) = &signed_now {
+                if tx <= l.as_str() {
+                    return Err(Error::NotLater {
+                        what: "version",
+                        key: cell_id.to_string(),
+                        given: tx.to_string(),
+                        latest: l.clone(),
+                    });
+                }
             }
             if let Some(l) = &latest_now {
                 if recorded.as_str() <= l.as_str() {

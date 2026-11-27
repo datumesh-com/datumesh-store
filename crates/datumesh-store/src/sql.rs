@@ -668,6 +668,11 @@ statements! {
     LaterBound = "SELECT min(CASE WHEN r.asof > v.recorded THEN r.asof ELSE v.recorded END)
                   FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                   WHERE v.cell_id = $1 AND v.recorded > $2" => [TEXT, TEXT];
+    // The cell's latest signed tx (decided by the user, 27 Nov: a version not later is refused), and the
+    // same for a batch's cells in one statement.
+    VersionLatestSigned = "SELECT tx FROM versions WHERE cell_id = $1 ORDER BY tx DESC LIMIT 1" => [TEXT];
+    VersionsLatestSignedMany = "SELECT cell_id, max(tx) FROM versions WHERE cell_id = ANY($1::text[]) GROUP BY cell_id"
+        => [TEXT_ARRAY];
     // The existing versions of a batch's (cell_id, tx) pairs, in one statement (B4): the primary key.
     VersionsAtMany = "SELECT k.cell_id, v.tx, v.receipt_hash FROM unnest($1::text[], $2::text[]) AS k(cell_id, tx)
                       JOIN versions v ON v.cell_id = k.cell_id AND v.tx = k.tx" => [TEXT_ARRAY, TEXT_ARRAY];

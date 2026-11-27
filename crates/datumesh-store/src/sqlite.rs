@@ -1294,6 +1294,17 @@ impl Store for SqliteStore {
                     latest: tx.to_string(),
                 });
             }
+            // The cell's latest signed tx: a version not later is refused (decided by the user, 27 Nov).
+            if let Some(l) = get_strings(c, L::VersionLatestSigned, cell_id)?.pop() {
+                if tx <= l.as_str() {
+                    return Err(Error::NotLater {
+                        what: "version",
+                        key: cell_id.to_string(),
+                        given: tx.to_string(),
+                        latest: l,
+                    });
+                }
+            }
             if let Some(l) = &latest_now {
                 if recorded.as_str() <= l.as_str() {
                     return Err(Error::NotLater {

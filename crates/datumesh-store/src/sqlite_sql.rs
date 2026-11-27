@@ -373,6 +373,8 @@ statements! {
     LaterBound = "SELECT min(CASE WHEN r.asof > coalesce(v.recorded, v.tx) THEN r.asof ELSE coalesce(v.recorded, v.tx) END)
                   FROM versions v JOIN receipts r ON r.hash = v.receipt_hash
                   WHERE v.cell_id = ?1 AND coalesce(v.recorded, v.tx) > ?2";
+    // The cell's latest signed tx (decided by the user, 27 Nov: a version not later is refused).
+    VersionLatestSigned = "SELECT tx FROM versions WHERE cell_id = ?1 ORDER BY tx DESC LIMIT 1";
     // The receipt a cell's version at a signed tx holds (review item 3).
     VersionAt = "SELECT receipt_hash FROM versions WHERE cell_id = ?1 AND tx = ?2";
     // The first version of a cell recorded after an instant (review: the memo bound reads one row).
