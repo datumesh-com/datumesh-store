@@ -384,7 +384,9 @@ fn listings_of_a_host_are_by_name_and_counted(b: Backend) {
     assert_eq!(s.listing_count().unwrap(), 4);
 }
 
-fn a_deleted_listing_takes_its_entry_and_keeps_its_descriptor(b: Backend) {
+/// A deleted listing takes its catalogue entry, and (store 0.7.1, the review's B4 as decided 27 Nov) its descriptor when
+/// nothing else references it (`store_071_listings.rs` has the referenced cases).
+fn a_deleted_listing_takes_its_entry_and_its_unreferenced_descriptor(b: Backend) {
     let db = TestDb::migrated(b);
     let s = db.bare_store();
     let l = listing(&bank_rate(), "a", T1);
@@ -394,7 +396,7 @@ fn a_deleted_listing_takes_its_entry_and_keeps_its_descriptor(b: Backend) {
     assert_eq!(s.listing(&bank_rate()).unwrap(), None);
     assert_eq!(s.catalog_entry_ext(CatalogKind::Function, &bank_rate()).unwrap(), None);
     assert_eq!(s.listing_count().unwrap(), 0);
-    assert!(s.descriptor(&l.fn_hash).is_some(), "descriptors are content-addressed and stay");
+    assert!(s.descriptor(&l.fn_hash).is_none(), "an unreferenced descriptor goes with its listing (0.7.1)");
     // listed again later: a new row
     assert_eq!(s.put_listing(&listing(&bank_rate(), "a", T3)).unwrap(), ListingWrite::Inserted);
     assert_eq!(s.listing(&bank_rate()).unwrap().unwrap().listed_at, T3);
@@ -487,7 +489,7 @@ backends!(
     a_changed_listing_replaces_the_row_and_keeps_listed_at,
     a_bad_listing_is_refused_and_nothing_is_written,
     listings_of_a_host_are_by_name_and_counted,
-    a_deleted_listing_takes_its_entry_and_keeps_its_descriptor,
+    a_deleted_listing_takes_its_entry_and_its_unreferenced_descriptor,
     a_listing_is_not_a_binding,
     a_listed_host_row_is_written_once_per_change,
     a_bad_listed_host_is_refused,
