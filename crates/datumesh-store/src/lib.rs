@@ -1625,6 +1625,22 @@ pub trait Store: Resolver + sealed::Sealed {
         let _ = host;
         Err(Error::Unsupported("listings need a store of 0.7.0".into()))
     }
+    /// Sets (`Some(instant)`) or clears (`None`) the instant the listing of `name` was first not reached by a run that
+    /// read its host's catalogue (CONTRACT-http-listing, the re-review's N1: a name's own 7-day clock). Checked first: `since`
+    /// an instant ([`Error::Invalid`]). No listing of `name`: [`Error::NotFound`]. When the stored value equals `since`,
+    /// nothing is written and the answer is `Ok(false)`; otherwise it is written, `Ok(true)`. It touches no other column
+    /// (not `fetched_at`). A deleted listing takes it with it; a new listing of the name starts with none. The default is
+    /// [`Error::Unsupported`]. Since 0.7.2.
+    fn set_listing_unreached(&self, name: &str, since: Option<&str>) -> Result<bool> {
+        let _ = (name, since);
+        Err(Error::Unsupported("a listing's unreached clock needs a store of 0.7.2".into()))
+    }
+    /// The instant the listing of `name` was first not reached, if it is not reached now; `None` when it is, or when there
+    /// is no listing of `name`. The default is [`Error::Unsupported`]. Since 0.7.2.
+    fn listing_unreached(&self, name: &str) -> Result<Option<String>> {
+        let _ = name;
+        Err(Error::Unsupported("a listing's unreached clock needs a store of 0.7.2".into()))
+    }
 }
 
 /// The seal of [`Store`]: a public trait in a private module, so no other crate can name it,
