@@ -94,15 +94,17 @@ fn updated_at(db: &TestDb, name: &str) -> String {
 
 // ---- the migration -----------------------------------------------------------------------------------------------
 
+/// Migration 18 (SQLite 14), the listings, at its place; later releases add more after it (0.7.2 adds the per-name
+/// unreached clock, `store_072_listing_unreached.rs`, which states the latest).
 fn migration_18_and_14_are_the_last_and_named(b: Backend) {
     let ms = match b {
         Backend::Pg => migrate::MIGRATIONS,
         Backend::Sqlite => migrate::sqlite::MIGRATIONS,
     };
-    let last = ms.last().unwrap();
     let want = if b == Backend::Pg { (18, "0018_listings.sql") } else { (14, "0014_listings.sql") };
-    assert_eq!((last.version, last.name), want);
-    assert_eq!(ms.len() as u32, want.0);
+    let m = &ms[want.0 as usize - 1];
+    assert_eq!((m.version, m.name), want);
+    assert!(ms.len() as u32 >= want.0);
 }
 
 fn the_tables_have_the_contracts_columns(b: Backend) {
@@ -205,7 +207,15 @@ fn the_migration_changes_no_stored_row(b: Backend) {
         Backend::Pg => migrate::apply(&db.pg().bare_store()).unwrap(),
         Backend::Sqlite => migrate::sqlite::apply(&db.lite().store_with(datumesh_store::SqliteOptions::new())).unwrap(),
     };
-    assert_eq!(applied, vec![old.len() as u32 + 1], "exactly the listing migration");
+    assert_eq!(applied.first(), Some(&(old.len() as u32 + 1)), "the listing migration first (later ones follow)");
+    assert_eq!(
+        applied,
+        (old.len() as u32 + 1..=match b {
+            Backend::Pg => migrate::MIGRATIONS.len() as u32,
+            Backend::Sqlite => migrate::sqlite::MIGRATIONS.len() as u32,
+        })
+            .collect::<Vec<u32>>()
+    );
     assert_eq!(snapshot(&db), before, "no stored row changes");
 }
 
