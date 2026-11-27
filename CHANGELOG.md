@@ -2,6 +2,18 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.7.0
+
+Additive, with migrations 18 (PostgreSQL) and 14 (SQLite), which change no stored row (CONTRACT-http-listing L3). A store on an older schema writes as 0.6.5 did, until migrated; a store at 0.7.0 requires migration 18 / 14 before the listing calls.
+
+- **Listings.** A listing is a function of another mesh's namespace, kept as a description only: its name, function hash, descriptor bytes, the subjects (the four keys of a catalogue subject) its host's catalogue puts it in, its key id, label, description, and the instants it was fetched and first listed. A listing is not a binding: `name_bindings`, the namespace checks, `cells`, `receipts` and `versions` are never touched, and the name does not resolve here.
+- **New types.** `SubjectKeys` (domain, thing, measure, region; ordered in that order), `Listing`, `ListingWrite` (`Unchanged`, `Inserted`, `Changed`), `ListedHost` (the host, the day last seen, the instant first unreachable), and the constant `LISTING_SUBJECTS_MAX` (256).
+- **New `Store` methods** (defaulted to `Error::Unsupported`, both stores implement them): `put_listing`, `listing`, `listings_of`, `listing_count`, `delete_listing`, `put_listed_host`, `listed_host`, `listed_hosts`, `delete_listed_host`. `put_listing` checks the listing first (the host is a DNS name, the name is under it, the descriptor hashes to `fn_hash`, the subjects are 1 to 256, ascending and unique, the keys are names of at most 32 bytes, the instants are instants), and writes nothing unless the row changes in a field other than `fetched_at` and `listed_at`; a change keeps the stored `listed_at`.
+- **Catalogue.** `CatalogSource::Listed` (`listed`, with `signed_by` = the host) is the source of a listed name's catalogue entry, written with its listing and removed with it. Its facets are the subjects' distinct values, at most 8 per key. `catalog_entries.source` takes `listed`: PostgreSQL drops and re-adds its CHECK; SQLite rebuilds the table, keeping every row, id and `updated_at`.
+- **Tables.** `listings` (one row per name, no history; the descriptor is also in `descriptors`) and `listed_hosts` (one row per host; `last_seen` a day, `unreachable_since` an instant, both empty when unset). Migrations change no existing row.
+- **Behaviour.** `delete_listing` removes the name's row and its catalogue entry; `delete_listed_host` removes the host's row and every listing of the host. The descriptor stays in `descriptors` (content-addressed).
+- **Public API.** `CatalogSource` gains the variant `Listed`; `public-api.txt` shows the additions only.
+
 ## 0.6.5
 
 Additive, with migrations 16 and 17 (PostgreSQL) and 12 and 13 (SQLite). A store on an older schema writes as 0.6.4 did, until migrated; a store at 0.6.5 requires migration 17 / 13 before reads.
