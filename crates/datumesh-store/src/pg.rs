@@ -2708,6 +2708,39 @@ impl Store for PgStore {
         })
     }
 
+    fn set_listing_unreached(&self, name: &str, since: Option<&str>) -> Result<bool> {
+        if since.is_some_and(|s| !is_instant(s)) {
+            return Err(crate::catalogue::invalid("since", "an instant (YYYY-MM-DDThh:mm:ss.ffffffZ)"));
+        }
+        self.run("set_listing_unreached", |c| {
+            let mut t = c.client.transaction().db()?;
+            let stored: Option<Option<String>> = t
+                .query_opt("SELECT unreached_since FROM listings WHERE name = $1 FOR UPDATE", &[&name])
+                .db()?
+                .map(|r| r.try_get(0).db())
+                .transpose()?;
+            let Some(stored) = stored else {
+                return Err(Error::NotFound { what: "listing", key: name.to_string() });
+            };
+            if stored.as_deref() == since {
+                return Ok(false);
+            }
+            t.execute("UPDATE listings SET unreached_since = $2 WHERE name = $1", &[&name, &since]).db()?;
+            t.commit().db()?;
+            Ok(true)
+        })
+    }
+
+    fn listing_unreached(&self, name: &str) -> Result<Option<String>> {
+        self.run("listing_unreached", |c| {
+            let row = c.client.query_opt("SELECT unreached_since FROM listings WHERE name = $1", &[&name]).db()?;
+            Ok(match row {
+                Some(r) => r.try_get::<_, Option<String>>(0).db()?,
+                None => None,
+            })
+        })
+    }
+
     fn put_listed_host(&self, h: &ListedHost) -> Result<bool> {
         check_listed_host(h)?;
         self.run("put_listed_host", |c| {

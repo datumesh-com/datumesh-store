@@ -2706,6 +2706,39 @@ impl Store for SqliteStore {
         })
     }
 
+    fn set_listing_unreached(&self, name: &str, since: Option<&str>) -> Result<bool> {
+        if since.is_some_and(|s| !is_instant(s)) {
+            return Err(crate::catalogue::invalid("since", "an instant (YYYY-MM-DDThh:mm:ss.ffffffZ)"));
+        }
+        self.write("set_listing_unreached", |c| {
+            let stored: Option<Option<String>> = c
+                .query_row("SELECT unreached_since FROM listings WHERE name = ?1", [name], |r| r.get(0))
+                .optional()
+                .db()?;
+            let Some(stored) = stored else {
+                return Err(Error::NotFound { what: "listing", key: name.to_string() });
+            };
+            if stored.as_deref() == since {
+                return Ok(false);
+            }
+            c.prepare_cached("UPDATE listings SET unreached_since = ?2 WHERE name = ?1")
+                .db()?
+                .execute(rusqlite::params![name, since])
+                .db()?;
+            Ok(true)
+        })
+    }
+
+    fn listing_unreached(&self, name: &str) -> Result<Option<String>> {
+        self.run("listing_unreached", |c| {
+            let row: Option<Option<String>> = c
+                .query_row("SELECT unreached_since FROM listings WHERE name = ?1", [name], |r| r.get(0))
+                .optional()
+                .db()?;
+            Ok(row.flatten())
+        })
+    }
+
     fn put_listed_host(&self, h: &ListedHost) -> Result<bool> {
         check_listed_host(h)?;
         self.write("put_listed_host", |c| {

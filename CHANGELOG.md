@@ -2,6 +2,16 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.7.2
+
+Patch: the listing re-review's N1 (REVIEW-listing-060.md, "Re-review"; decided 27 Nov). Additive, with migrations 19 (PostgreSQL) and 15 (SQLite), which change no existing row. A store at 0.7.2 requires migration 19 / 15 before the clock calls; the listing calls of 0.7.0 are unchanged.
+
+- **A listed name's own clock.** `listings.unreached_since` (nullable, an instant) is the instant a listed name was first not reached by a run that read its host's catalogue. `NULL` while it is reached. The column is not part of `Listing`; `put_listing` leaves it alone (a changed listing keeps its clock, the run decides), and `delete_listing` takes it with the row.
+- **New `Store` methods** (defaulted to `Error::Unsupported`; both stores implement them):
+  - `set_listing_unreached(name, since: Option<&str>) -> Result<bool>` sets or clears the clock. `Error::NotFound` with no listing of `name`, `Error::Invalid` when `since` is not an instant. When the stored value already equals `since` nothing is written and the answer is `Ok(false)`; otherwise `Ok(true)`. No other column is touched (not `fetched_at`).
+  - `listing_unreached(name) -> Result<Option<String>>` returns the clock, `None` when it is reached or there is no listing.
+- **Public API.** Additions only: the two methods, in `public-api.txt`.
+
 ## 0.7.1
 
 Patch: the listing review round (REVIEW-listing-060.md, C3; decided 27 Nov). No API change.

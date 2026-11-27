@@ -87,6 +87,11 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration { version: 16, name: "0016_member_sets.sql", sql: include_str!("../migrations/0016_member_sets.sql") },
     Migration { version: 17, name: "0017_recorded.sql", sql: include_str!("../migrations/0017_recorded.sql") },
     Migration { version: 18, name: "0018_listings.sql", sql: include_str!("../migrations/0018_listings.sql") },
+    Migration {
+        version: 19,
+        name: "0019_listing_unreached.sql",
+        sql: include_str!("../migrations/0019_listing_unreached.sql"),
+    },
 ];
 
 const TRACKING: &str = "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (
@@ -322,6 +327,11 @@ pub mod sqlite {
             version: 14,
             name: "0014_listings.sql",
             sql: include_str!("../migrations/sqlite/0014_listings.sql"),
+        },
+        Migration {
+            version: 15,
+            name: "0015_listing_unreached.sql",
+            sql: include_str!("../migrations/sqlite/0015_listing_unreached.sql"),
         },
     ];
 
