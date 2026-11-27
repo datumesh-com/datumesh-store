@@ -13,6 +13,14 @@
 //!
 //! [`Store::put_listing`]: crate::Store::put_listing
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use datumesh_core::json::{self, Value};
+use datumesh_core::lexical::{check_date, check_dns_name, check_function_name, check_hex, check_instant, check_name};
+
+use crate::catalogue::{facets_json, invalid, Facets, FACET_MAX};
+use crate::error::Result;
+
 /// The most subjects one listing names (as the catalogue job keeps at most 256 subjects of one entry).
 pub const LISTING_SUBJECTS_MAX: usize = 256;
 
@@ -91,4 +99,117 @@ pub struct ListedHost {
     pub last_seen: Option<String>,
     /// The instant of the first failed run after the last success; `None` while reachable.
     pub unreachable_since: Option<String>,
+}
+
+// ---- Shared checks and forms (both backends) ----------------------------------------------------
+
+/// A listed name's bounds and forms (the checks [`Store::put_listing`](crate::Store::put_listing) lists).
+/// Nothing is written before all of them pass.
+pub(crate) fn check_listing(l: &Listing) -> Result<()> {
+    check_dns_name(&l.host, "host")?;
+    check_function_name(&l.name, "name")?;
+    if l.name.split_once('/').map(|(host, _)| host) != Some(l.host.as_str()) {
+        return Err(invalid("name", "a listed name is under its host"));
+    }
+    check_hex(&l.fn_hash, 64, "fn_hash")?;
+    let hash = datumesh_core::function_hash(&l.descriptor)?;
+    if hash != l.fn_hash {
+        return Err(invalid("descriptor", "the descriptor does not hash to fn_hash"));
+    }
+    if l.subjects.is_empty() || l.subjects.len() > LISTING_SUBJECTS_MAX {
+        return Err(invalid("subjects", "a listing has 1 to 256 subjects"));
+    }
+    for s in &l.subjects {
+        for key in [&s.domain, &s.thing, &s.measure, &s.region] {
+            check_name(key, "subjects")?;
+            if key.len() > 32 {
+                return Err(invalid("subjects", "a subject key has at most 32 bytes"));
+            }
+        }
+    }
+    if l.subjects.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(invalid("subjects", "the subjects are ascending and unique"));
+    }
+    if l.key_id.is_empty() || l.key_id.len() > 256 {
+        return Err(invalid("key_id", "a key id has 1 to 256 bytes"));
+    }
+    if l.label.len() > 120 {
+        return Err(invalid("label", "a label has at most 120 bytes"));
+    }
+    if l.description.is_empty() || l.description.len() > 1024 {
+        return Err(invalid("description", "a description has 1 to 1024 bytes"));
+    }
+    check_instant(&l.fetched_at, "fetched_at")?;
+    check_instant(&l.listed_at, "listed_at")?;
+    Ok(())
+}
+
+/// The checks of a listed host's row.
+pub(crate) fn check_listed_host(h: &ListedHost) -> Result<()> {
+    check_dns_name(&h.host, "host")?;
+    if let Some(day) = &h.last_seen {
+        check_date(day, "last_seen")?;
+    }
+    if let Some(at) = &h.unreachable_since {
+        check_instant(at, "unreachable_since")?;
+    }
+    Ok(())
+}
+
+/// Whether two listings are the same in every field but `fetched_at` and `listed_at`.
+pub(crate) fn same_listing(a: &Listing, b: &Listing) -> bool {
+    a.host == b.host
+        && a.name == b.name
+        && a.fn_hash == b.fn_hash
+        && a.subjects == b.subjects
+        && a.descriptor == b.descriptor
+        && a.key_id == b.key_id
+        && a.label == b.label
+        && a.description == b.description
+}
+
+/// The subjects as canonical JSON: an array of `[domain, thing, measure, region]`.
+pub(crate) fn subjects_json(subjects: &[SubjectKeys]) -> String {
+    let items = subjects
+        .iter()
+        .map(|s| {
+            let keys = [&s.domain, &s.thing, &s.measure, &s.region];
+            Value::Array(keys.iter().map(|k| Value::String(k.to_string())).collect())
+        })
+        .collect();
+    String::from_utf8(Value::Array(items).to_jcs()).unwrap_or_default()
+}
+
+/// The subjects from their stored JSON.
+pub(crate) fn parse_subjects(text: &str) -> Result<Vec<SubjectKeys>> {
+    let corrupt = || invalid("subjects", "a stored listing has bad subjects");
+    let Value::Array(items) = json::parse(text.as_bytes())? else { return Err(corrupt()) };
+    items
+        .iter()
+        .map(|item| {
+            let Value::Array(keys) = item else { return Err(corrupt()) };
+            let keys: Vec<&str> = keys.iter().map(|k| k.as_str().ok_or_else(corrupt)).collect::<Result<_>>()?;
+            match keys[..] {
+                [d, t, m, r] => Ok(SubjectKeys::new(d, t, m, r)),
+                _ => Err(corrupt()),
+            }
+        })
+        .collect()
+}
+
+/// The facets of a listing: each subject key's distinct values, ascending, at most 8 per key, as
+/// canonical JSON.
+pub(crate) fn listing_facets_json(subjects: &[SubjectKeys]) -> String {
+    let mut by_key: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for s in subjects {
+        for (key, value) in [("domain", &s.domain), ("thing", &s.thing), ("measure", &s.measure), ("region", &s.region)]
+        {
+            by_key.entry(key).or_default().insert(value.as_str());
+        }
+    }
+    let facets: Facets = by_key
+        .into_iter()
+        .map(|(k, values)| (k.to_string(), values.into_iter().take(FACET_MAX).map(str::to_string).collect()))
+        .collect();
+    facets_json(&facets)
 }

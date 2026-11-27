@@ -9,6 +9,9 @@ use crate::catalogue::{
     CatalogRow, Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
+use crate::listings::{
+    check_listed_host, check_listing, listing_facets_json, parse_subjects, same_listing, subjects_json,
+};
 use crate::pg_unstable::Connector;
 use crate::pool::{Conn, Pool, PoolOptions, Pooled};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
@@ -19,6 +22,7 @@ use crate::{
     Hit, KeyValue, MemberSet, Namespace, Parsed, PendingEmbedding, SliceMember, SliceValue, Store, Summary,
     SummaryEntry, TestSummary, Version, FIND_MISSES_CAP,
 };
+use crate::{ListedHost, Listing, ListingWrite};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
     json, keys_from_response, sha256_hex, verify, Cell, ClassDescriptor, ErrorCode, FunctionDescriptor, Keys, Manifest,
@@ -2585,6 +2589,194 @@ impl Store for PgStore {
             Ok(Summary { entries, dictionaries })
         })
     }
+
+    // ---- Listings (0.7.0; CONTRACT-http-listing L3) ----------------------------------------------
+
+    fn put_listing(&self, l: &Listing) -> Result<ListingWrite> {
+        check_listing(l)?;
+        let d = FunctionDescriptor::from_json(&l.descriptor)?;
+        let canonical = d.canonical();
+        let subjects = subjects_json(&l.subjects);
+        let facets = listing_facets_json(&l.subjects);
+        self.run("put_listing", |c| {
+            let descriptor_put = c.stmt(Q::DescriptorPut)?;
+            let inputs_put = c.stmt(Q::DescriptorInputsPut)?;
+            let mut t = c.client.transaction().db()?;
+            let stored = t
+                .query_opt(&format!("SELECT {LISTING_COLUMNS} FROM listings WHERE name = $1 FOR UPDATE"), &[&l.name])
+                .db()?
+                .map(|r| listing_from_pg(&r))
+                .transpose()?;
+            if stored.as_ref().is_some_and(|s| same_listing(s, l)) {
+                return Ok(ListingWrite::Unchanged);
+            }
+            // The descriptor (once) and its inputs, as put_descriptor writes them.
+            t.execute(&descriptor_put, &[&l.fn_hash, &canonical]).db()?;
+            if !d.inputs.is_empty() {
+                t.execute(&inputs_put, &[&l.fn_hash, &d.inputs]).db()?;
+            }
+            // The row: listed_at is kept by a change.
+            t.execute(
+                "INSERT INTO listings (name, host, fn_hash, subjects, descriptor, key_id, label, description, fetched_at, listed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (name) DO UPDATE SET host = EXCLUDED.host, fn_hash = EXCLUDED.fn_hash,
+                     subjects = EXCLUDED.subjects, descriptor = EXCLUDED.descriptor, key_id = EXCLUDED.key_id,
+                     label = EXCLUDED.label, description = EXCLUDED.description, fetched_at = EXCLUDED.fetched_at",
+                &[
+                    &l.name,
+                    &l.host,
+                    &l.fn_hash,
+                    &subjects,
+                    &l.descriptor,
+                    &l.key_id,
+                    &l.label,
+                    &l.description,
+                    &l.fetched_at,
+                    &l.listed_at,
+                ],
+            )
+            .db()?;
+            // The catalogue entry (source listed); an embedding is dropped when its text changes.
+            let before = t
+                .query_opt(
+                    "SELECT id, label, description FROM catalog_entries WHERE kind = 'function' AND name = $1",
+                    &[&l.name],
+                )
+                .db()?
+                .map(|r| -> Result<(i64, String, String)> {
+                    Ok((r.try_get(0).db()?, r.try_get(1).db()?, r.try_get(2).db()?))
+                })
+                .transpose()?;
+            t.execute(CATALOG_LISTED_UPSERT, &[&l.name, &l.fn_hash, &l.label, &l.description, &l.host, &facets]).db()?;
+            if let (true, Some((id, label, description))) = (self.vectors, &before) {
+                if crate::catalogue::entry_text(label, description) != crate::catalogue::entry_text(&l.label, &l.description)
+                {
+                    t.execute("DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id = $1", &[id]).db()?;
+                }
+            }
+            t.commit().db()?;
+            Ok(if stored.is_some() { ListingWrite::Changed } else { ListingWrite::Inserted })
+        })
+    }
+
+    fn listing(&self, name: &str) -> Result<Option<Listing>> {
+        self.run("listing", |c| {
+            let sql = format!("SELECT {LISTING_COLUMNS} FROM listings WHERE name = $1");
+            c.client.query_opt(&sql, &[&name]).db()?.map(|r| listing_from_pg(&r)).transpose()
+        })
+    }
+
+    fn listings_of(&self, host: &str) -> Result<Vec<Listing>> {
+        self.run("listings_of", |c| {
+            let sql = format!("SELECT {LISTING_COLUMNS} FROM listings WHERE host = $1 ORDER BY name");
+            c.client.query(&sql, &[&host]).db()?.iter().map(listing_from_pg).collect()
+        })
+    }
+
+    fn listing_count(&self) -> Result<u64> {
+        self.run("listing_count", |c| {
+            let n: i64 = c.client.query_one("SELECT count(*) FROM listings", &[]).db()?.try_get(0).db()?;
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+    }
+
+    fn delete_listing(&self, name: &str) -> Result<bool> {
+        self.run("delete_listing", |c| {
+            let mut t = c.client.transaction().db()?;
+            if self.vectors {
+                t.execute(
+                    "DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id IN (SELECT id FROM catalog_entries
+                     WHERE kind = 'function' AND source = 'listed' AND name = $1)",
+                    &[&name],
+                )
+                .db()?;
+            }
+            t.execute(
+                "DELETE FROM catalog_entries WHERE kind = 'function' AND source = 'listed' AND name = $1",
+                &[&name],
+            )
+            .db()?;
+            let removed = t.execute("DELETE FROM listings WHERE name = $1", &[&name]).db()?;
+            t.commit().db()?;
+            Ok(removed > 0)
+        })
+    }
+
+    fn put_listed_host(&self, h: &ListedHost) -> Result<bool> {
+        check_listed_host(h)?;
+        self.run("put_listed_host", |c| {
+            let mut t = c.client.transaction().db()?;
+            let stored = t
+                .query_opt(
+                    "SELECT host, last_seen, unreachable_since FROM listed_hosts WHERE host = $1 FOR UPDATE",
+                    &[&h.host],
+                )
+                .db()?
+                .map(|r| listed_host_pg(&r))
+                .transpose()?;
+            if stored.as_ref() == Some(h) {
+                return Ok(false);
+            }
+            t.execute(
+                "INSERT INTO listed_hosts (host, last_seen, unreachable_since) VALUES ($1, $2, $3)
+                 ON CONFLICT (host) DO UPDATE SET last_seen = EXCLUDED.last_seen,
+                     unreachable_since = EXCLUDED.unreachable_since",
+                &[&h.host, &h.last_seen, &h.unreachable_since],
+            )
+            .db()?;
+            t.commit().db()?;
+            Ok(true)
+        })
+    }
+
+    fn listed_host(&self, host: &str) -> Result<Option<ListedHost>> {
+        self.run("listed_host", |c| {
+            c.client
+                .query_opt("SELECT host, last_seen, unreachable_since FROM listed_hosts WHERE host = $1", &[&host])
+                .db()?
+                .map(|r| listed_host_pg(&r))
+                .transpose()
+        })
+    }
+
+    fn listed_hosts(&self) -> Result<Vec<ListedHost>> {
+        self.run("listed_hosts", |c| {
+            c.client
+                .query("SELECT host, last_seen, unreachable_since FROM listed_hosts ORDER BY host", &[])
+                .db()?
+                .iter()
+                .map(listed_host_pg)
+                .collect()
+        })
+    }
+
+    fn delete_listed_host(&self, host: &str) -> Result<bool> {
+        self.run("delete_listed_host", |c| {
+            let mut t = c.client.transaction().db()?;
+            let listed = "SELECT name FROM listings WHERE host = $1";
+            if self.vectors {
+                t.execute(
+                    &format!(
+                        "DELETE FROM embeddings WHERE ref_kind = 'entry' AND ref_id IN (SELECT id FROM catalog_entries
+                         WHERE kind = 'function' AND source = 'listed' AND name IN ({listed}))"
+                    ),
+                    &[&host],
+                )
+                .db()?;
+            }
+            t.execute(
+                &format!(
+                    "DELETE FROM catalog_entries WHERE kind = 'function' AND source = 'listed' AND name IN ({listed})"
+                ),
+                &[&host],
+            )
+            .db()?;
+            t.execute("DELETE FROM listings WHERE host = $1", &[&host]).db()?;
+            let gone = t.execute("DELETE FROM listed_hosts WHERE host = $1", &[&host]).db()?;
+            t.commit().db()?;
+            Ok(gone > 0)
+        })
+    }
 }
 
 impl PgStore {
@@ -3198,4 +3390,39 @@ fn ext_from_row(r: &postgres::Row) -> Result<CatalogEntryExt> {
         r.try_get(8).db()?,
     )?;
     entry_ext(entry, &r.try_get::<_, String>(9).db()?, r.try_get(10).db()?, r.try_get(11).db()?)
+}
+
+// ---- Listings (0.7.0) --------------------------------------------------------------------------
+
+/// The columns of a listing, in the order [`listing_from_pg`] reads them.
+const LISTING_COLUMNS: &str =
+    "name, host, fn_hash, subjects, descriptor, key_id, label, description, fetched_at, listed_at";
+
+/// The catalogue entry of a listed name: kind function, source listed, signed by the host; its
+/// arguments and examples are empty and it extends nothing.
+const CATALOG_LISTED_UPSERT: &str = "INSERT INTO catalog_entries
+    (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name, updated_at)
+    VALUES ('function', $1, $2, $3, $4, '{}', '[]', 'listed', $5, $6, NULL, NULL, now())
+    ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
+        description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
+        source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, facets = EXCLUDED.facets,
+        extends = NULL, source_name = NULL, updated_at = now()";
+
+fn listing_from_pg(r: &postgres::Row) -> Result<Listing> {
+    Ok(Listing {
+        name: r.try_get(0).db()?,
+        host: r.try_get(1).db()?,
+        fn_hash: r.try_get(2).db()?,
+        subjects: parse_subjects(&r.try_get::<_, String>(3).db()?)?,
+        descriptor: r.try_get(4).db()?,
+        key_id: r.try_get(5).db()?,
+        label: r.try_get(6).db()?,
+        description: r.try_get(7).db()?,
+        fetched_at: r.try_get(8).db()?,
+        listed_at: r.try_get(9).db()?,
+    })
+}
+
+fn listed_host_pg(r: &postgres::Row) -> Result<ListedHost> {
+    Ok(ListedHost { host: r.try_get(0).db()?, last_seen: r.try_get(1).db()?, unreachable_since: r.try_get(2).db()? })
 }

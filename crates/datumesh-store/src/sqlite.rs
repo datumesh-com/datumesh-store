@@ -14,6 +14,9 @@ use crate::catalogue::{
     Words, SUMMARY_VALUES,
 };
 use crate::error::{Db, Error, Result};
+use crate::listings::{
+    check_listed_host, check_listing, listing_facets_json, parse_subjects, same_listing, subjects_json,
+};
 use crate::slices::{check_entry, cmp_keys, is_hash, is_instant, version_slice, Constraint, Kind, Pattern};
 use crate::sqlite_sql::L;
 use crate::{
@@ -22,6 +25,7 @@ use crate::{
     MemberSet, Namespace, PendingEmbedding, SliceMember, SliceValue, Store, Summary, SummaryEntry, TestSummary,
     Version, FIND_MISSES_CAP, WITHDRAWN_VALUE,
 };
+use crate::{ListedHost, Listing, ListingWrite};
 use datumesh_core::json::{self, Value};
 use datumesh_core::lexical::{check_dns_name, check_function_name, check_hex, check_instant};
 use datumesh_core::{
@@ -2604,6 +2608,147 @@ impl Store for SqliteStore {
             Ok(Summary { entries, dictionaries })
         })
     }
+
+    // ---- Listings (0.7.0; CONTRACT-http-listing L3) ----------------------------------------------
+
+    fn put_listing(&self, l: &Listing) -> Result<ListingWrite> {
+        check_listing(l)?;
+        let d = FunctionDescriptor::from_json(&l.descriptor)?;
+        let canonical = d.canonical();
+        let subjects = subjects_json(&l.subjects);
+        let facets = listing_facets_json(&l.subjects);
+        self.write("put_listing", |c| {
+            let stored = select_listing(c, &l.name)?;
+            if stored.as_ref().is_some_and(|s| same_listing(s, l)) {
+                return Ok(ListingWrite::Unchanged);
+            }
+            // The descriptor (once) and its inputs, as put_descriptor writes them.
+            exec(c, L::DescriptorPut, rusqlite::params![l.fn_hash, canonical])?;
+            for input in &d.inputs {
+                exec(c, L::DescriptorInputPut, rusqlite::params![l.fn_hash, input])?;
+            }
+            // The row: listed_at is kept by a change.
+            c.prepare_cached(
+                "INSERT INTO listings (name, host, fn_hash, subjects, descriptor, key_id, label, description, fetched_at, listed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 ON CONFLICT (name) DO UPDATE SET host = excluded.host, fn_hash = excluded.fn_hash,
+                     subjects = excluded.subjects, descriptor = excluded.descriptor, key_id = excluded.key_id,
+                     label = excluded.label, description = excluded.description, fetched_at = excluded.fetched_at",
+            )
+            .db()?
+            .execute(rusqlite::params![
+                l.name,
+                l.host,
+                l.fn_hash,
+                subjects,
+                l.descriptor,
+                l.key_id,
+                l.label,
+                l.description,
+                l.fetched_at,
+                l.listed_at
+            ])
+            .db()?;
+            // The catalogue entry (source listed; SQLite keeps no embeddings).
+            c.prepare_cached(
+                "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name, updated_at)
+                 VALUES ('function', ?1, ?2, ?3, ?4, '{}', '[]', 'listed', ?5, ?6, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
+                     description = excluded.description, args = excluded.args, examples = excluded.examples,
+                     source = excluded.source, signed_by = excluded.signed_by, facets = excluded.facets,
+                     extends = NULL, source_name = NULL, updated_at = excluded.updated_at",
+            )
+            .db()?
+            .execute(rusqlite::params![l.name, l.fn_hash, l.label, l.description, l.host, facets])
+            .db()?;
+            Ok(if stored.is_some() { ListingWrite::Changed } else { ListingWrite::Inserted })
+        })
+    }
+
+    fn listing(&self, name: &str) -> Result<Option<Listing>> {
+        self.run("listing", |c| select_listing(c, name))
+    }
+
+    fn listings_of(&self, host: &str) -> Result<Vec<Listing>> {
+        self.run("listings_of", |c| {
+            let sql = format!("SELECT {LISTING_COLUMNS} FROM listings WHERE host = ?1 ORDER BY name");
+            let mut st = c.prepare_cached(&sql).db()?;
+            let mut rows = st.query([host]).db()?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().db()? {
+                out.push(listing_from_sqlite(r)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn listing_count(&self) -> Result<u64> {
+        self.run("listing_count", |c| {
+            let n: i64 = c.query_row("SELECT count(*) FROM listings", [], |r| r.get(0)).db()?;
+            Ok(u64::try_from(n).unwrap_or(0))
+        })
+    }
+
+    fn delete_listing(&self, name: &str) -> Result<bool> {
+        self.write("delete_listing", |c| {
+            c.prepare_cached("DELETE FROM catalog_entries WHERE kind = 'function' AND source = 'listed' AND name = ?1")
+                .db()?
+                .execute([name])
+                .db()?;
+            let removed = c.prepare_cached("DELETE FROM listings WHERE name = ?1").db()?.execute([name]).db()?;
+            Ok(removed > 0)
+        })
+    }
+
+    fn put_listed_host(&self, h: &ListedHost) -> Result<bool> {
+        check_listed_host(h)?;
+        self.write("put_listed_host", |c| {
+            if listed_host_row(c, &h.host)?.as_ref() == Some(h) {
+                return Ok(false);
+            }
+            c.prepare_cached(
+                "INSERT INTO listed_hosts (host, last_seen, unreachable_since) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (host) DO UPDATE SET last_seen = excluded.last_seen,
+                     unreachable_since = excluded.unreachable_since",
+            )
+            .db()?
+            .execute(rusqlite::params![h.host, h.last_seen, h.unreachable_since])
+            .db()?;
+            Ok(true)
+        })
+    }
+
+    fn listed_host(&self, host: &str) -> Result<Option<ListedHost>> {
+        self.run("listed_host", |c| listed_host_row(c, host))
+    }
+
+    fn listed_hosts(&self) -> Result<Vec<ListedHost>> {
+        self.run("listed_hosts", |c| {
+            let mut st =
+                c.prepare_cached("SELECT host, last_seen, unreachable_since FROM listed_hosts ORDER BY host").db()?;
+            let mut rows = st.query([]).db()?;
+            let mut out = Vec::new();
+            while let Some(r) = rows.next().db()? {
+                out.push(listed_host_sqlite(r)?);
+            }
+            Ok(out)
+        })
+    }
+
+    fn delete_listed_host(&self, host: &str) -> Result<bool> {
+        self.write("delete_listed_host", |c| {
+            c.prepare_cached(
+                "DELETE FROM catalog_entries WHERE kind = 'function' AND source = 'listed'
+                 AND name IN (SELECT name FROM listings WHERE host = ?1)",
+            )
+            .db()?
+            .execute([host])
+            .db()?;
+            c.prepare_cached("DELETE FROM listings WHERE host = ?1").db()?.execute([host]).db()?;
+            let gone = c.prepare_cached("DELETE FROM listed_hosts WHERE host = ?1").db()?.execute([host]).db()?;
+            Ok(gone > 0)
+        })
+    }
 }
 
 /// The columns of a value row: (tx, receipt_hash, asof, value_type, value, cell_id,
@@ -2987,6 +3132,52 @@ fn ext_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<CatalogEntryEx
     let extends: Option<String> = r.get(10)?;
     let source_name: Option<String> = r.get(11)?;
     Ok(entry.and_then(|entry| entry_ext(entry, &facets, extends, source_name)))
+}
+
+// ---- Listings (0.7.0) --------------------------------------------------------------------------
+
+/// The columns of a listing, in the order [`listing_from_sqlite`] reads them.
+const LISTING_COLUMNS: &str =
+    "name, host, fn_hash, subjects, descriptor, key_id, label, description, fetched_at, listed_at";
+
+fn listing_from_sqlite(r: &rusqlite::Row<'_>) -> Result<Listing> {
+    let subjects: String = r.get(3).db()?;
+    Ok(Listing {
+        name: r.get(0).db()?,
+        host: r.get(1).db()?,
+        fn_hash: r.get(2).db()?,
+        subjects: parse_subjects(&subjects)?,
+        descriptor: r.get(4).db()?,
+        key_id: r.get(5).db()?,
+        label: r.get(6).db()?,
+        description: r.get(7).db()?,
+        fetched_at: r.get(8).db()?,
+        listed_at: r.get(9).db()?,
+    })
+}
+
+fn select_listing(c: &Connection, name: &str) -> Result<Option<Listing>> {
+    let sql = format!("SELECT {LISTING_COLUMNS} FROM listings WHERE name = ?1");
+    let mut st = c.prepare_cached(&sql).db()?;
+    let mut rows = st.query([name]).db()?;
+    match rows.next().db()? {
+        Some(r) => listing_from_sqlite(r).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn listed_host_sqlite(r: &rusqlite::Row<'_>) -> Result<ListedHost> {
+    Ok(ListedHost { host: r.get(0).db()?, last_seen: r.get(1).db()?, unreachable_since: r.get(2).db()? })
+}
+
+fn listed_host_row(c: &Connection, host: &str) -> Result<Option<ListedHost>> {
+    let mut st =
+        c.prepare_cached("SELECT host, last_seen, unreachable_since FROM listed_hosts WHERE host = ?1").db()?;
+    let mut rows = st.query([host]).db()?;
+    match rows.next().db()? {
+        Some(r) => listed_host_sqlite(r).map(Some),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
