@@ -110,6 +110,7 @@ use datumesh_core::{Cell, Scalar, Slice};
 mod catalogue;
 mod error;
 mod functions;
+mod listings;
 pub mod migrate;
 mod pg;
 pub mod pg_unstable;
@@ -207,6 +208,7 @@ pub use catalogue::{
     FacetedEntry, Facets, Hit, KeyValue, PendingEmbedding, Summary, SummaryEntry, FIND_MISSES_CAP,
 };
 pub use error::{DatabaseError, Error, Result};
+pub use listings::{ListedHost, Listing, ListingWrite, SubjectKeys, LISTING_SUBJECTS_MAX};
 pub use pg::PgStore;
 pub use pool::PoolOptions;
 #[cfg(feature = "sqlite")]
@@ -1550,6 +1552,78 @@ pub trait Store: Resolver + sealed::Sealed {
             Some(v) => with_receipt(self, v).map(Some),
             None => Ok(None),
         }
+    }
+
+    // ---- Listings (0.7.0, CONTRACT-http-listing L3; see the `listings` module) -------------------
+
+    /// Writes the listing `l`, all or nothing. Checked first ([`Error::Invalid`]): `host` a DNS name;
+    /// `name` a function name whose first segment is `host`; `fn_hash` 64 lowercase hex digits and
+    /// the hash of `descriptor` as [`put_descriptor`](Store::put_descriptor) computes it (a
+    /// descriptor that does not parse, or hashes to another, is refused); `subjects` 1 to
+    /// [`LISTING_SUBJECTS_MAX`], ascending and unique, each key a name of at most 32 bytes;
+    /// `key_id` 1 to 256 bytes; `label` at most 120 bytes; `description` 1 to 1024 bytes;
+    /// `fetched_at` and `listed_at` instants.
+    ///
+    /// When the stored row of `name` equals `l` in every field but `fetched_at` and `listed_at`,
+    /// nothing is written ([`ListingWrite::Unchanged`]). Otherwise the row is inserted
+    /// ([`ListingWrite::Inserted`]) or replaced ([`ListingWrite::Changed`], keeping the stored
+    /// `listed_at`), and in the same transaction: the descriptor is put in `descriptors`; the
+    /// catalogue entry (kind function, `name`, hash `fn_hash`, `label`, `description`, no args, no
+    /// examples, source [`CatalogSource::Listed`], `signed_by` = `host`, facets = each subject
+    /// key's distinct values, ascending, at most 8 per key) is upserted, its embedding dropped when
+    /// its text changes (as [`upsert_catalog_ext`](Store::upsert_catalog_ext) does). Never touched:
+    /// `name_bindings`, the namespace checks, `cells`, `receipts`, `versions`. The default is
+    /// [`Error::Unsupported`]. Since 0.7.0.
+    fn put_listing(&self, l: &Listing) -> Result<ListingWrite> {
+        let _ = l;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// The listing of `name`, if there is one. The default is [`Error::Unsupported`]. Since 0.7.0.
+    fn listing(&self, name: &str) -> Result<Option<Listing>> {
+        let _ = name;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// The listings of `host`, by name in byte order. The default is [`Error::Unsupported`]. Since 0.7.0.
+    fn listings_of(&self, host: &str) -> Result<Vec<Listing>> {
+        let _ = host;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// The number of listings of every host. The default is [`Error::Unsupported`]. Since 0.7.0.
+    fn listing_count(&self) -> Result<u64> {
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// Removes the listing of `name` and its catalogue entry of source listed (with the entry's
+    /// embeddings), in one transaction; the descriptor stays in `descriptors`. `Ok(false)` when there
+    /// was none. The default is [`Error::Unsupported`]. Since 0.7.0.
+    fn delete_listing(&self, name: &str) -> Result<bool> {
+        let _ = name;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// Writes the row of a listed host. Checked first ([`Error::Invalid`]): `host` a DNS name,
+    /// `last_seen` a date, `unreachable_since` an instant. When the stored row equals `h`, nothing
+    /// is written and the answer is `Ok(false)`; otherwise it is inserted or replaced, `Ok(true)`.
+    /// The default is [`Error::Unsupported`]. Since 0.7.0.
+    fn put_listed_host(&self, h: &ListedHost) -> Result<bool> {
+        let _ = h;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// The row of the listed host `host`, if there is one. The default is [`Error::Unsupported`].
+    /// Since 0.7.0.
+    fn listed_host(&self, host: &str) -> Result<Option<ListedHost>> {
+        let _ = host;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// Every listed host's row, by host in byte order. The default is [`Error::Unsupported`].
+    /// Since 0.7.0.
+    fn listed_hosts(&self) -> Result<Vec<ListedHost>> {
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
+    }
+    /// Removes the row of `host` and every listing of `host` (as [`delete_listing`](Store::delete_listing)
+    /// does), in one transaction. `Ok(false)` when there was no host row. The default is
+    /// [`Error::Unsupported`]. Since 0.7.0.
+    fn delete_listed_host(&self, host: &str) -> Result<bool> {
+        let _ = host;
+        Err(Error::Unsupported("listings need a store of 0.7.0".into()))
     }
 }
 

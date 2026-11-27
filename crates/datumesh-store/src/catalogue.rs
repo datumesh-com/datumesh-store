@@ -71,14 +71,19 @@ pub enum CatalogSource {
     Publisher,
     /// The operator's text.
     Operator,
+    /// The text of a listed function (a name of another mesh, described here and not served here;
+    /// `signed_by` is that mesh's host). Written by [`Store::put_listing`](crate::Store::put_listing)
+    /// only. Since 0.7.0.
+    Listed,
 }
 
 impl CatalogSource {
-    /// `publisher` or `operator`.
+    /// `publisher`, `operator` or `listed`.
     pub fn as_str(self) -> &'static str {
         match self {
             CatalogSource::Publisher => "publisher",
             CatalogSource::Operator => "operator",
+            CatalogSource::Listed => "listed",
         }
     }
 
@@ -86,6 +91,7 @@ impl CatalogSource {
         Some(match s {
             "publisher" => CatalogSource::Publisher,
             "operator" => CatalogSource::Operator,
+            "listed" => CatalogSource::Listed,
             _ => return None,
         })
     }
