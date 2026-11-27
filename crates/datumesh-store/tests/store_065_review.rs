@@ -157,7 +157,9 @@ fn barrier_returns_at_once_with_no_writer_and_waits_for_one_in_flight(b: Backend
 
 fn concurrent_writers_to_one_cell_get_no_spurious_not_later(b: Backend) {
     // A ticking recording clock: each reading a microsecond later. Under the lock the writers record
-    // in the order they commit, so none is refused as not later than the one before.
+    // in the order they commit, so none is refused for its recorded time. A version signed not later
+    // than the cell's latest signed tx is refused (decided 27 Nov, user: backdating on the same cell is
+    // refused); that is the only refusal allowed, and the stored history ascends by signed tx.
     let db = TestDb::migrated(b);
     let tick = Arc::new(AtomicI64::new(0));
     let f: datumesh_store::RecordingClock = {
@@ -182,8 +184,12 @@ fn concurrent_writers_to_one_cell_get_no_spurious_not_later(b: Backend) {
                         let tx = format!("2024-01-{:02}T{:02}:{:02}:00.000000Z", 1 + (i % 28), t, i);
                         let r = slice_receipt(&c, &(t * 100 + i).to_string(), &tx, &tx);
                         let hash = s.put_receipt(&r).unwrap();
-                        if let Err(e) = s.put_version(&c.id(), &tx, &hash) {
-                            refused.push(format!("{e}"));
+                        match s.put_version(&c.id(), &tx, &hash) {
+                            Ok(()) => {}
+                            // Signed not later than the cell's latest signed tx: refused by the
+                            // backdating rule (decided 27 Nov, user), not spuriously.
+                            Err(Error::NotLater { given, latest, .. }) if given <= latest => {}
+                            Err(e) => refused.push(format!("{e}")),
                         }
                     }
                     refused
@@ -192,8 +198,12 @@ fn concurrent_writers_to_one_cell_get_no_spurious_not_later(b: Backend) {
             .collect();
         hs.into_iter().flat_map(|h| h.join().unwrap()).collect::<Vec<_>>()
     });
-    assert!(refused.is_empty(), "no writer refused: {refused:?}");
-    assert_eq!(db.int("SELECT count(*) FROM versions"), 200);
+    assert!(refused.is_empty(), "no writer refused but for backdating: {refused:?}");
+    let vs = s.versions(&c.id(), "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap();
+    assert!(!vs.is_empty());
+    let mut by_recorded = vs.clone();
+    by_recorded.sort_by(|a, b| a.recorded.cmp(&b.recorded));
+    assert!(by_recorded.windows(2).all(|w| w[0].tx < w[1].tx), "in recording order the signed times ascend");
 }
 
 // ---- Item 3: re-runs are no-ops ----------------------------------------------------------------
