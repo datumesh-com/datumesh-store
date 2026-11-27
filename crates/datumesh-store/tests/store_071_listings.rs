@@ -4,8 +4,8 @@
 //! * C3: a listing never overwrites (and so never later deletes) a catalogue entry of another source. `put_listing` over a
 //!   function entry of source `publisher` or `operator` of the same name is `Error::Invalid` ("a catalogue entry of another
 //!   source has this name"), and nothing is written: the entry stays byte for byte, no listing row, no descriptor row.
-//! * B4: when a listing drops (`delete_listing`, `delete_listed_host`), its descriptor is removed if nothing else
-//!   references it: no name binding, no other listing, no stored cell of that function hash.
+//! * B4 (revised 27 Nov): descriptors are append-only, so when a listing drops (`delete_listing`,
+//!   `delete_listed_host`) its descriptor stays, as every descriptor does; only the listing rows go.
 
 #[macro_use]
 mod common;
@@ -103,80 +103,28 @@ fn a_listing_still_replaces_its_own_entry(b: Backend) {
     assert_eq!((e.entry.source, e.entry.description.as_str()), (CatalogSource::Listed, "Another description."));
 }
 
-// ---- B4: descriptors of dropped listings -----------------------------------------------------------------------------------
+// ---- B4: descriptors of dropped listings stay (append-only) -----------------------------------------------------------------
 
-fn an_unreferenced_descriptor_goes_with_its_listing(b: Backend) {
-    let db = TestDb::migrated(b);
-    let s = db.bare_store();
-    let l = listing(&format!("{SRC}/bank_rate"), "a");
-    let before = db.count("descriptors");
-    s.put_listing(&l).unwrap();
-    assert_eq!(db.count("descriptors"), before + 1);
-    assert!(s.delete_listing(&l.name).unwrap());
-    assert!(s.descriptor(&l.fn_hash).is_none(), "removed: nothing references it");
-    assert_eq!(db.count("descriptors"), before);
-}
-
-fn a_descriptor_shared_by_another_listing_stays(b: Backend) {
-    let db = TestDb::migrated(b);
-    let s = db.bare_store();
-    let one = listing(&format!("{SRC}/bank_rate"), "same");
-    let two = listing(&format!("{SRC}/bank_rate_copy"), "same");
-    assert_eq!(one.fn_hash, two.fn_hash);
-    s.put_listing(&one).unwrap();
-    s.put_listing(&two).unwrap();
-    s.delete_listing(&one.name).unwrap();
-    assert!(s.descriptor(&one.fn_hash).is_some(), "the other listing uses it");
-    s.delete_listing(&two.name).unwrap();
-    assert!(s.descriptor(&one.fn_hash).is_none(), "now nothing does");
-}
-
-fn a_descriptor_bound_here_stays(b: Backend) {
-    let db = TestDb::migrated(b);
-    let s = db.bare_store();
-    let l = listing(&format!("{SRC}/bank_rate"), "bound");
-    let h = s.put_descriptor(&l.descriptor).unwrap();
-    assert_eq!(h, l.fn_hash);
-    s.bind_name(&format!("{SLICE_HOST}/local"), &h, VALIDATED_AT).unwrap();
-    s.put_listing(&l).unwrap();
-    s.delete_listing(&l.name).unwrap();
-    assert!(s.descriptor(&h).is_some(), "a binding uses it");
-}
-
-fn a_descriptor_with_stored_cells_stays(b: Backend) {
-    let db = TestDb::migrated(b);
-    let s = db.bare_store();
-    s.put_namespace(SLICE_HOST, &slice_keydoc(), VALIDATED_AT).unwrap();
-    let d = stored_descriptor(&[("k", Type::Number)], "cells");
-    let h = s.put_descriptor(&d).unwrap();
-    put_member(&s, &slice_cell("f", &h, &[("k", sc(Type::Number, "1"))]), "1", T1, T1);
-    let mut l = listing(&format!("{SRC}/bank_rate"), "x");
-    l.descriptor = d;
-    l.fn_hash = h.clone();
-    s.put_listing(&l).unwrap();
-    s.delete_listing(&l.name).unwrap();
-    assert!(s.descriptor(&h).is_some(), "a stored cell of the function uses it");
-}
-
-fn deleting_a_listed_host_removes_its_unreferenced_descriptors(b: Backend) {
+fn a_dropped_listings_descriptor_stays(b: Backend) {
     let db = TestDb::migrated(b);
     let s = db.bare_store();
     s.put_listed_host(&ListedHost { host: SRC.into(), last_seen: Some("2026-11-16".into()), unreachable_since: None })
         .unwrap();
-    let a = listing(&format!("{SRC}/a_rate"), "a");
-    let bb = listing(&format!("{SRC}/b_rate"), "b");
-    s.put_listing(&a).unwrap();
-    s.put_listing(&bb).unwrap();
+    let one = listing(&format!("{SRC}/a_rate"), "a");
+    let two = listing(&format!("{SRC}/b_rate"), "b");
+    s.put_listing(&one).unwrap();
+    s.put_listing(&two).unwrap();
+    let before = db.count("descriptors");
+    assert!(s.delete_listing(&one.name).unwrap());
+    assert!(s.descriptor(&one.fn_hash).is_some(), "a descriptor is never removed");
     assert!(s.delete_listed_host(SRC).unwrap());
-    assert!(s.descriptor(&a.fn_hash).is_none() && s.descriptor(&bb.fn_hash).is_none());
+    assert!(s.descriptor(&two.fn_hash).is_some(), "nor by dropping its host");
+    assert_eq!(db.count("descriptors"), before);
+    assert_eq!(db.count("listings"), 0, "the listing rows go");
 }
 
 backends!(
     a_listing_never_overwrites_another_sources_entry,
     a_listing_still_replaces_its_own_entry,
-    an_unreferenced_descriptor_goes_with_its_listing,
-    a_descriptor_shared_by_another_listing_stays,
-    a_descriptor_bound_here_stays,
-    a_descriptor_with_stored_cells_stays,
-    deleting_a_listed_host_removes_its_unreferenced_descriptors,
+    a_dropped_listings_descriptor_stays,
 );
