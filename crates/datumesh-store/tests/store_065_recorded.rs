@@ -102,15 +102,17 @@ fn ids(vs: &[datumesh_store::SliceValue]) -> Vec<String> {
 
 // ---- G9: the column and the migration --------------------------------------------------------
 
+/// Migration 17 (SQLite 13) is the recorded-time migration, at its place; later releases add more after it (0.7.0 adds
+/// the listings, `store_070_listings.rs`).
 fn migration_17_and_13_are_the_last_and_named(b: Backend) {
     let ms = match b {
         Backend::Pg => migrate::MIGRATIONS,
         Backend::Sqlite => migrate::sqlite::MIGRATIONS,
     };
-    let last = ms.last().unwrap();
     let want = if b == Backend::Pg { (17, "0017_recorded.sql") } else { (13, "0013_recorded.sql") };
-    assert_eq!((last.version, last.name), want);
-    assert_eq!(ms.len() as u32, want.0);
+    let m = &ms[want.0 as usize - 1];
+    assert_eq!((m.version, m.name), want);
+    assert!(ms.len() as u32 >= want.0);
 }
 
 fn without_a_clock_recorded_is_the_signed_tx(b: Backend) {
