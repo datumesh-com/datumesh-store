@@ -83,11 +83,13 @@ fn untouched(db: &TestDb) -> Vec<i64> {
 }
 
 fn updated_at(db: &TestDb, name: &str) -> String {
-    db.texts(&format!("SELECT CAST(updated_at AS TEXT) FROM catalog_entries WHERE kind = 'function' AND name = '{name}'"))
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("no catalogue entry for {name}"))
-        .remove(0)
+    db.texts(&format!(
+        "SELECT CAST(updated_at AS TEXT) FROM catalog_entries WHERE kind = 'function' AND name = '{name}'"
+    ))
+    .into_iter()
+    .next()
+    .unwrap_or_else(|| panic!("no catalogue entry for {name}"))
+    .remove(0)
 }
 
 // ---- the migration -----------------------------------------------------------------------------------------------
@@ -106,16 +108,29 @@ fn migration_18_and_14_are_the_last_and_named(b: Backend) {
 fn the_tables_have_the_contracts_columns(b: Backend) {
     let db = TestDb::migrated(b);
     let cols = |t: &str| -> Vec<String> {
-        let sql = db.pick(
-            &format!("SELECT column_name::text FROM information_schema.columns WHERE table_name = '{t}' ORDER BY 1"),
-            &format!("SELECT name FROM pragma_table_info('{t}') ORDER BY 1"),
-        )
-        .to_string();
+        let sql = db
+            .pick(
+                &format!(
+                    "SELECT column_name::text FROM information_schema.columns WHERE table_name = '{t}' ORDER BY 1"
+                ),
+                &format!("SELECT name FROM pragma_table_info('{t}') ORDER BY 1"),
+            )
+            .to_string();
         db.texts(&sql).into_iter().map(|mut r| r.remove(0)).collect()
     };
     let listings = cols("listings");
-    for c in ["host", "name", "fn_hash", "subjects", "descriptor", "key_id", "fetched_at", "listed_at", "label", "description"]
-    {
+    for c in [
+        "host",
+        "name",
+        "fn_hash",
+        "subjects",
+        "descriptor",
+        "key_id",
+        "fetched_at",
+        "listed_at",
+        "label",
+        "description",
+    ] {
         assert!(listings.contains(&c.to_string()), "listings has {c}: {listings:?}");
     }
     let hosts = cols("listed_hosts");
@@ -326,7 +341,8 @@ fn a_bad_listing_is_refused_and_nothing_is_written(b: Backend) {
     dup.subjects = vec![gb(), gb()];
     invalid(s.put_listing(&dup), "a subject twice");
     let mut many = good.clone();
-    many.subjects = (0..=LISTING_SUBJECTS_MAX).map(|i| SubjectKeys::new("finance", "rate", "m", &format!("r{i:04}"))).collect();
+    many.subjects =
+        (0..=LISTING_SUBJECTS_MAX).map(|i| SubjectKeys::new("finance", "rate", "m", &format!("r{i:04}"))).collect();
     invalid(s.put_listing(&many), "more than 256 subjects");
     let mut bad_key = good.clone();
     bad_key.subjects = vec![SubjectKeys::new("Finance Rates", "rate", "interest_rate", "gb")];
@@ -347,7 +363,8 @@ fn a_bad_listing_is_refused_and_nothing_is_written(b: Backend) {
     assert_eq!(db.count("catalog_entries"), 0);
     // exactly 256 subjects is accepted
     let mut max = good.clone();
-    max.subjects = (0..LISTING_SUBJECTS_MAX).map(|i| SubjectKeys::new("finance", "rate", "m", &format!("r{i:04}"))).collect();
+    max.subjects =
+        (0..LISTING_SUBJECTS_MAX).map(|i| SubjectKeys::new("finance", "rate", "m", &format!("r{i:04}"))).collect();
     assert_eq!(s.put_listing(&max).unwrap(), ListingWrite::Inserted);
 }
 
@@ -427,7 +444,10 @@ fn a_bad_listed_host_is_refused(b: Backend) {
     for (h, what) in [
         (ListedHost { host: "Not A Host".into(), last_seen: None, unreachable_since: None }, "host"),
         (ListedHost { host: SRC.into(), last_seen: Some("16 Nov".into()), unreachable_since: None }, "last_seen a day"),
-        (ListedHost { host: SRC.into(), last_seen: Some(T1.into()), unreachable_since: None }, "last_seen a day, not an instant"),
+        (
+            ListedHost { host: SRC.into(), last_seen: Some(T1.into()), unreachable_since: None },
+            "last_seen a day, not an instant",
+        ),
         (ListedHost { host: SRC.into(), last_seen: None, unreachable_since: Some("2026-11-16".into()) }, "an instant"),
     ] {
         match s.put_listed_host(&h) {
