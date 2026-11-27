@@ -2650,17 +2650,23 @@ impl Store for SqliteStore {
             ])
             .db()?;
             // The catalogue entry (source listed; SQLite keeps no embeddings).
-            c.prepare_cached(
+            let written = c
+                .prepare_cached(
                 "INSERT INTO catalog_entries (kind, name, hash, label, description, args, examples, source, signed_by, facets, extends, source_name, updated_at)
                  VALUES ('function', ?1, ?2, ?3, ?4, '{}', '[]', 'listed', ?5, ?6, NULL, NULL, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
                  ON CONFLICT (kind, name) DO UPDATE SET hash = excluded.hash, label = excluded.label,
                      description = excluded.description, args = excluded.args, examples = excluded.examples,
                      source = excluded.source, signed_by = excluded.signed_by, facets = excluded.facets,
-                     extends = NULL, source_name = NULL, updated_at = excluded.updated_at",
+                     extends = NULL, source_name = NULL, updated_at = excluded.updated_at
+                     WHERE catalog_entries.source = 'listed'",
             )
             .db()?
             .execute(rusqlite::params![l.name, l.fn_hash, l.label, l.description, l.host, facets])
             .db()?;
+            if written == 0 {
+                // Another source's entry has this name (decided 27 Nov, C3): nothing is written.
+                return Err(crate::catalogue::invalid("name", "a catalogue entry of another source has this name"));
+            }
             Ok(if stored.is_some() { ListingWrite::Changed } else { ListingWrite::Inserted })
         })
     }

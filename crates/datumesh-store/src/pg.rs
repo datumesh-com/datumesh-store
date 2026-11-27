@@ -2647,7 +2647,13 @@ impl Store for PgStore {
                     Ok((r.try_get(0).db()?, r.try_get(1).db()?, r.try_get(2).db()?))
                 })
                 .transpose()?;
-            t.execute(CATALOG_LISTED_UPSERT, &[&l.name, &l.fn_hash, &l.label, &l.description, &l.host, &facets]).db()?;
+            let written =
+                t.execute(CATALOG_LISTED_UPSERT, &[&l.name, &l.fn_hash, &l.label, &l.description, &l.host, &facets]).db()?;
+            if written == 0 {
+                // Another source's entry has this name (decided 27 Nov, C3): nothing is written; the
+                // transaction is dropped and rolled back.
+                return Err(crate::catalogue::invalid("name", "a catalogue entry of another source has this name"));
+            }
             if let (true, Some((id, label, description))) = (self.vectors, &before) {
                 if crate::catalogue::entry_text(label, description) != crate::catalogue::entry_text(&l.label, &l.description)
                 {
@@ -3406,7 +3412,8 @@ const CATALOG_LISTED_UPSERT: &str = "INSERT INTO catalog_entries
     ON CONFLICT (kind, name) DO UPDATE SET hash = EXCLUDED.hash, label = EXCLUDED.label,
         description = EXCLUDED.description, args = EXCLUDED.args, examples = EXCLUDED.examples,
         source = EXCLUDED.source, signed_by = EXCLUDED.signed_by, facets = EXCLUDED.facets,
-        extends = NULL, source_name = NULL, updated_at = now()";
+        extends = NULL, source_name = NULL, updated_at = now()
+    WHERE catalog_entries.source = 'listed'";
 
 fn listing_from_pg(r: &postgres::Row) -> Result<Listing> {
     Ok(Listing {

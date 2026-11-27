@@ -2,6 +2,16 @@
 
 All notable changes to `datumesh-store` and `datumesh-store-cli`.
 
+## 0.7.1
+
+Patch: the listing review round (REVIEW-listing-060.md, C3; decided 27 Nov). No API change.
+
+- **A listing never takes another source's entry.** `put_listing` over a catalogue entry of source `publisher` or
+  `operator` with the same name returns `Error::Invalid` ("a catalogue entry of another source has this name") and
+  writes nothing: the entry, the listing rows and the descriptors are as they were. A listing still replaces its own
+  entry. So `delete_listing` can no longer remove another source's entry.
+- **Descriptors stay append-only.** A dropped listing's descriptor stays in `descriptors`, as every descriptor does.
+
 ## 0.7.0
 
 Additive, with migrations 18 (PostgreSQL) and 14 (SQLite), which change no stored row (CONTRACT-http-listing L3). A store on an older schema writes as 0.6.5 did, until migrated; a store at 0.7.0 requires migration 18 / 14 before the listing calls.
