@@ -119,9 +119,13 @@ fn pg_the_barrier_leaks_no_session_lock() {
     for _ in 0..3 {
         s.barrier().unwrap();
     }
-    // No advisory lock on the key is left behind by the store's sessions.
-    let held =
-        db.int(&format!("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = {}", LOCK_KEY as u32));
+    // No advisory lock on the key is left behind by the store's sessions: those connected to this
+    // test's own database (other tests running in parallel hold their own locks on the same key).
+    let held = db.int(&format!(
+        "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid \
+         WHERE l.locktype = 'advisory' AND l.objid = {} AND a.datname = current_database()",
+        LOCK_KEY as u32
+    ));
     assert_eq!(held, 0, "the barrier is released at the end of its statement");
     // A writer on another connection takes the lock at once.
     let mut c = db.pg().client();
