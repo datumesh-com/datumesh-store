@@ -211,9 +211,11 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
     };
     assert_eq!(last as usize, n_all);
-    assert_eq!(n_all, if b == Backend::Pg { 17 } else { 13 }, "migrations 1..=17 (SQLite 1..=13)");
-    // The counters are migration 12 (SQLite 8); the facets migration 13 (9), the withdrawals 14 (10), the sort keys 15 (11), the member sets 16 (12) and the recorded time 17 (13) follow them.
-    let n_all = n_all - 5;
+    // The counters are migration 12 (SQLite 8), at its place; later migrations follow it (facets, withdrawals, sort keys,
+    // member sets, recorded time, listings, ...).
+    let counters = if b == Backend::Pg { 12 } else { 8 };
+    assert!(n_all >= counters);
+    let n_all = counters;
     migrate_to(&db, b, n_all - 1);
     assert!(text_of(&db, db.pick(
         "SELECT table_name::text FROM information_schema.tables WHERE table_schema = current_schema() AND table_name IN ('cell_counts', 'function_test_counts')",
@@ -265,8 +267,8 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
     };
     assert_eq!(
         applied,
-        [n_all as u32, n_all as u32 + 1, n_all as u32 + 2, n_all as u32 + 3, n_all as u32 + 4, n_all as u32 + 5],
-        "only migrations 12, 13 (the facets), 14, 15, 16 and 17 are applied (SQLite 8 to 13)"
+        (n_all as u32..=migrations_len(b)).collect::<Vec<u32>>(),
+        "every migration from the counters on: 12, 13 (the facets), 14, 15, 16, 17 and later (SQLite 8 on)"
     );
 
     // cell_counts is filled from `cells`, once.
@@ -311,6 +313,13 @@ fn the_migration_fills_both_counters_from_rows_that_exist(b: Backend) {
     assert_eq!(s.cell_count(SLICE_HOST, "f", &h).unwrap(), 6);
 }
 
+fn migrations_len(b: Backend) -> u32 {
+    match b {
+        Backend::Pg => migrate::MIGRATIONS.len() as u32,
+        Backend::Sqlite => migrate::sqlite::MIGRATIONS.len() as u32,
+    }
+}
+
 fn a_fresh_store_has_the_counter_tables_empty(b: Backend) {
     let db = TestDb::migrated(b);
     assert_eq!(db.count("cell_counts"), 0);
@@ -319,8 +328,7 @@ fn a_fresh_store_has_the_counter_tables_empty(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.last().unwrap(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap(),
     };
-    assert_eq!(last.version, if b == Backend::Pg { 17 } else { 13 });
-    assert_eq!(db.count("datumesh_schema_migrations"), last.version as i64);
+    assert_eq!(db.count("datumesh_schema_migrations"), last.version as i64, "every migration is applied");
 }
 
 // ---- SP2 ----------------------------------------------------------------------------------

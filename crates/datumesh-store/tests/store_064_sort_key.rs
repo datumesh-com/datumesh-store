@@ -462,9 +462,9 @@ fn the_migration_fills_sort_keys_on_existing_rows(b: Backend) {
     drop(s);
 
     assert_eq!(
-        apply_rest(&db, b),
+        apply_rest(&db, b)[..3],
         [last, last + 1, last + 2],
-        "the sort keys, then the member sets and the recorded time"
+        "the sort keys, then the member sets and the recorded time; later ones follow"
     );
     assert_eq!(db.int("SELECT count(*) FROM cells WHERE sort_key IS NULL"), 0, "every existing row is filled");
     assert_eq!(db.count("cells"), 10);
@@ -496,7 +496,10 @@ fn migration_15_and_11_are_the_last_and_make_the_indexes(b: Backend) {
         Backend::Pg => migrate::MIGRATIONS.len(),
         Backend::Sqlite => migrate::sqlite::MIGRATIONS.len(),
     };
-    assert_eq!(n, if b == Backend::Pg { 17 } else { 13 }, "0.6.5 adds 16 and 17: PostgreSQL 17, SQLite 13");
+    let (v, name) = if b == Backend::Pg { (15, "0015_sort_key.sql") } else { (11, "0011_sort_key.sql") };
+    let ms = if b == Backend::Pg { migrate::MIGRATIONS } else { migrate::sqlite::MIGRATIONS };
+    assert_eq!((ms[v - 1].version as usize, ms[v - 1].name), (v, name), "the sort-key migration at its place");
+    assert!(n >= v, "later releases add more after it");
     let db = TestDb::migrated(b);
     let squash = |s: String| s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
     // S1: the index (fn_hash, ns, fn, sort_key) on cells.

@@ -329,7 +329,11 @@ fn the_migrations_are_registered(b: Backend) {
         Backend::Sqlite => (9, "0009_catalogue_facets.sql"),
     };
     let m = &ms[v as usize - 1];
-    assert_eq!((ms.len() as u32, m.version, m.name), (v + 4, v, n)); // withdrawals (14/10), sort keys (15/11), member sets (16/12), recorded (17/13) follow
+    assert_eq!((m.version, m.name), (v, n));
+    assert!(
+        ms.len() as u32 >= v + 4,
+        "withdrawals (14/10), sort keys (15/11), member sets (16/12), recorded (17/13) follow, and later ones"
+    );
     let db = TestDb::migrated(b);
     let c = columns(&db);
     assert!(c.contains(&"facets".to_string()) && c.contains(&"extends".to_string()), "{c:?}");
@@ -341,10 +345,9 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
         Backend::Pg => (migrate::MIGRATIONS[..11].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..7].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(
-        all,
-        old.len() + 6,
-        "six migrations more than 0.5.2 on each backend (0.5.3's counters, facets, withdrawals, sort keys, member sets, recorded)"
+    assert!(
+        all >= old.len() + 6,
+        "at least six migrations more than 0.5.2 on each backend (0.5.3's counters, facets, withdrawals, sort keys, member sets, recorded; later releases add more)"
     );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
@@ -375,8 +378,8 @@ fn a_database_at_0_5_2_gets_the_defaults(b: Backend) {
     };
     assert_eq!(
         applied,
-        ((all as u32 - 5)..=all as u32).collect::<Vec<u32>>(),
-        "only the counters, the facets, the withdrawals, the sort-key, the member-set and the recorded migrations are applied"
+        ((old.len() as u32 + 1)..=all as u32).collect::<Vec<u32>>(),
+        "every migration after the old ones: counters, the facets, the withdrawals, the sort-key, the member-set and the recorded and any later"
     );
     assert_eq!(db.count("catalog_entries"), 2, "old rows kept");
     assert_eq!(db.int("SELECT count(*) FROM catalog_entries WHERE facets = '{}' AND extends IS NULL"), 2);

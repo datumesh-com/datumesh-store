@@ -402,7 +402,11 @@ fn a_0_6_4_store_with_a_manifest_migrates_untouched(b: Backend) {
     assert_eq!((before_manifests.len(), before_members.len()), (1, 3));
     drop(s);
 
-    assert_eq!(apply_rest(&db, b), [new, new + 1], "the member sets, then the recorded time (G9)");
+    assert_eq!(
+        apply_rest(&db, b)[..2],
+        [new, new + 1],
+        "the member sets, then the recorded time (G9); later ones follow"
+    );
 
     // G7: nothing stored changes.
     assert_eq!(

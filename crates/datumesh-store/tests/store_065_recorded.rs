@@ -292,7 +292,11 @@ fn migration_17_gives_existing_rows_recorded_equal_to_tx(b: Backend) {
         "SELECT hash, hex(bytes) FROM receipts ORDER BY hash",
     ));
     drop(s);
-    assert_eq!(apply_rest(&db, b), [new], "only the recorded-time migration is applied");
+    assert_eq!(
+        apply_rest(&db, b).first(),
+        Some(&new),
+        "the recorded-time migration is applied first (later ones follow)"
+    );
     assert_eq!(db.int("SELECT count(*) FROM versions WHERE recorded = tx"), 3, "existing rows: recorded = tx");
     assert_eq!(
         db.texts(db.pick(

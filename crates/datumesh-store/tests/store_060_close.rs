@@ -197,12 +197,15 @@ fn the_audit_records_the_close(b: Backend) {
     assert_eq!(db.count("class_bindings"), db.int("SELECT count(written_at) FROM class_bindings"));
 }
 
+/// The withdrawals migration is 14 (SQLite 10), at its place; later releases add more after it.
 fn the_latest_migrations_are_14_and_10(b: Backend) {
-    let last = match b {
-        Backend::Pg => migrate::MIGRATIONS.last().unwrap().version,
-        Backend::Sqlite => migrate::sqlite::MIGRATIONS.last().unwrap().version,
+    let (ms, (v, name)) = match b {
+        Backend::Pg => (migrate::MIGRATIONS, (14, "0014_withdrawals_and_closed_names.sql")),
+        Backend::Sqlite => (migrate::sqlite::MIGRATIONS, (10, "0010_withdrawals_and_closed_names.sql")),
     };
-    assert_eq!(last, if b == Backend::Pg { 17 } else { 13 });
+    let m = &ms[v as usize - 1];
+    assert_eq!((m.version, m.name), (v, name));
+    assert!(ms.len() as u32 >= v);
 }
 
 backends!(

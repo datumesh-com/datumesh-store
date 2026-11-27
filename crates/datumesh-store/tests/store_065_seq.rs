@@ -182,7 +182,7 @@ fn migration_17_numbers_existing_rows_in_insertion_order(b: Backend) {
         put_member(&s, &cell(&h, k, 1), "1", tx, tx);
     }
     drop(s);
-    assert_eq!(apply_rest(&db, b), [new]);
+    assert_eq!(apply_rest(&db, b).first(), Some(&new));
     let s = db.store();
     let seqs: Vec<i64> = [(1, T3), (2, T1), (1, "2024-01-04T00:00:00.000000Z"), (3, T2)]
         .iter()

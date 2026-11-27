@@ -31,10 +31,9 @@ fn a_store_of_0_5_1_keeps_its_function_tests_unnamed(b: Backend) {
         Backend::Pg => (migrate::MIGRATIONS[..10].iter().collect(), migrate::MIGRATIONS.len()),
         Backend::Sqlite => (migrate::sqlite::MIGRATIONS[..6].iter().collect(), migrate::sqlite::MIGRATIONS.len()),
     };
-    assert_eq!(
-        all,
-        old.len() + 7,
-        "seven migrations more than 0.5.1 on each backend (0.5.2, 0.5.3, facets, withdrawals, sort keys, member sets, recorded)"
+    assert!(
+        all >= old.len() + 7,
+        "at least seven migrations more than 0.5.1 on each backend (0.5.2, 0.5.3, facets, withdrawals, sort keys, member sets, recorded; later releases add more)"
     );
     db.exec(db.pick(
         "CREATE TABLE IF NOT EXISTS datumesh_schema_migrations (version integer PRIMARY KEY, name text NOT NULL, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
@@ -75,8 +74,8 @@ fn a_store_of_0_5_1_keeps_its_function_tests_unnamed(b: Backend) {
     };
     assert_eq!(
         applied,
-        ((all as u32 - 6)..=all as u32).collect::<Vec<u32>>(),
-        "only the 0.5.2, 0.5.3, facets, withdrawals, sort-key, member-set and recorded migrations are applied"
+        ((old.len() as u32 + 1)..=all as u32).collect::<Vec<u32>>(),
+        "every migration after the old ones: 0.5.2, 0.5.3, facets, withdrawals, sort-key, member-set and recorded and any later"
     );
 
     // The column, the table; every old row has a NULL name and reads back unchanged.
