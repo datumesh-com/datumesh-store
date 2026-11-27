@@ -4,9 +4,9 @@
 //! environment variable), started together; the parent then checks what they did.
 //!
 //! * Versions of one cell, appended through `put_version` with interleaved tx values from
-//!   every thread of every process: since the B5 follow-up (27 Nov) every one is stored, none
-//!   refused for its time, with recorded times strictly increasing in insertion order, and
-//!   nothing fails (no `SQLITE_BUSY` reaches a caller: the busy timeout waits).
+//!   every thread of every process: every success is later than everything committed
+//!   before it (the insertion order, `rowid`, is tx order), every failure is `NotLater`,
+//!   and nothing else fails (no `SQLITE_BUSY` reaches a caller: the busy timeout waits).
 //! * The same for name bindings (`bind_name`), and for raw SQL inserts into `versions` of
 //!   another cell from a thread of each process (the triggers alone decide).
 //! * Computed versions: per key, exactly one of the rival receipts wins, everywhere; the
@@ -241,24 +241,6 @@ fn processes_and_threads_keep_the_append_only_guarantees() {
             .collect();
         let not_later = lines.iter().filter(|l| l.split(' ').nth(1) == Some("notlater")).count();
         assert_eq!(ok.len() + not_later, attempts, "{what}");
-        if what == "version" {
-            // Since the B5 follow-up (decided 27 Nov) the store records max(signed tx, clock, the
-            // cell's latest recorded + 1 µs): a new version is never refused for its time. Every
-            // attempt (each its own tx) is stored, in any tx order, with recorded times that strictly
-            // increase in insertion order.
-            assert_eq!(not_later, 0, "version: none refused for its time");
-            let mut sorted = history.clone();
-            sorted.sort();
-            ok.sort();
-            assert_eq!(sorted, ok, "version: the history is exactly the successes");
-            let recorded: Vec<String> = {
-                let c = db.conn();
-                let mut st = c.prepare("SELECT recorded FROM versions WHERE cell_id = ?1 ORDER BY rowid").unwrap();
-                st.query_map([cell.as_str()], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect()
-            };
-            assert!(recorded.windows(2).all(|w| w[0] < w[1]), "version: recorded strictly increases: {recorded:?}");
-            continue;
-        }
         // Inserted in tx order: each success was later than everything before it.
         assert!(history.windows(2).all(|w| w[0] < w[1]), "{what}: not in tx order: {history:?}");
         ok.sort();
@@ -268,9 +250,7 @@ fn processes_and_threads_keep_the_append_only_guarantees() {
     }
     // The store's own reads agree.
     let versions = s.versions(&cell, "0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z").unwrap();
-    let mut inserted = insertion_order(&db, &cell);
-    inserted.sort();
-    assert_eq!(versions.into_iter().map(|v| v.tx).collect::<Vec<_>>(), inserted);
+    assert_eq!(versions.into_iter().map(|v| v.tx).collect::<Vec<_>>(), insertion_order(&db, &cell));
 
     // Computed versions: one winner per round, the others conflicts.
     for r in 0..ROUNDS {

@@ -27,10 +27,9 @@
 //! recorded time and its receipt's asof are at or before A): `stored_asof`, `version_asof`,
 //! `slice_members`, `slice_values`, `versions_between` (its `[from, to]` range stays on the signed
 //! tx, which a verifier checks, SPEC 15.13; only what answers as of A is by `recorded`),
-//! `slice_changed_after`. The backdating rule of `put_version` (today: `tx` must be later than the
-//! cell's latest version's, `Error::NotLater`, lib.rs `put_version`) is enforced on `recorded`: a
-//! version signed earlier than the latest is accepted when it is recorded later, and refused when it
-//! is not recorded later.
+//! `slice_changed_after`. The backdating rule of `put_version` stays on the signed tx (decided 27 Nov,
+//! user: a version signed not later than the cell's latest signed tx is NotLater); `recorded` only
+//! orders and strictly increases per cell.
 //!
 //! Migrations: PostgreSQL 17 (`0017_recorded.sql`), SQLite 13 (`0013_recorded.sql`), additive;
 //! existing rows get recorded = tx. The slice definitions' table is `slice_definitions` (`slice_id`,
@@ -214,27 +213,42 @@ fn as_of_reads_select_by_recorded(b: Backend) {
 }
 
 fn the_backdating_rule_is_enforced_on_recorded(b: Backend) {
+    // Decided 27 Nov (user), "backdating on the same cell is refused": a version of an existing cell
+    // signed not later than that cell's latest signed tx is NotLater, as before the patch, whatever its
+    // recorded time (a replayed old receipt cannot roll the cell back). A version signed later is
+    // accepted, and on a frozen clock recorded 1 µs after the latest (recorded strictly increases).
     let db = TestDb::migrated(b);
     let clock = Clock::at(T2);
     let s = rec_store(&db, &clock);
     let h = function(&s);
     let c = kcell(&h, 1);
     put_member(&s, &c, "10", T2, T2);
-    // A correction signed earlier (T1) than the latest version (T2), recorded later (T4): accepted.
+    // A correction signed earlier (T1) than the latest (T2), recorded later (T4): refused, nothing changes.
     clock.set(T4);
     let corr = s.put_receipt(&slice_receipt(&c, "11", T1, T1)).unwrap();
-    s.put_version(&c.id(), T1, &corr).expect("recorded later than the latest version: accepted");
+    match s.put_version(&c.id(), T1, &corr) {
+        Err(datumesh_store::Error::NotLater { given, latest, .. }) => {
+            assert_eq!((given.as_str(), latest.as_str()), (T1, T2))
+        }
+        other => panic!("signed before the latest: {other:?}"),
+    }
     let latest = s.latest(&c.id()).unwrap().unwrap();
-    assert_eq!((latest.receipt_hash.as_str(), latest.tx.as_str(), latest.recorded.as_str()), (corr.as_str(), T1, T4));
-    assert_eq!(s.stored_asof(&c.id(), T3).unwrap().unwrap().tx, T2, "as of T3 the first version answers");
-    assert_eq!(s.stored_asof(&c.id(), T5).unwrap().unwrap().receipt_hash, corr);
-    // The clock has not moved: since the B5 follow-up (decided 27 Nov) the recorded time strictly
-    // increases per cell, max(signed tx, clock, the cell's latest recorded + 1 µs), so a new version is
-    // never refused for its time: recorded 1 µs after the latest.
-    let again = s.put_receipt(&slice_receipt(&c, "12", T3, T3)).unwrap();
-    s.put_version(&c.id(), T3, &again).expect("a new version on a clock that has not moved is accepted");
-    assert_eq!(s.latest(&c.id()).unwrap().unwrap().recorded, "2024-01-04T00:00:00.000001Z");
-    assert_eq!(s.versions(&c.id(), T1, END).unwrap().len(), 3);
+    assert_eq!((latest.tx.as_str(), latest.recorded.as_str()), (T2, T2), "the cell is unchanged");
+    // Signed later (T3) on a clock frozen at T2's recording: accepted, recorded 1 µs after the latest.
+    clock.set(T2);
+    let later = s.put_receipt(&slice_receipt(&c, "12", T3, T3)).unwrap();
+    s.put_version(&c.id(), T3, &later).expect("signed later: accepted");
+    let latest = s.latest(&c.id()).unwrap().unwrap();
+    assert_eq!((latest.receipt_hash.as_str(), latest.tx.as_str()), (later.as_str(), T3));
+    assert_eq!(latest.recorded, T3, "max(signed tx T3, clock T2, latest recorded T2 + 1 µs)");
+    // Frozen at T5 now: two later-signed versions are recorded T5 and T5 + 1 µs.
+    clock.set(T5);
+    for (v, tx) in [("13", "2024-01-03T12:00:00.000000Z"), ("14", T4)] {
+        let r = s.put_receipt(&slice_receipt(&c, v, tx, tx)).unwrap();
+        s.put_version(&c.id(), tx, &r).unwrap();
+    }
+    let recorded: Vec<String> = s.versions(&c.id(), T1, END).unwrap().iter().map(|v| v.recorded.clone()).collect();
+    assert_eq!(recorded, [T2.to_string(), T3.to_string(), T5.to_string(), "2024-01-05T00:00:00.000001Z".to_string()]);
 }
 
 fn two_versions_in_one_batch_on_a_frozen_clock_are_recorded_one_microsecond_apart(b: Backend) {
